@@ -21,6 +21,7 @@ These guides help you **ask the right questions before coding**.
 
 | Guide | Purpose | When to Use |
 |-------|---------|-------------|
+| [Autobugfix Task Start Checklist](./autobugfix-task-start-checklist.md) | Restate project purpose, loop/harness meaning, state ownership, and real validation before new work | Before any Autobugfix task |
 | [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
 | [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
 
@@ -38,6 +39,16 @@ These guides help you **ask the right questions before coding**.
 - [ ] UI / command code starts casting raw payload fields directly
 
 → Read [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md)
+
+### Before Any Autobugfix Task
+
+- [ ] Restate Autobugfix as a loop-engineering and harness-engineering control
+      system.
+- [ ] Restate execution, memory, eval, and operator loop purposes.
+- [ ] Identify the affected loop and state owner.
+- [ ] Name the real validation command path.
+
+→ Read [Autobugfix Task Start Checklist](./autobugfix-task-start-checklist.md)
 
 ### When to Think About Code Reuse
 
