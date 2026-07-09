@@ -1,0 +1,30 @@
+task_root: .autobugfix/tasks
+scheduler:
+  default_max_concurrent: 1
+  lock_timeout_seconds: 7200
+  max_auto_iterations: 2
+  codex_timeout_seconds: 1800
+  writer_timeout_seconds: null
+  evaluator_timeout_seconds: null
+codex:
+  writer_model: null
+  evaluator_model: null
+  controller_model: null
+  role_runtime:
+    enabled: true
+    runtime_root: .autobugfix/runtime/codex-sdk
+    bridge_auth: true
+    skill_guard: true
+    strict_skill_guard: true
+repos:
+  target_repo:
+    main_checkout: ../target-repo
+    remote: origin
+    main_branch: main
+    branch_template: fix/{date}_oncall_{slug}
+    test_commands:
+      targeted: uv run pytest --no-cov {target}
+      full: uv run pytest
+    ppe:
+      enabled: false
+      command_template: null
