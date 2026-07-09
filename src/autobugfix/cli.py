@@ -25,6 +25,19 @@ from autobugfix.worker import start_worker, stop_worker, worker_status
 from autobugfix.memory_worker import start_worker as start_memory_worker
 from autobugfix.memory_worker import stop_worker as stop_memory_worker
 from autobugfix.memory_worker import worker_status as memory_worker_status
+from autobugfix.operator.metrics import compare_baseline, parse_metric, record_baseline
+from autobugfix.operator.models import (
+    VALID_CONFIDENCE,
+    VALID_LAYERS,
+    VALID_REVIEW_DECISIONS,
+    VALID_REVIEW_KINDS,
+    VALID_RISKS,
+    OperatorRequest,
+    OperatorReview,
+    OperatorTriage,
+)
+from autobugfix.operator.store import OperatorStore
+from autobugfix.operator.validator import validate_operator_request
 
 
 def _stdin_or_file(args: argparse.Namespace) -> str:
@@ -294,6 +307,77 @@ def command_codex(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_operator(args: argparse.Namespace) -> int:
+    root = Path.cwd()
+    store = OperatorStore(root)
+    action = args.operator_action
+    if action == "triage":
+        triage_id = args.triage_id or store.next_id("triage")
+        triage = OperatorTriage(
+            triage_id=triage_id,
+            summary=args.summary,
+            suspected_layers=args.suspected_layer,
+            confidence=args.confidence,
+            evidence=args.evidence or [],
+            next_actions=args.next_action or [],
+        )
+        path = store.write_triage(triage)
+        _print_yaml({"triage_id": triage_id, "path": str(path)})
+    elif action == "request":
+        request_id = args.request_id or store.next_id("request")
+        request = OperatorRequest(
+            request_id=request_id,
+            summary=args.summary,
+            primary_layer=args.primary_layer,
+            secondary_layers=args.secondary_layer or [],
+            risk=args.risk,
+            triage_id=args.triage_id,
+            evidence=args.evidence or [],
+            validation_commands=args.validation_command or [],
+            performance_baseline=args.performance_baseline,
+        )
+        path = store.write_request(request)
+        _print_yaml({"request_id": request_id, "path": str(path)})
+    elif action == "review":
+        review = OperatorReview(
+            request_id=args.request_id,
+            reviewer=args.reviewer,
+            reviewer_kind=args.kind,
+            decision=args.decision,
+            reason=args.reason,
+            approved_paths=args.approved_path or [],
+            required_validation=args.required_validation or [],
+        )
+        path = store.write_review(review)
+        _print_yaml({"request_id": args.request_id, "path": str(path), "decision": args.decision})
+    elif action in {"validate", "preflight"}:
+        report = validate_operator_request(
+            root,
+            args.request_id,
+            base_ref=args.base_ref,
+            run_validation_commands=args.run_validation_commands,
+            validation_timeout_seconds=args.validation_timeout_seconds,
+            record=not args.no_record,
+        )
+        _print_yaml(report)
+        return 0 if report["policy"]["allowed"] else 1
+    elif action == "baseline":
+        if args.baseline_action == "record":
+            path = record_baseline(root, args.name, parse_metric(args.metric or []), notes=args.notes or "")
+            print(path)
+        elif args.baseline_action == "compare":
+            report = compare_baseline(
+                root,
+                args.name,
+                parse_metric(args.metric or []),
+                max_regression_percent=parse_metric(args.max_regression_percent or []),
+                min_metrics=parse_metric(args.min_metric or []),
+            )
+            _print_yaml(report)
+            return 0 if report["ok"] else 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="autobugfix")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -447,6 +531,58 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--role", required=True, choices=["writer", "evaluator", "controller", "memory_maintainer", "eval_judge"])
     probe.add_argument("--repo")
     probe.set_defaults(func=command_codex)
+
+    operator = sub.add_parser("operator")
+    operator_sub = operator.add_subparsers(dest="operator_action", required=True)
+    triage = operator_sub.add_parser("triage")
+    triage.add_argument("--triage-id")
+    triage.add_argument("--summary", required=True)
+    triage.add_argument("--suspected-layer", action="append", choices=VALID_LAYERS, required=True)
+    triage.add_argument("--confidence", choices=VALID_CONFIDENCE, default="low")
+    triage.add_argument("--evidence", action="append")
+    triage.add_argument("--next-action", action="append")
+    triage.set_defaults(func=command_operator)
+    request = operator_sub.add_parser("request")
+    request.add_argument("--request-id")
+    request.add_argument("--summary", required=True)
+    request.add_argument("--primary-layer", choices=VALID_LAYERS, required=True)
+    request.add_argument("--secondary-layer", action="append", choices=VALID_LAYERS)
+    request.add_argument("--risk", choices=VALID_RISKS, default="low")
+    request.add_argument("--triage-id")
+    request.add_argument("--evidence", action="append")
+    request.add_argument("--validation-command", action="append")
+    request.add_argument("--performance-baseline")
+    request.set_defaults(func=command_operator)
+    review = operator_sub.add_parser("review")
+    review.add_argument("request_id")
+    review.add_argument("--reviewer", required=True)
+    review.add_argument("--kind", choices=VALID_REVIEW_KINDS, required=True)
+    review.add_argument("--decision", choices=VALID_REVIEW_DECISIONS, required=True)
+    review.add_argument("--reason", required=True)
+    review.add_argument("--approved-path", action="append")
+    review.add_argument("--required-validation", action="append")
+    review.set_defaults(func=command_operator)
+    for name in ("validate", "preflight"):
+        validate = operator_sub.add_parser(name)
+        validate.add_argument("--request-id", required=True)
+        validate.add_argument("--base-ref", default="HEAD")
+        validate.add_argument("--run-validation-commands", action="store_true")
+        validate.add_argument("--validation-timeout-seconds", type=int)
+        validate.add_argument("--no-record", action="store_true")
+        validate.set_defaults(func=command_operator)
+    baseline = operator_sub.add_parser("baseline")
+    baseline_sub = baseline.add_subparsers(dest="baseline_action", required=True)
+    baseline_record = baseline_sub.add_parser("record")
+    baseline_record.add_argument("--name", required=True)
+    baseline_record.add_argument("--metric", action="append", help="Numeric metric as key=value")
+    baseline_record.add_argument("--notes")
+    baseline_record.set_defaults(func=command_operator)
+    baseline_compare = baseline_sub.add_parser("compare")
+    baseline_compare.add_argument("--name", required=True)
+    baseline_compare.add_argument("--metric", action="append", help="Current numeric metric as key=value")
+    baseline_compare.add_argument("--max-regression-percent", action="append", help="Maximum allowed increase as key=value")
+    baseline_compare.add_argument("--min-metric", action="append", help="Minimum allowed value as key=value")
+    baseline_compare.set_defaults(func=command_operator)
     return parser
 
 

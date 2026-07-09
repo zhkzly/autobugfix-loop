@@ -1,0 +1,115 @@
+version: 1
+
+protected_branches:
+  - main
+  - master
+
+layers:
+  execution:
+    description: "Task state, worktrees, writer/verifier/evaluator execution, gates, workers, projections."
+    paths:
+      - src/autobugfix/service.py
+      - src/autobugfix/task_store.py
+      - src/autobugfix/runner.py
+      - src/autobugfix/worktree.py
+      - src/autobugfix/verifier.py
+      - src/autobugfix/evaluator.py
+      - src/autobugfix/scheduler.py
+      - src/autobugfix/worker.py
+      - src/autobugfix/ppe.py
+      - src/autobugfix/projection.py
+      - src/autobugfix/events.py
+      - .agents/role-skills/execution/**
+  memory:
+    description: "Execution evidence collection, digests, proposal patches, active memory, approved skills."
+    paths:
+      - src/autobugfix/memory/**
+      - src/autobugfix/memory_worker.py
+      - src/autobugfix/memory_gradio_app.py
+      - .agents/role-skills/memory/**
+      - .autobugfix-memory/active/**
+      - .autobugfix-memory/skills/**
+  eval:
+    description: "Dataset adapters, isolated execution harnesses, scorers, diagnosis, eval supervision."
+    paths:
+      - src/autobugfix/dataset.py
+      - src/autobugfix/eval/**
+      - .agents/role-skills/eval/**
+  operator:
+    description: "Operator governance, operator skills, operator records, supervision policy."
+    paths:
+      - src/autobugfix/operator/**
+      - .agents/skills/autobugfix-eval-operator/**
+      - .agents/skills/oncall-bugfix/**
+      - scripts/validate_operator_policy.py
+  shared_runtime:
+    description: "Configuration, Codex runtime, shared role resolution, CLI/controller/UI adapters."
+    paths:
+      - src/autobugfix/config.py
+      - src/autobugfix/role_config.py
+      - src/autobugfix/codex_backend.py
+      - src/autobugfix/codex_runtime.py
+      - src/autobugfix/codex_sdk.py
+      - src/autobugfix/codex_sdk_worker.py
+      - src/autobugfix/cli.py
+      - src/autobugfix/controller.py
+      - src/autobugfix/gradio_app.py
+      - pyproject.toml
+  docs_skills:
+    description: "Project documentation, Trellis specs, rebuild docs, public README and skill contracts."
+    paths:
+      - README.md
+      - AGENTS.md
+      - docs/**
+      - .trellis/spec/**
+      - .agents/skills/**
+      - .agents/role-skills/**
+
+common_paths:
+  - tests/**
+  - scripts/README.md
+  - .gitignore
+
+architecture_change:
+  requires_human: true
+  protected_paths:
+    - src/autobugfix/operator/constitution.yaml
+    - .trellis/spec/backend/autobugfix-loop-harness-contract.md
+    - .trellis/spec/guides/autobugfix-task-start-checklist.md
+    - src/autobugfix/models.py
+    - src/autobugfix/task_store.py
+    - src/autobugfix/service.py
+    - src/autobugfix/memory/store.py
+    - src/autobugfix/memory/service.py
+    - src/autobugfix/eval/scorers.py
+    - src/autobugfix/codex_runtime.py
+    - src/autobugfix/codex_sdk.py
+
+review_policy:
+  cross_layer_requires_review: true
+  medium_risk_requires_review: true
+  high_risk_requires_human: true
+  architecture_requires_human: true
+
+static_invariants:
+  required_gitignore:
+    - .autobugfix/
+    - .autobugfix-evals/
+    - .autobugfix-experiments/
+  role_defaults:
+    writer:
+      sandbox: workspace-write
+      approval_mode: auto_review
+    evaluator:
+      sandbox: read-only
+      approval_mode: deny_all
+    eval_judge:
+      sandbox: read-only
+      approval_mode: deny_all
+  eval_forbidden_calls:
+    - apply_gate(
+    - deploy_ppe(
+    - archive(
+    - approve-ppe
+  production_service_requires:
+    - CodexSDKBackend

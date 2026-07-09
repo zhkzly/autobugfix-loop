@@ -117,5 +117,70 @@ uv run autobugfix dataset build-raw --repo target_repo --out raw.jsonl
 uv run autobugfix eval run --dataset problem_prompts.jsonl --out .autobugfix-evals/runs
 ```
 
+## Operator Governance
+
+Operator changes are guarded by an Autobugfix-specific permission gate. The
+operator must diagnose first, declare the affected layer scope, obtain review
+or human approval when required, and validate the patch against the machine
+constitution.
+
+```bash
+uv run autobugfix operator triage \
+  --summary "eval harness did not preserve generated diff" \
+  --suspected-layer eval \
+  --confidence medium \
+  --evidence .autobugfix-evals/run/case/report.yaml
+
+uv run autobugfix operator request \
+  --request-id op-eval-diff \
+  --summary "fix eval artifact capture" \
+  --primary-layer eval \
+  --risk low \
+  --validation-command "uv run pytest -q tests/test_eval.py"
+
+uv run autobugfix operator preflight --request-id op-eval-diff
+uv run autobugfix operator validate --request-id op-eval-diff --run-validation-commands
+```
+
+Cross-layer or medium-risk requests require an approved review. High-risk or
+constitution-level changes require human approval:
+
+```bash
+uv run autobugfix operator review op-eval-config \
+  --reviewer scope-reviewer \
+  --kind agent \
+  --decision approve \
+  --reason "eval runner consumes isolated config generation"
+
+uv run autobugfix operator review op-architecture \
+  --reviewer human-owner \
+  --kind human \
+  --decision approve \
+  --reason "explicit architecture approval"
+```
+
+The same policy can run as a script:
+
+```bash
+uv run python scripts/validate_operator_policy.py --request-id op-eval-diff
+```
+
+Regression baselines can be recorded and compared to prevent operator changes
+from making the loop worse:
+
+```bash
+uv run autobugfix operator baseline record \
+  --name toy-e2e \
+  --metric pass_rate=1 \
+  --metric runtime_seconds=12
+
+uv run autobugfix operator baseline compare \
+  --name toy-e2e \
+  --metric pass_rate=1 \
+  --metric runtime_seconds=14 \
+  --min-metric pass_rate=1 \
+  --max-regression-percent runtime_seconds=25
+```
+
 Runtime state under `.autobugfix/`, generated memory evidence, eval runs, and
 UI screenshots are gitignored.
