@@ -7,6 +7,7 @@ from autobugfix.codex_runtime import build_codex_request
 from autobugfix.evaluator import parse_evaluator_decision
 from autobugfix.models import AutobugfixConfig, RepoProfile, TaskRecord, utc_now
 from autobugfix.prompts import evaluator_prompt, writer_prompt
+from autobugfix.role_config import resolve_role
 from autobugfix.task_store import TaskStore
 from autobugfix.verifier import run_verifier, write_test_result
 from autobugfix.worktree import diff_for_task
@@ -36,17 +37,19 @@ class TaskRunner:
         context = self.store.read_text_tree(task_id, "context")
         feedback = self.store.read_text_tree(task_id, "feedback")
 
-        writer_timeout = self.config.scheduler.writer_timeout_seconds or self.config.scheduler.codex_timeout_seconds
+        writer_role = resolve_role(self.config, "writer", repo_id=task.repo_id)
         writer_request = build_codex_request(
             self.config.project_root,
             "writer",
             writer_prompt(task.body or task.title, context, feedback),
             worktree,
-            "workspace-write",
-            self.config.codex.writer_model,
-            writer_timeout,
-            task_dir / "logs" / f"writer-{task.iterations}.raw.jsonl",
-            task_dir / "logs" / f"writer-{task.iterations}.stderr.log",
+            None,
+            None,
+            None,
+            self._path_from_template(task_dir, writer_role.raw_log_template, task, "writer"),
+            self._path_from_template(task_dir, writer_role.stderr_log_template, task, "writer"),
+            repo_id=task.repo_id,
+            resolved_role=writer_role,
         )
         writer_result = self.backend.run(writer_request)
         (task_dir / "runs" / f"writer-{task.iterations}.md").write_text(writer_result.text, encoding="utf-8")
@@ -71,17 +74,19 @@ class TaskRunner:
             return task
 
         self._save_state(task, "evaluating", "")
-        evaluator_timeout = self.config.scheduler.evaluator_timeout_seconds or self.config.scheduler.codex_timeout_seconds
+        evaluator_role = resolve_role(self.config, "evaluator", repo_id=task.repo_id)
         evaluator_request = build_codex_request(
             self.config.project_root,
             "evaluator",
             evaluator_prompt(task.body or task.title, diff_text, (task_dir / "artifacts" / "test-result.md").read_text(encoding="utf-8")),
             worktree,
-            "read-only",
-            self.config.codex.evaluator_model,
-            evaluator_timeout,
-            task_dir / "logs" / f"evaluator-{task.iterations}.raw.jsonl",
-            task_dir / "logs" / f"evaluator-{task.iterations}.stderr.log",
+            None,
+            None,
+            None,
+            self._path_from_template(task_dir, evaluator_role.raw_log_template, task, "evaluator"),
+            self._path_from_template(task_dir, evaluator_role.stderr_log_template, task, "evaluator"),
+            repo_id=task.repo_id,
+            resolved_role=evaluator_role,
         )
         evaluator_result = self.backend.run(evaluator_request)
         (task_dir / "runs" / f"evaluator-{task.iterations}.md").write_text(evaluator_result.text, encoding="utf-8")
@@ -95,6 +100,13 @@ class TaskRunner:
         else:
             self._save_state(task, "writer_rework_required", decision.reason or "evaluator requested changes")
         return task
+
+    def _path_from_template(self, task_dir: Path, template: str, task: TaskRecord, role: str) -> Path:
+        value = template.format(role=role, iteration=task.iterations, task_id=task.task_id, repo_id=task.repo_id)
+        path = Path(value)
+        if not path.is_absolute():
+            path = task_dir / path
+        return path
 
     def _save_state(self, task: TaskRecord, state: str, block_reason: str) -> None:
         old = task.state

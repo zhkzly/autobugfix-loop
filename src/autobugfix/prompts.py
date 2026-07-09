@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Iterable, Mapping
 
 
-ROLE_SKILL_PATHS = {
+DEFAULT_ROLE_SKILL_PATHS = {
     "writer": [
         ".agents/role-skills/base/autobugfix-runtime-base/SKILL.md",
         ".agents/role-skills/execution/writer/autobugfix-writer/SKILL.md",
@@ -22,33 +23,68 @@ ROLE_SKILL_PATHS = {
     ],
 }
 
+ROLE_SKILL_PATHS = DEFAULT_ROLE_SKILL_PATHS
+
 
 class PromptError(RuntimeError):
     pass
 
 
-def load_role_instructions(project_root: Path, role: str, strict: bool = True) -> str:
-    paths = ROLE_SKILL_PATHS.get(role)
+def _display_path(project_root: Path, path: Path | str) -> str:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return candidate.as_posix()
+    try:
+        return candidate.resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return str(candidate)
+
+
+def _resolve_paths(project_root: Path, paths: Iterable[Path | str]) -> list[Path]:
+    resolved = []
+    for value in paths:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = project_root / path
+        resolved.append(path.resolve())
+    return resolved
+
+
+def load_role_instructions(
+    project_root: Path,
+    role: str,
+    strict: bool = True,
+    skill_paths: Iterable[Path | str] | None = None,
+) -> str:
+    paths = list(skill_paths) if skill_paths is not None else ROLE_SKILL_PATHS.get(role)
     if not paths:
         raise PromptError(f"unknown role: {role}")
     parts: list[str] = []
-    for rel in paths:
-        path = project_root / rel
+    for path in _resolve_paths(project_root, paths):
         if not path.exists():
             if strict:
-                raise PromptError(f"missing role skill for {role}: {rel}")
+                raise PromptError(f"missing role skill for {role}: {_display_path(project_root, path)}")
             continue
         parts.append(path.read_text(encoding="utf-8"))
     return "\n\n".join(parts)
 
 
-def assert_skill_guard(project_root: Path, role: str, instructions: str) -> None:
-    expected = set(ROLE_SKILL_PATHS[role])
+def assert_skill_guard(
+    project_root: Path,
+    role: str,
+    instructions: str,
+    expected_paths: Iterable[Path | str] | None = None,
+    role_catalog: Mapping[str, Iterable[Path | str]] | None = None,
+) -> None:
+    expected_values = expected_paths if expected_paths is not None else ROLE_SKILL_PATHS[role]
+    expected = {_display_path(project_root, path) for path in _resolve_paths(project_root, expected_values)}
+    catalog = role_catalog if role_catalog is not None else ROLE_SKILL_PATHS
     leaked = []
-    for other_role, paths in ROLE_SKILL_PATHS.items():
+    for other_role, paths in catalog.items():
         if other_role == role:
             continue
-        for rel in paths:
+        for path_value in paths:
+            rel = _display_path(project_root, path_value)
             if rel in expected:
                 continue
             marker = Path(rel).parent.name

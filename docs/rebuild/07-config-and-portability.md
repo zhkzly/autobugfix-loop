@@ -22,6 +22,8 @@ scheduler:
   writer_timeout_seconds: null
   evaluator_timeout_seconds: null
 codex:
+  default_model: null
+  default_timeout_seconds: null
   writer_model: null
   evaluator_model: null
   controller_model: null
@@ -31,9 +33,56 @@ codex:
     bridge_auth: true
     skill_guard: true
     strict_skill_guard: true
+  roles:
+    writer:
+      backend: codex
+      model: null
+      sandbox: workspace-write
+      approval_mode: auto_review
+      timeout_seconds: null
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/execution/writer/autobugfix-writer/SKILL.md
+    evaluator:
+      backend: codex
+      model: null
+      sandbox: read-only
+      approval_mode: deny_all
+      timeout_seconds: null
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/execution/evaluator/autobugfix-evaluator/SKILL.md
+    memory_maintainer:
+      backend: codex
+      model: null
+      sandbox: workspace-write
+      approval_mode: auto_review
+      timeout_seconds: null
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/memory/maintainer/autobugfix-memory-maintainer/SKILL.md
+    eval_judge:
+      backend: codex
+      model: null
+      sandbox: read-only
+      approval_mode: deny_all
+      timeout_seconds: null
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/eval/judge/autobugfix-eval-judge/SKILL.md
+worker:
+  tick_interval_seconds: 5
+memory_worker:
+  tick_interval_seconds: 10
+eval:
+  model_mode: codex
+  roles: {}
 repos: {}
 
 Default config must contain no repo profiles. A user must configure the target repo explicitly.
+`codex.roles` is the primary model/skill/sandbox/approval surface. Legacy
+`writer_model`, `evaluator_model`, and `controller_model` remain compatibility
+inputs only.
 Repo Profile Defaults
 If a repo profile omits worktree_root, derive:
 <project-root>/.autobugfix/worktrees/<repo-id>
@@ -57,7 +106,10 @@ Memory Config
 maintainer:
   backend: codex
   model: null
-  timeout_seconds: 1800
+  timeout_seconds: null
+  role:
+    model: null
+    timeout_seconds: null
 
 Changing memory maintainer model must not change execution writer/evaluator or eval judge behavior.
 Eval Config

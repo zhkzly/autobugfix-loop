@@ -73,7 +73,7 @@ def loop(project_root: Path) -> None:
         paths["heartbeat"].write_text(json.dumps({"timestamp": utc_now(), "ran": ran}, sort_keys=True), encoding="utf-8")
         with paths["events"].open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"timestamp": utc_now(), "ran": ran}, sort_keys=True) + "\n")
-        time.sleep(5)
+        time.sleep(service.config.worker.tick_interval_seconds)
 
 
 def main() -> None:

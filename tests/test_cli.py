@@ -11,3 +11,6 @@ def test_cli_doctor_uses_real_config(tmp_path, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "repo toy_repo" in output
     assert ".autobugfix/worktrees/toy_repo" in output
+    assert "roles:" in output
+    assert "writer:" in output
+    assert "sandbox: workspace-write" in output

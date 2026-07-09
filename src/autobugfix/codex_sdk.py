@@ -126,11 +126,8 @@ class CodexSDKBackend(CodexBackend):
         client = module.Codex(config)
         try:
             sandbox = module.Sandbox(request.sandbox)
-            approval = (
-                module.ApprovalMode.auto_review
-                if request.sandbox == "workspace-write"
-                else module.ApprovalMode.deny_all
-            )
+            approval_name = request.approval_mode or ("auto_review" if request.sandbox == "workspace-write" else "deny_all")
+            approval = getattr(module.ApprovalMode, approval_name, approval_name)
             thread = client.thread_start(
                 approval_mode=approval,
                 cwd=str(request.cwd),

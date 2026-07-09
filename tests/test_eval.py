@@ -34,4 +34,8 @@ def test_dataset_and_eval_call_execution_loop_in_isolated_repo(tmp_path):
     problem.write_text(json.dumps(row) + "\n", encoding="utf-8")
     run_dir = run_eval(project_root, problem, tmp_path / "eval-runs", run_id="toy", backend=FakeCodexBackend(), test_command="python3 -m unittest discover")
     report = (run_dir / row["raw_id"] / "report.yaml").read_text(encoding="utf-8")
+    resolved_roles = (run_dir / row["raw_id"] / "resolved-roles.yaml").read_text(encoding="utf-8")
     assert "decision: pass" in report
+    assert "writer:" in resolved_roles
+    assert "evaluator:" in resolved_roles
+    assert "autobugfix-writer" in resolved_roles

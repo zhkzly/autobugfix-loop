@@ -6,12 +6,16 @@ from typing import Any
 
 import yaml
 
+from autobugfix.config import parse_role_config
+from autobugfix.models import RoleConfig
+
 
 @dataclass(slots=True)
 class MemoryMaintainerConfig:
     backend: str = "codex"
     model: str | None = None
-    timeout_seconds: int = 1800
+    timeout_seconds: int | None = None
+    role: RoleConfig | None = None
 
 
 @dataclass(slots=True)
@@ -39,6 +43,7 @@ def load_memory_config(project_root: Path | str = ".") -> MemoryConfig:
         maintainer=MemoryMaintainerConfig(
             backend=str(maintainer_raw.get("backend", "codex")),
             model=maintainer_raw.get("model"),
-            timeout_seconds=int(maintainer_raw.get("timeout_seconds", 1800)),
+            timeout_seconds=int(maintainer_raw["timeout_seconds"]) if "timeout_seconds" in maintainer_raw else None,
+            role=parse_role_config(maintainer_raw.get("role"), "maintainer.role") if isinstance(maintainer_raw.get("role"), dict) else None,
         ),
     )

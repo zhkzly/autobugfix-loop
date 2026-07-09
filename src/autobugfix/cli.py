@@ -18,6 +18,7 @@ from autobugfix.gradio_app import launch as launch_ui
 from autobugfix.memory.service import MemoryService
 from autobugfix.memory_gradio_app import launch as launch_memory_ui
 from autobugfix.projection import inspect_projection, render_inspect, status_projection
+from autobugfix.role_config import resolve_role
 from autobugfix.scheduler import tick
 from autobugfix.service import AutobugfixService
 from autobugfix.worker import start_worker, stop_worker, worker_status
@@ -46,6 +47,19 @@ def command_doctor(args: argparse.Namespace) -> int:
     print("Autobugfix doctor")
     print(f"project_root: {cfg.project_root}")
     print(f"task_root: {cfg.project_root / cfg.task_root}")
+    print(f"codex_runtime_root: {cfg.codex.role_runtime.runtime_root}")
+    print("roles:")
+    for role in sorted(cfg.codex.roles):
+        resolved = resolve_role(cfg, role)
+        print(f"  {role}:")
+        print(f"    backend: {resolved.backend}")
+        print(f"    model: {resolved.model}")
+        print(f"    sandbox: {resolved.sandbox}")
+        print(f"    approval_mode: {resolved.approval_mode}")
+        print(f"    timeout_seconds: {resolved.timeout_seconds}")
+        print("    skill_paths:")
+        for path in resolved.to_dict(cfg.project_root)["skill_paths"]:
+            print(f"      - {path}")
     if not cfg.repos:
         print("repos: (none configured)")
     for repo_id, repo in cfg.repos.items():
@@ -55,6 +69,13 @@ def command_doctor(args: argparse.Namespace) -> int:
         print(f"  remote: {repo.remote}")
         print(f"  main_branch: {repo.main_branch}")
         print(f"  test_full: {repo.test_commands.full}")
+        for role in sorted(cfg.codex.roles):
+            resolved = resolve_role(cfg, role, repo_id=repo_id)
+            if resolved.source.get("repo_override") != "none":
+                print(f"  role_override {role}:")
+                print(f"    model: {resolved.model}")
+                print(f"    sandbox: {resolved.sandbox}")
+                print(f"    timeout_seconds: {resolved.timeout_seconds}")
     return 0
 
 
@@ -242,18 +263,34 @@ def command_eval(args: argparse.Namespace) -> int:
 
 
 def command_codex(args: argparse.Namespace) -> int:
+    cfg = load_config(Path.cwd())
+    resolved = resolve_role(cfg, args.role, repo_id=args.repo)
     request = build_codex_request(
         Path.cwd(),
         args.role,
         "probe",
         Path.cwd(),
-        "read-only",
         None,
-        1,
-        Path.cwd() / ".autobugfix/controller/probe.raw.jsonl",
-        Path.cwd() / ".autobugfix/controller/probe.stderr.log",
+        None,
+        None,
+        Path.cwd() / ".autobugfix/controller" / f"{args.role}.probe.raw.jsonl",
+        Path.cwd() / ".autobugfix/controller" / f"{args.role}.probe.stderr.log",
+        repo_id=args.repo,
+        resolved_role=resolved,
     )
-    _print_yaml({"role": request.role, "cwd": str(request.cwd), "sandbox": request.sandbox, "instructions_bytes": len(request.developer_instructions)})
+    _print_yaml(
+        {
+            "role": request.role,
+            "repo": args.repo,
+            "cwd": str(request.cwd),
+            "sandbox": request.sandbox,
+            "approval_mode": request.approval_mode,
+            "model": request.model,
+            "timeout_seconds": request.timeout_seconds,
+            "instructions_bytes": len(request.developer_instructions),
+            "resolved": resolved.to_dict(cfg.project_root),
+        }
+    )
     return 0
 
 
@@ -407,7 +444,8 @@ def build_parser() -> argparse.ArgumentParser:
     codex = sub.add_parser("codex")
     codex_sub = codex.add_subparsers(dest="codex_action", required=True)
     probe = codex_sub.add_parser("probe-role")
-    probe.add_argument("--role", required=True, choices=["writer", "evaluator", "memory_maintainer", "eval_judge"])
+    probe.add_argument("--role", required=True, choices=["writer", "evaluator", "controller", "memory_maintainer", "eval_judge"])
+    probe.add_argument("--repo")
     probe.set_defaults(func=command_codex)
     return parser
 

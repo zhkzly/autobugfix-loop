@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from autobugfix.codex_backend import CodexBackend
-from autobugfix.config import default_config_dict
+from autobugfix.config import default_config_dict, load_config
 from autobugfix.eval.artifacts import copy_role_skills, prepare_isolated_repo, read_jsonl, write_text, write_yaml
 from autobugfix.eval.diagnosis import diagnose_run
 from autobugfix.eval.models import EvalCase
 from autobugfix.eval.scorers import score_case
 from autobugfix.git_utils import run_git
+from autobugfix.models import AutobugfixConfig, RoleConfig
+from autobugfix.role_config import resolve_role
 from autobugfix.service import AutobugfixService
 
 
@@ -19,8 +23,41 @@ class EvalRunnerError(RuntimeError):
     pass
 
 
-def _config_for_case(repo_id: str, main_checkout: Path, test_command: str | None) -> dict[str, object]:
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _role_to_raw(role: RoleConfig) -> dict[str, object]:
+    raw = {key: value for key, value in asdict(role).items() if value is not None}
+    if isinstance(raw.get("skill_paths"), tuple):
+        raw["skill_paths"] = list(raw["skill_paths"])  # type: ignore[index]
+    return raw
+
+
+def _apply_role_overrides(cfg: dict[str, object], source_config: AutobugfixConfig) -> None:
+    codex = cfg.setdefault("codex", {})
+    if not isinstance(codex, dict):
+        return
+    roles = codex.setdefault("roles", {})
+    if not isinstance(roles, dict):
+        return
+    for role_name, role_config in source_config.codex.roles.items():
+        current = roles.get(role_name)
+        roles[role_name] = _deep_merge(current if isinstance(current, dict) else {}, _role_to_raw(role_config))
+    for role_name, role_config in source_config.eval.roles.items():
+        current = roles.get(role_name)
+        roles[role_name] = _deep_merge(current if isinstance(current, dict) else {}, _role_to_raw(role_config))
+
+
+def _config_for_case(repo_id: str, main_checkout: Path, test_command: str | None, source_config: AutobugfixConfig) -> dict[str, object]:
     cfg = default_config_dict()
+    _apply_role_overrides(cfg, source_config)
     cfg["repos"] = {
         repo_id: {
             "main_checkout": str(main_checkout),
@@ -50,6 +87,7 @@ def run_eval(
     evaluator_timeout_seconds: int | None = None,
     backend: CodexBackend | None = None,
 ) -> Path:
+    source_config = load_config(project_root)
     rows = read_jsonl(dataset)
     cases = [EvalCase.from_row(row) for row in rows]
     if case_selector:
@@ -63,11 +101,15 @@ def run_eval(
         {
             "dataset": str(dataset),
             "case_selector": case_selector,
-            "model_mode": model_mode,
+            "model_mode": model_mode or source_config.eval.model_mode,
             "test_command": test_command,
             "codex_timeout_seconds": codex_timeout_seconds,
             "writer_timeout_seconds": writer_timeout_seconds,
             "evaluator_timeout_seconds": evaluator_timeout_seconds,
+            "roles": {
+                role: resolve_role(source_config, role).to_dict(source_config.project_root)
+                for role in source_config.codex.roles
+            },
         },
     )
     failures: list[str] = []
@@ -77,7 +119,7 @@ def run_eval(
         remote, main_checkout = prepare_isolated_repo(case, case_dir / "setup")
         control_root = case_dir / "control"
         copied_skills = copy_role_skills(project_root, control_root)
-        cfg = _config_for_case(case.repo, main_checkout, test_command)
+        cfg = _config_for_case(case.repo, main_checkout, test_command, source_config)
         if not copied_skills:
             codex_cfg = cfg.get("codex")
             if isinstance(codex_cfg, dict):
@@ -94,6 +136,14 @@ def run_eval(
                 scheduler["evaluator_timeout_seconds"] = evaluator_timeout_seconds
         (control_root / ".autobugfix").mkdir(parents=True, exist_ok=True)
         (control_root / ".autobugfix/config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        isolated_config = load_config(control_root)
+        write_yaml(
+            case_dir / "resolved-roles.yaml",
+            {
+                role: resolve_role(isolated_config, role, repo_id=case.repo).to_dict(control_root)
+                for role in ("writer", "evaluator")
+            },
+        )
         write_yaml(case_dir / "setup.yaml", {"repo": case.repo, "isolated_remote": str(remote), "main_checkout": str(main_checkout)})
 
         service = AutobugfixService(control_root, backend=backend)

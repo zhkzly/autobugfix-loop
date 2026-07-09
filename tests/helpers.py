@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from autobugfix.models import CodexRequest, CodexResult
+from autobugfix.models import CodexRequest, CodexResult, RoleConfig
 
 
 class FakeCodexBackend:
@@ -34,7 +34,15 @@ class FakeCodexBackend:
 
 
 class FakeMaintainerBackend:
-    def maintain(self, project_root: Path, run_dir: Path, digest: str, model: str | None, timeout_seconds: int) -> str:
+    def maintain(
+        self,
+        project_root: Path,
+        run_dir: Path,
+        digest: str,
+        model: str | None,
+        timeout_seconds: int | None,
+        role_override: RoleConfig | None = None,
+    ) -> str:
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "fake.raw.jsonl").write_text("{}\n", encoding="utf-8")
         return "Remember to preserve verifier evidence when accepting fixes."

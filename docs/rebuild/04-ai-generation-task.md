@@ -83,6 +83,8 @@ scheduler:
   writer_timeout_seconds: null
   evaluator_timeout_seconds: null
 codex:
+  default_model: null
+  default_timeout_seconds: null
   writer_model: null
   evaluator_model: null
   controller_model: null
@@ -92,6 +94,32 @@ codex:
     bridge_auth: true
     skill_guard: true
     strict_skill_guard: true
+  roles:
+    writer:
+      backend: codex
+      model: null
+      sandbox: workspace-write
+      approval_mode: auto_review
+      timeout_seconds: null
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/execution/writer/autobugfix-writer/SKILL.md
+    evaluator:
+      backend: codex
+      model: null
+      sandbox: read-only
+      approval_mode: deny_all
+      timeout_seconds: null
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/execution/evaluator/autobugfix-evaluator/SKILL.md
+worker:
+  tick_interval_seconds: 5
+memory_worker:
+  tick_interval_seconds: 10
+eval:
+  model_mode: codex
+  roles: {}
 repos:
   target_repo:
     main_checkout: ../target-repo
@@ -106,6 +134,10 @@ repos:
     ppe:
       enabled: false
       command_template: null
+    codex:
+      roles:
+        writer:
+          model: null
 
 Default config must not include any target repo. Unknown repo IDs must fail before task state is written.
 Implementation Constraints

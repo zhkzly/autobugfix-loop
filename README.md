@@ -30,6 +30,8 @@ scheduler:
   writer_timeout_seconds: null
   evaluator_timeout_seconds: null
 codex:
+  default_model: null
+  default_timeout_seconds: null
   writer_model: null
   evaluator_model: null
   controller_model: null
@@ -39,6 +41,29 @@ codex:
     bridge_auth: true
     skill_guard: true
     strict_skill_guard: true
+  roles:
+    writer:
+      model: null
+      sandbox: workspace-write
+      approval_mode: auto_review
+      timeout_seconds: null
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/execution/writer/autobugfix-writer/SKILL.md
+    evaluator:
+      model: null
+      sandbox: read-only
+      approval_mode: deny_all
+      timeout_seconds: null
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/execution/evaluator/autobugfix-evaluator/SKILL.md
+worker:
+  tick_interval_seconds: 5
+memory_worker:
+  tick_interval_seconds: 10
+eval:
+  model_mode: codex
 repos:
   target_repo:
     main_checkout: ../target-repo
@@ -51,11 +76,22 @@ repos:
     ppe:
       enabled: false
       command_template: null
+    codex:
+      roles:
+        writer:
+          model: null
 ```
 
 The default config contains no target repositories. Unknown repo IDs fail
 before task state is written. If `worktree_root` is omitted, Autobugfix derives
 `.autobugfix/worktrees/<repo-id>` under the control project root.
+
+`codex.roles` is the primary configuration surface for production roles and
+skills. The legacy `writer_model`, `evaluator_model`, and `controller_model`
+fields are still accepted as compatibility inputs, but new configs should set
+models, sandboxes, approval modes, timeouts, and skill paths under
+`codex.roles.<role>`. Repo profiles may override allowed roles under
+`repos.<repo-id>.codex.roles`.
 
 ## Basic Flow
 

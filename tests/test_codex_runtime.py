@@ -22,3 +22,4 @@ def test_codex_runtime_passes_role_parameters(tmp_path):
     assert request.cwd == project_root
     assert request.sandbox == "workspace-write"
     assert request.model == "model-x"
+    assert request.approval_mode == "auto_review"

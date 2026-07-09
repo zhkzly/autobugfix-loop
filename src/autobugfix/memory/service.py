@@ -72,6 +72,7 @@ class MemoryService:
             digest_text,
             self.config.maintainer.model,
             self.config.maintainer.timeout_seconds,
+            self.config.maintainer.role,
         )
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "maintainer.md").write_text(maintainer_text, encoding="utf-8")

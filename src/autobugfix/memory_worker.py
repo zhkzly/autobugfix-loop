@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+from autobugfix.config import load_config
 from autobugfix.memory.service import MemoryService
 from autobugfix.models import utc_now
 
@@ -64,6 +65,7 @@ def stop_worker(project_root: Path) -> None:
 
 
 def loop(project_root: Path) -> None:
+    execution_config = load_config(project_root)
     service = MemoryService(project_root)
     service.init()
     paths = worker_paths(project_root)
@@ -72,7 +74,7 @@ def loop(project_root: Path) -> None:
         paths["heartbeat"].write_text(json.dumps({"timestamp": utc_now(), "processed": processed}, sort_keys=True), encoding="utf-8")
         with paths["events"].open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"timestamp": utc_now(), "processed": processed}, sort_keys=True) + "\n")
-        time.sleep(10)
+        time.sleep(execution_config.memory_worker.tick_interval_seconds)
 
 
 def main() -> None:

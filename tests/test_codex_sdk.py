@@ -50,8 +50,10 @@ def test_codex_sdk_preview_api_parameter_passing(tmp_path, monkeypatch):
         developer_instructions="dev",
         raw_log_path=tmp_path / "raw.jsonl",
         stderr_log_path=tmp_path / "err.log",
+        approval_mode="auto_review",
     )
     result = CodexSDKBackend("fake_codex").run(request)
     assert result.text == "done"
     assert calls["thread_start"]["developer_instructions"] == "dev"
+    assert calls["thread_start"]["approval_mode"] == "auto_review"
     assert calls["run"]["sandbox"] == "workspace-write"

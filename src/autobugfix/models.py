@@ -46,6 +46,57 @@ class PpeConfig:
 
 
 @dataclass(slots=True)
+class RoleConfig:
+    backend: str | None = None
+    model: str | None = None
+    sandbox: str | None = None
+    approval_mode: str | None = None
+    timeout_seconds: int | None = None
+    skill_paths: tuple[str, ...] | None = None
+    raw_log_template: str | None = None
+    stderr_log_template: str | None = None
+    allow_repo_overrides: bool | None = None
+
+
+@dataclass(slots=True)
+class ResolvedRoleConfig:
+    role: str
+    backend: str
+    model: str | None
+    sandbox: str
+    approval_mode: str
+    timeout_seconds: int
+    skill_paths: tuple[Path, ...]
+    raw_log_template: str
+    stderr_log_template: str
+    allow_repo_overrides: bool
+    source: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self, project_root: Path | None = None) -> dict[str, Any]:
+        def display_path(path: Path) -> str:
+            if project_root is not None:
+                try:
+                    return path.resolve().relative_to(project_root.resolve()).as_posix()
+                except ValueError:
+                    pass
+            return str(path)
+
+        return {
+            "role": self.role,
+            "backend": self.backend,
+            "model": self.model,
+            "sandbox": self.sandbox,
+            "approval_mode": self.approval_mode,
+            "timeout_seconds": self.timeout_seconds,
+            "skill_paths": [display_path(path) for path in self.skill_paths],
+            "raw_log_template": self.raw_log_template,
+            "stderr_log_template": self.stderr_log_template,
+            "allow_repo_overrides": self.allow_repo_overrides,
+            "source": self.source,
+        }
+
+
+@dataclass(slots=True)
 class RepoProfile:
     repo_id: str
     main_checkout: Path
@@ -55,6 +106,7 @@ class RepoProfile:
     branch_template: str = "fix/{date}_oncall_{slug}"
     test_commands: TestCommands = field(default_factory=TestCommands)
     ppe: PpeConfig = field(default_factory=PpeConfig)
+    codex_roles: dict[str, RoleConfig] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -78,10 +130,25 @@ class RoleRuntimeConfig:
 
 @dataclass(slots=True)
 class CodexConfig:
+    default_model: str | None = None
+    default_timeout_seconds: int | None = None
     writer_model: str | None = None
     evaluator_model: str | None = None
     controller_model: str | None = None
     role_runtime: RoleRuntimeConfig = field(default_factory=RoleRuntimeConfig)
+    roles: dict[str, RoleConfig] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class WorkerConfig:
+    tick_interval_seconds: int = 5
+    heartbeat_interval_seconds: int = 5
+
+
+@dataclass(slots=True)
+class EvalConfig:
+    model_mode: str = "codex"
+    roles: dict[str, RoleConfig] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -90,6 +157,9 @@ class AutobugfixConfig:
     task_root: Path = Path(".autobugfix/tasks")
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
+    worker: WorkerConfig = field(default_factory=WorkerConfig)
+    memory_worker: WorkerConfig = field(default_factory=lambda: WorkerConfig(tick_interval_seconds=10, heartbeat_interval_seconds=10))
+    eval: EvalConfig = field(default_factory=EvalConfig)
     repos: dict[str, RepoProfile] = field(default_factory=dict)
 
     @property
@@ -180,6 +250,7 @@ class CodexRequest:
     developer_instructions: str
     raw_log_path: Path
     stderr_log_path: Path
+    approval_mode: str | None = None
 
 
 @dataclass(slots=True)
