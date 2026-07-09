@@ -38,6 +38,8 @@ codex:
   role_runtime:
     enabled: true
     runtime_root: .autobugfix/runtime/codex-sdk
+    # Optional app-server binary used by the Python SDK; this is not codex exec.
+    codex_bin: null
     bridge_auth: true
     skill_guard: true
     strict_skill_guard: true
@@ -119,13 +121,14 @@ uv run autobugfix eval run --dataset problem_prompts.jsonl --out .autobugfix-eva
 
 ## Operator Governance
 
-Operator changes are guarded by an Autobugfix-specific permission gate. The
-operator must diagnose first, declare the affected layer scope, obtain review
-or human approval when required, and validate the patch against the machine
-constitution.
+Governance v2 treats the Operator as a bounded execution node. Requests are
+immutable, freeze a Git base SHA and branch, and create a real dedicated
+worktree. Merge authority uses policy from a trusted base ref; a candidate
+cannot weaken its own constitution and approve itself.
 
 ```bash
 uv run autobugfix operator triage \
+  --triage-id triage-eval-diff \
   --summary "eval harness did not preserve generated diff" \
   --suspected-layer eval \
   --confidence medium \
@@ -133,54 +136,88 @@ uv run autobugfix operator triage \
 
 uv run autobugfix operator request \
   --request-id op-eval-diff \
+  --triage-id triage-eval-diff \
   --summary "fix eval artifact capture" \
   --primary-layer eval \
   --risk low \
-  --validation-command "uv run pytest -q tests/test_eval.py"
+  --validation-profile eval
 
 uv run autobugfix operator preflight --request-id op-eval-diff
-uv run autobugfix operator validate --request-id op-eval-diff --run-validation-commands
+uv run autobugfix operator workspace-create --request-id op-eval-diff
+# Patch only the returned worktree.
+uv run autobugfix operator postflight --request-id op-eval-diff
+uv run autobugfix operator validate --request-id op-eval-diff
+uv run autobugfix operator export-bundle --request-id op-eval-diff
 ```
 
-Cross-layer or medium-risk requests require an approved review. High-risk or
-constitution-level changes require human approval:
+Cross-layer requests require an independent reviewer. The request creator
+cannot review itself:
 
 ```bash
 uv run autobugfix operator review op-eval-config \
   --reviewer scope-reviewer \
-  --kind agent \
   --decision approve \
+  --allowed-layer eval \
+  --allowed-layer shared_runtime \
   --reason "eval runner consumes isolated config generation"
-
-uv run autobugfix operator review op-architecture \
-  --reviewer human-owner \
-  --kind human \
-  --decision approve \
-  --reason "explicit architecture approval"
 ```
 
-The same policy can run as a script:
+Constitutional changes require a real OpenSSH signature or an allowlisted
+GitHub approved review. A local `kind: human` label is not accepted:
 
 ```bash
-uv run python scripts/validate_operator_policy.py --request-id op-eval-diff
+uv run autobugfix operator approval-payload op-architecture \
+  --stage scope \
+  --approver human-owner \
+  --reason "authorize governance change" \
+  --out /tmp/op-architecture.json
+
+ssh-keygen -Y sign -f ~/.ssh/operator_signing_key \
+  -n autobugfix-operator /tmp/op-architecture.json
+
+uv run autobugfix operator approve-signed op-architecture \
+  --payload /tmp/op-architecture.json \
+  --signature /tmp/op-architecture.json.sig \
+  --allowed-signers ~/.config/autobugfix/allowed_signers
 ```
 
-Regression baselines can be recorded and compared to prevent operator changes
-from making the loop worse:
+After validation, create a merge-stage payload bound to the patch digest,
+import its signature, run `finalize`, and export the bundle. GitHub runs the
+base branch's trusted validator, not the PR's candidate validator.
+
+GitHub approval review bodies must include
+`Autobugfix-Request-Digest: <request-digest>` and may be imported with
+`approve-github --stage scope|merge`.
+
+The trusted script supports runtime records and exported bundles:
+
+```bash
+uv run python scripts/validate_operator_policy.py \
+  --request-id op-eval-diff \
+  --candidate-root .autobugfix/operator/worktrees/op-eval-diff \
+  --trusted-ref origin/main
+```
+
+Regression baselines are versioned contracts under `.autobugfix-baselines/`.
+Required metrics cannot be omitted and the candidate PR cannot provide its own
+trusted baseline:
 
 ```bash
 uv run autobugfix operator baseline record \
   --name toy-e2e \
   --metric pass_rate=1 \
+  --metric artifact_completeness=1 \
   --metric runtime_seconds=12
 
 uv run autobugfix operator baseline compare \
   --name toy-e2e \
   --metric pass_rate=1 \
-  --metric runtime_seconds=14 \
-  --min-metric pass_rate=1 \
-  --max-regression-percent runtime_seconds=25
+  --metric artifact_completeness=1 \
+  --metric runtime_seconds=14
 ```
+
+Install repository-specific reviewer/public-key allowlists, CODEOWNERS, and
+optional branch protection with `scripts/install_operator_governance.py`.
 
 Runtime state under `.autobugfix/`, generated memory evidence, eval runs, and
 UI screenshots are gitignored.

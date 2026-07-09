@@ -44,6 +44,17 @@ def _apply_role_overrides(cfg: dict[str, object], source_config: AutobugfixConfi
     codex = cfg.setdefault("codex", {})
     if not isinstance(codex, dict):
         return
+    codex["default_model"] = source_config.codex.default_model
+    codex["default_timeout_seconds"] = source_config.codex.default_timeout_seconds
+    runtime = source_config.codex.role_runtime
+    codex["role_runtime"] = {
+        "enabled": runtime.enabled,
+        "runtime_root": str(runtime.runtime_root),
+        "codex_bin": str(runtime.codex_bin) if runtime.codex_bin is not None else None,
+        "bridge_auth": runtime.bridge_auth,
+        "skill_guard": runtime.skill_guard,
+        "strict_skill_guard": runtime.strict_skill_guard,
+    }
     roles = codex.setdefault("roles", {})
     if not isinstance(roles, dict):
         return

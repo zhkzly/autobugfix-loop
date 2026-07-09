@@ -1,0 +1,7 @@
+# Generate .github/CODEOWNERS with:
+# uv run python scripts/install_operator_governance.py --reviewer <github-login>
+#
+# The generated file protects the trust root, governance implementation,
+# workflow, and project constitution. A placeholder owner is intentionally not
+# committed because Autobugfix is repository-agnostic.
+

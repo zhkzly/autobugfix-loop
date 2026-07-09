@@ -118,9 +118,23 @@ class CodexSDKBackend(CodexBackend):
         env["CODEX_HOME"] = str(codex_home)
         return env
 
+    def _codex_bin(self, request: CodexRequest) -> str | None:
+        override = os.environ.get("AUTOBUGFIX_CODEX_BIN")
+        if override:
+            return str(Path(override).expanduser().resolve())
+        project_root = self._project_root_for(request)
+        if project_root is None:
+            return None
+        configured = load_config(project_root).codex.role_runtime.codex_bin
+        return str(configured) if configured is not None else None
+
     def _call_preview_sdk(self, module: Any, request: CodexRequest) -> Any:
         try:
-            config = module.CodexConfig(cwd=str(request.cwd), env=self._runtime_env(request))
+            config = module.CodexConfig(
+                cwd=str(request.cwd),
+                env=self._runtime_env(request),
+                codex_bin=self._codex_bin(request),
+            )
         except TypeError:
             config = module.CodexConfig(cwd=str(request.cwd))
         client = module.Codex(config)

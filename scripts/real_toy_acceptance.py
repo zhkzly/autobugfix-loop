@@ -26,6 +26,19 @@ def write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def autobugfix_cmd(source_root: Path, *args: str) -> list[str]:
+    return [
+        "uv",
+        "run",
+        "--project",
+        str(source_root),
+        "--cache-dir",
+        "/tmp/uv-cache",
+        "autobugfix",
+        *args,
+    ]
+
+
 def create_toy_repo(root: Path) -> Path:
     if root.exists():
         shutil.rmtree(root)
@@ -61,6 +74,7 @@ def create_toy_repo(root: Path) -> Path:
 
 
 def write_control_config(project_root: Path, main_checkout: Path) -> None:
+    system_codex = shutil.which("codex")
     data = {
         "task_root": ".autobugfix/tasks",
         "scheduler": {
@@ -78,6 +92,7 @@ def write_control_config(project_root: Path, main_checkout: Path) -> None:
             "role_runtime": {
                 "enabled": True,
                 "runtime_root": ".autobugfix/runtime/codex-sdk",
+                "codex_bin": system_codex,
                 "bridge_auth": True,
                 "skill_guard": True,
                 "strict_skill_guard": True,
@@ -104,54 +119,62 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default="/tmp/autobugfix-real-e2e")
     args = parser.parse_args()
-    project_root = Path.cwd()
+    source_root = Path.cwd().resolve()
     root = Path(args.root)
-    for rel in (".autobugfix", ".autobugfix-memory", ".autobugfix-evals"):
-        path = project_root / rel
-        if path.exists():
-            shutil.rmtree(path)
     main_checkout = create_toy_repo(root)
-    write_control_config(project_root, main_checkout)
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "doctor"], cwd=project_root)
+    control_root = root / "control"
+    control_root.mkdir()
+    shutil.copytree(source_root / ".agents/role-skills", control_root / ".agents/role-skills")
+    write_control_config(control_root, main_checkout)
+    run(autobugfix_cmd(source_root, "doctor"), cwd=control_root)
     create = run(
-        [
-            "uv",
-            "run",
-            "--cache-dir",
-            "/tmp/uv-cache",
-            "autobugfix",
+        autobugfix_cmd(
+            source_root,
             "create",
             "--repo",
             "toy_repo",
             "--title",
             "fix toy add off by one",
             "--from-stdin",
-        ],
-        cwd=project_root,
+        ),
+        cwd=control_root,
         input_text="Bug: calc.add(1, 2) returns 4 instead of 3. Fix the smallest possible code path and verify with python3 -m unittest discover.\n",
     )
     task_id = create.stdout.strip().splitlines()[-1]
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "inspect", task_id], cwd=project_root)
+    run(autobugfix_cmd(source_root, "inspect", task_id), cwd=control_root)
     run(["git", "-C", str(main_checkout), "worktree", "list"])
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "run", task_id], cwd=project_root)
-    worktree = project_root / ".autobugfix/worktrees/toy_repo" / task_id
+    run(autobugfix_cmd(source_root, "run", task_id), cwd=control_root)
+    worktree = control_root / ".autobugfix/worktrees/toy_repo" / task_id
     diff = run(["git", "-C", str(worktree), "diff", "origin/main", "--", "calc.py"]).stdout
     if "return a + b" not in diff or "return a + b + 1" not in diff:
         raise RuntimeError("generated diff did not fix calc.add")
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "gate", task_id, "accepted"], cwd=project_root)
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "archive", task_id, "--result", "accepted"], cwd=project_root)
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "memory", "init"], cwd=project_root)
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "memory", "collect", task_id], cwd=project_root)
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "memory", "digest", task_id], cwd=project_root)
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "memory", "lint"], cwd=project_root)
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "memory", "maintain", task_id], cwd=project_root)
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "memory", "status"], cwd=project_root)
+    run(autobugfix_cmd(source_root, "gate", task_id, "accepted"), cwd=control_root)
+    run(autobugfix_cmd(source_root, "archive", task_id, "--result", "accepted"), cwd=control_root)
+    run(autobugfix_cmd(source_root, "memory", "init"), cwd=control_root)
+    run(autobugfix_cmd(source_root, "memory", "collect", task_id), cwd=control_root)
+    run(autobugfix_cmd(source_root, "memory", "digest", task_id), cwd=control_root)
+    run(autobugfix_cmd(source_root, "memory", "lint"), cwd=control_root)
+    run(autobugfix_cmd(source_root, "memory", "maintain", task_id), cwd=control_root)
+    run(autobugfix_cmd(source_root, "memory", "status"), cwd=control_root)
     run(["git", "-C", str(worktree), "config", "user.email", "toy@example.com"])
     run(["git", "-C", str(worktree), "config", "user.name", "Toy User"])
     run(["git", "-C", str(worktree), "add", "calc.py"])
     run(["git", "-C", str(worktree), "commit", "-m", "fix toy add off by one"])
     raw = root / "raw_commit_pairs.jsonl"
-    run(["uv", "run", "--cache-dir", "/tmp/uv-cache", "autobugfix", "dataset", "build-raw", "--repo", "toy_repo", "--base-ref", "origin/main", "--out", str(raw)], cwd=project_root)
+    run(
+        autobugfix_cmd(
+            source_root,
+            "dataset",
+            "build-raw",
+            "--repo",
+            "toy_repo",
+            "--base-ref",
+            "origin/main",
+            "--out",
+            str(raw),
+        ),
+        cwd=control_root,
+    )
     raw_row = json.loads(raw.read_text(encoding="utf-8").splitlines()[0])
     problem = root / "problem_prompts.jsonl"
     raw_row.update(
@@ -167,12 +190,8 @@ def main() -> int:
     )
     write(problem, json.dumps(raw_row, sort_keys=True) + "\n")
     run(
-        [
-            "uv",
-            "run",
-            "--cache-dir",
-            "/tmp/uv-cache",
-            "autobugfix",
+        autobugfix_cmd(
+            source_root,
             "eval",
             "run",
             "--dataset",
@@ -193,8 +212,8 @@ def main() -> int:
             "500",
             "--evaluator-timeout-seconds",
             "300",
-        ],
-        cwd=project_root,
+        ),
+        cwd=control_root,
     )
     print(f"ACCEPTANCE_TASK_ID={task_id}")
     return 0

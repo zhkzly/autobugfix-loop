@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from autobugfix.codex_runtime import build_codex_request
+from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.config import load_config, write_default_config
 from autobugfix.dataset import build_raw_dataset
 from autobugfix.eval.diagnosis import diagnose_run
@@ -25,19 +27,15 @@ from autobugfix.worker import start_worker, stop_worker, worker_status
 from autobugfix.memory_worker import start_worker as start_memory_worker
 from autobugfix.memory_worker import stop_worker as stop_memory_worker
 from autobugfix.memory_worker import worker_status as memory_worker_status
+from autobugfix.git_utils import rev_parse
 from autobugfix.operator.metrics import compare_baseline, parse_metric, record_baseline
 from autobugfix.operator.models import (
+    VALID_APPROVAL_DECISIONS,
     VALID_CONFIDENCE,
     VALID_LAYERS,
-    VALID_REVIEW_DECISIONS,
-    VALID_REVIEW_KINDS,
     VALID_RISKS,
-    OperatorRequest,
-    OperatorReview,
-    OperatorTriage,
 )
-from autobugfix.operator.store import OperatorStore
-from autobugfix.operator.validator import validate_operator_request
+from autobugfix.operator.service import OperatorGovernanceService
 
 
 def _stdin_or_file(args: argparse.Namespace) -> str:
@@ -53,6 +51,13 @@ def _print_yaml(data: object) -> None:
     print(yaml.safe_dump(data, sort_keys=False).strip())
 
 
+def _installed_version(distribution: str) -> str:
+    try:
+        return importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return "not-installed"
+
+
 def command_doctor(args: argparse.Namespace) -> int:
     if args.init_config:
         write_default_config(Path.cwd())
@@ -61,12 +66,15 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"project_root: {cfg.project_root}")
     print(f"task_root: {cfg.project_root / cfg.task_root}")
     print(f"codex_runtime_root: {cfg.codex.role_runtime.runtime_root}")
+    print(f"codex_binary: {cfg.codex.role_runtime.codex_bin or 'sdk-bundled'}")
+    print(f"codex_python_sdk_version: {_installed_version('openai-codex')}")
+    print(f"codex_bundled_cli_version: {_installed_version('openai-codex-cli-bin')}")
     print("roles:")
     for role in sorted(cfg.codex.roles):
         resolved = resolve_role(cfg, role)
         print(f"  {role}:")
         print(f"    backend: {resolved.backend}")
-        print(f"    model: {resolved.model}")
+        print(f"    model: {resolved.model if resolved.model is not None else 'runtime-default'}")
         print(f"    sandbox: {resolved.sandbox}")
         print(f"    approval_mode: {resolved.approval_mode}")
         print(f"    timeout_seconds: {resolved.timeout_seconds}")
@@ -291,87 +299,147 @@ def command_codex(args: argparse.Namespace) -> int:
         repo_id=args.repo,
         resolved_role=resolved,
     )
-    _print_yaml(
-        {
-            "role": request.role,
-            "repo": args.repo,
-            "cwd": str(request.cwd),
-            "sandbox": request.sandbox,
-            "approval_mode": request.approval_mode,
-            "model": request.model,
-            "timeout_seconds": request.timeout_seconds,
-            "instructions_bytes": len(request.developer_instructions),
-            "resolved": resolved.to_dict(cfg.project_root),
-        }
-    )
+    report = {
+        "role": request.role,
+        "repo": args.repo,
+        "cwd": str(request.cwd),
+        "sandbox": request.sandbox,
+        "approval_mode": request.approval_mode,
+        "model": request.model,
+        "timeout_seconds": request.timeout_seconds,
+        "instructions_bytes": len(request.developer_instructions),
+        "resolved": resolved.to_dict(cfg.project_root),
+        "python_sdk_version": _installed_version("openai-codex"),
+        "bundled_cli_version": _installed_version("openai-codex-cli-bin"),
+    }
+    if args.execute:
+        result = CodexSDKBackend().run(request)
+        report["executed"] = True
+        report["response"] = result.text
+        report["backend"] = result.raw.get("module")
+    else:
+        report["executed"] = False
+    _print_yaml(report)
     return 0
 
 
 def command_operator(args: argparse.Namespace) -> int:
     root = Path.cwd()
-    store = OperatorStore(root)
+    service = OperatorGovernanceService(
+        root,
+        trusted_ref=args.trusted_ref,
+        trusted_file=Path(args.trusted_file) if args.trusted_file else None,
+        bootstrap_policy=args.bootstrap_policy,
+        allowed_signers=Path(args.allowed_signers) if args.allowed_signers else None,
+    )
     action = args.operator_action
     if action == "triage":
-        triage_id = args.triage_id or store.next_id("triage")
-        triage = OperatorTriage(
-            triage_id=triage_id,
+        triage = service.create_triage(
+            triage_id=args.triage_id,
             summary=args.summary,
             suspected_layers=args.suspected_layer,
             confidence=args.confidence,
-            evidence=args.evidence or [],
-            next_actions=args.next_action or [],
+            evidence=args.evidence,
+            next_actions=args.next_action or (),
+            creator=args.creator,
         )
-        path = store.write_triage(triage)
-        _print_yaml({"triage_id": triage_id, "path": str(path)})
+        _print_yaml(triage.to_dict())
     elif action == "request":
-        request_id = args.request_id or store.next_id("request")
-        request = OperatorRequest(
-            request_id=request_id,
+        request = service.create_request(
+            request_id=args.request_id,
+            triage_id=args.triage_id,
             summary=args.summary,
             primary_layer=args.primary_layer,
-            secondary_layers=args.secondary_layer or [],
-            risk=args.risk,
-            triage_id=args.triage_id,
-            evidence=args.evidence or [],
-            validation_commands=args.validation_command or [],
+            secondary_layers=args.secondary_layer or (),
+            requested_risk=args.risk,
+            validation_profiles=args.validation_profile or (),
             performance_baseline=args.performance_baseline,
+            creator=args.creator,
+            branch=args.branch,
+            expires_at=args.expires_at,
         )
-        path = store.write_request(request)
-        _print_yaml({"request_id": request_id, "path": str(path)})
+        _print_yaml(request.to_dict())
     elif action == "review":
-        review = OperatorReview(
-            request_id=args.request_id,
+        approval = service.add_reviewer_decision(
+            args.request_id,
             reviewer=args.reviewer,
-            reviewer_kind=args.kind,
             decision=args.decision,
             reason=args.reason,
-            approved_paths=args.approved_path or [],
-            required_validation=args.required_validation or [],
+            allowed_layers=args.allowed_layer or None,
+            allowed_paths=args.allowed_path or (),
+            expires_at=args.expires_at,
         )
-        path = store.write_review(review)
-        _print_yaml({"request_id": args.request_id, "path": str(path), "decision": args.decision})
-    elif action in {"validate", "preflight"}:
-        report = validate_operator_request(
-            root,
+        _print_yaml(approval.to_dict())
+    elif action == "approval-payload":
+        print(
+            service.create_approval_payload(
+                args.request_id,
+                Path(args.out),
+                approver=args.approver,
+                stage=args.stage,
+                reason=args.reason,
+                allowed_paths=args.allowed_path or (),
+                expires_at=args.expires_at,
+            )
+        )
+    elif action == "approve-signed":
+        approval = service.import_signed_approval(
             args.request_id,
-            base_ref=args.base_ref,
-            run_validation_commands=args.run_validation_commands,
-            validation_timeout_seconds=args.validation_timeout_seconds,
-            record=not args.no_record,
+            payload_path=Path(args.payload),
+            signature_path=Path(args.signature),
         )
+        _print_yaml(approval.to_dict())
+    elif action == "approve-github":
+        approval = service.import_github_approval(
+            args.request_id,
+            repository=args.repository,
+            pull_request=args.pull_request,
+            review_id=args.review_id,
+            reason=args.reason,
+            stage=args.stage,
+        )
+        _print_yaml(approval.to_dict())
+    elif action == "preflight":
+        report = service.preflight(args.request_id, actor=args.actor)
+        _print_yaml(report)
+        return 0 if report["allowed"] else 1
+    elif action == "workspace-create":
+        _print_yaml(service.create_workspace(args.request_id, actor=args.actor))
+    elif action == "postflight":
+        report = service.postflight(args.request_id, actor=args.actor)
+        _print_yaml(report)
+        return 0 if report["allowed"] else 1
+    elif action == "validate":
+        report = service.validate(args.request_id, current_metrics=parse_metric(args.metric or []), actor=args.actor)
         _print_yaml(report)
         return 0 if report["policy"]["allowed"] else 1
+    elif action == "finalize":
+        report = service.finalize(args.request_id, actor=args.actor)
+        _print_yaml(report)
+        return 0 if report["allowed"] else 1
+    elif action == "status":
+        _print_yaml(service.status(args.request_id))
+    elif action == "export-bundle":
+        print(service.export_bundle(args.request_id, output_root=Path(args.output_root) if args.output_root else None))
+    elif action == "revoke":
+        _print_yaml(service.revoke(args.request_id, actor=args.actor, reason=args.reason))
     elif action == "baseline":
         if args.baseline_action == "record":
-            path = record_baseline(root, args.name, parse_metric(args.metric or []), notes=args.notes or "")
+            path = record_baseline(
+                root,
+                args.name,
+                parse_metric(args.metric or []),
+                base_sha=args.base_sha or rev_parse(root, "HEAD"),
+                artifacts=args.artifact or [],
+                notes=args.notes or "",
+            )
             print(path)
         elif args.baseline_action == "compare":
             report = compare_baseline(
                 root,
                 args.name,
                 parse_metric(args.metric or []),
-                max_regression_percent=parse_metric(args.max_regression_percent or []),
-                min_metrics=parse_metric(args.min_metric or []),
+                service.policy().data.get("metrics") or {},
             )
             _print_yaml(report)
             return 0 if report["ok"] else 1
@@ -530,58 +598,124 @@ def build_parser() -> argparse.ArgumentParser:
     probe = codex_sub.add_parser("probe-role")
     probe.add_argument("--role", required=True, choices=["writer", "evaluator", "controller", "memory_maintainer", "eval_judge"])
     probe.add_argument("--repo")
+    probe.add_argument("--execute", action="store_true", help="Run a real read-only Codex SDK compatibility probe")
     probe.set_defaults(func=command_codex)
 
     operator = sub.add_parser("operator")
     operator_sub = operator.add_subparsers(dest="operator_action", required=True)
+
+    def governance_options(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--trusted-ref", default="origin/main")
+        command.add_argument("--trusted-file")
+        command.add_argument("--bootstrap-policy", action="store_true")
+        command.add_argument("--allowed-signers")
+
     triage = operator_sub.add_parser("triage")
+    governance_options(triage)
     triage.add_argument("--triage-id")
     triage.add_argument("--summary", required=True)
     triage.add_argument("--suspected-layer", action="append", choices=VALID_LAYERS, required=True)
     triage.add_argument("--confidence", choices=VALID_CONFIDENCE, default="low")
-    triage.add_argument("--evidence", action="append")
+    triage.add_argument("--evidence", action="append", required=True)
     triage.add_argument("--next-action", action="append")
+    triage.add_argument("--creator")
     triage.set_defaults(func=command_operator)
+
     request = operator_sub.add_parser("request")
+    governance_options(request)
     request.add_argument("--request-id")
+    request.add_argument("--triage-id", required=True)
     request.add_argument("--summary", required=True)
     request.add_argument("--primary-layer", choices=VALID_LAYERS, required=True)
     request.add_argument("--secondary-layer", action="append", choices=VALID_LAYERS)
     request.add_argument("--risk", choices=VALID_RISKS, default="low")
-    request.add_argument("--triage-id")
-    request.add_argument("--evidence", action="append")
-    request.add_argument("--validation-command", action="append")
+    request.add_argument("--validation-profile", action="append")
     request.add_argument("--performance-baseline")
+    request.add_argument("--creator")
+    request.add_argument("--branch")
+    request.add_argument("--expires-at")
     request.set_defaults(func=command_operator)
+
     review = operator_sub.add_parser("review")
+    governance_options(review)
     review.add_argument("request_id")
     review.add_argument("--reviewer", required=True)
-    review.add_argument("--kind", choices=VALID_REVIEW_KINDS, required=True)
-    review.add_argument("--decision", choices=VALID_REVIEW_DECISIONS, required=True)
+    review.add_argument("--decision", choices=VALID_APPROVAL_DECISIONS, required=True)
     review.add_argument("--reason", required=True)
-    review.add_argument("--approved-path", action="append")
-    review.add_argument("--required-validation", action="append")
+    review.add_argument("--allowed-layer", action="append", choices=VALID_LAYERS)
+    review.add_argument("--allowed-path", action="append")
+    review.add_argument("--expires-at")
     review.set_defaults(func=command_operator)
-    for name in ("validate", "preflight"):
-        validate = operator_sub.add_parser(name)
-        validate.add_argument("--request-id", required=True)
-        validate.add_argument("--base-ref", default="HEAD")
-        validate.add_argument("--run-validation-commands", action="store_true")
-        validate.add_argument("--validation-timeout-seconds", type=int)
-        validate.add_argument("--no-record", action="store_true")
-        validate.set_defaults(func=command_operator)
+
+    payload = operator_sub.add_parser("approval-payload")
+    governance_options(payload)
+    payload.add_argument("request_id")
+    payload.add_argument("--out", required=True)
+    payload.add_argument("--approver", required=True)
+    payload.add_argument("--stage", choices=["scope", "merge"], required=True)
+    payload.add_argument("--reason", required=True)
+    payload.add_argument("--allowed-path", action="append")
+    payload.add_argument("--expires-at")
+    payload.set_defaults(func=command_operator)
+
+    signed = operator_sub.add_parser("approve-signed")
+    governance_options(signed)
+    signed.add_argument("request_id")
+    signed.add_argument("--payload", required=True)
+    signed.add_argument("--signature", required=True)
+    signed.set_defaults(func=command_operator)
+
+    github = operator_sub.add_parser("approve-github")
+    governance_options(github)
+    github.add_argument("request_id")
+    github.add_argument("--repository", required=True)
+    github.add_argument("--pull-request", required=True, type=int)
+    github.add_argument("--review-id", required=True, type=int)
+    github.add_argument("--reason", required=True)
+    github.add_argument("--stage", choices=["scope", "merge"], default="merge")
+    github.set_defaults(func=command_operator)
+
+    for name in ("preflight", "workspace-create", "postflight", "finalize", "status"):
+        command = operator_sub.add_parser(name)
+        governance_options(command)
+        command.add_argument("--request-id", required=True)
+        command.add_argument("--actor")
+        command.set_defaults(func=command_operator)
+
+    export_bundle = operator_sub.add_parser("export-bundle")
+    governance_options(export_bundle)
+    export_bundle.add_argument("--request-id", required=True)
+    export_bundle.add_argument("--output-root")
+    export_bundle.set_defaults(func=command_operator)
+
+    validate = operator_sub.add_parser("validate")
+    governance_options(validate)
+    validate.add_argument("--request-id", required=True)
+    validate.add_argument("--metric", action="append", help="Current metric as key=value")
+    validate.add_argument("--actor")
+    validate.set_defaults(func=command_operator)
+
+    revoke = operator_sub.add_parser("revoke")
+    governance_options(revoke)
+    revoke.add_argument("--request-id", required=True)
+    revoke.add_argument("--reason", required=True)
+    revoke.add_argument("--actor")
+    revoke.set_defaults(func=command_operator)
+
     baseline = operator_sub.add_parser("baseline")
     baseline_sub = baseline.add_subparsers(dest="baseline_action", required=True)
     baseline_record = baseline_sub.add_parser("record")
+    governance_options(baseline_record)
     baseline_record.add_argument("--name", required=True)
     baseline_record.add_argument("--metric", action="append", help="Numeric metric as key=value")
+    baseline_record.add_argument("--base-sha")
+    baseline_record.add_argument("--artifact", action="append")
     baseline_record.add_argument("--notes")
     baseline_record.set_defaults(func=command_operator)
     baseline_compare = baseline_sub.add_parser("compare")
+    governance_options(baseline_compare)
     baseline_compare.add_argument("--name", required=True)
     baseline_compare.add_argument("--metric", action="append", help="Current numeric metric as key=value")
-    baseline_compare.add_argument("--max-regression-percent", action="append", help="Maximum allowed increase as key=value")
-    baseline_compare.add_argument("--min-metric", action="append", help="Minimum allowed value as key=value")
     baseline_compare.set_defaults(func=command_operator)
     return parser
 

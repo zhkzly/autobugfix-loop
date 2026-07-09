@@ -69,6 +69,7 @@ codex:
   role_runtime:
     enabled: true
     runtime_root: .autobugfix/runtime/codex-sdk
+    codex_bin: null
     bridge_auth: true
     skill_guard: true
     strict_skill_guard: true
@@ -88,6 +89,10 @@ repos:
       command_template: null
 
 Run:
+If the preview SDK's pinned runtime is older than the locally installed Codex
+app, set `AUTOBUGFIX_CODEX_BIN="$(command -v codex)"`. The Python SDK still
+launches the app-server directly; Autobugfix must not use `codex exec`.
+
 uv run autobugfix doctor
 
 Expected:

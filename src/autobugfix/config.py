@@ -42,6 +42,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "role_runtime": {
             "enabled": True,
             "runtime_root": ".autobugfix/runtime/codex-sdk",
+            "codex_bin": None,
             "bridge_auth": True,
             "skill_guard": True,
             "strict_skill_guard": True,
@@ -231,6 +232,7 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
     role_runtime = RoleRuntimeConfig(
         enabled=bool(runtime_raw.get("enabled", True)),
         runtime_root=Path(str(runtime_raw.get("runtime_root", ".autobugfix/runtime/codex-sdk"))),
+        codex_bin=_resolve(root, runtime_raw.get("codex_bin")),
         bridge_auth=bool(runtime_raw.get("bridge_auth", True)),
         skill_guard=bool(runtime_raw.get("skill_guard", True)),
         strict_skill_guard=bool(runtime_raw.get("strict_skill_guard", True)),

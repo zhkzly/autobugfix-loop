@@ -123,6 +123,7 @@ class SchedulerConfig:
 class RoleRuntimeConfig:
     enabled: bool = True
     runtime_root: Path = Path(".autobugfix/runtime/codex-sdk")
+    codex_bin: Path | None = None
     bridge_auth: bool = True
     skill_guard: bool = True
     strict_skill_guard: bool = True

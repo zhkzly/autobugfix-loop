@@ -1,12 +1,16 @@
-version: 1
+version: 2
 
 protected_branches:
   - main
   - master
 
+governance_metadata_paths:
+  - .autobugfix-governance/**
+
+baseline_root: .autobugfix-baselines
+
 layers:
   execution:
-    description: "Task state, worktrees, writer/verifier/evaluator execution, gates, workers, projections."
     paths:
       - src/autobugfix/service.py
       - src/autobugfix/task_store.py
@@ -19,9 +23,18 @@ layers:
       - src/autobugfix/ppe.py
       - src/autobugfix/projection.py
       - src/autobugfix/events.py
+      - src/autobugfix/locks.py
       - .agents/role-skills/execution/**
+      - tests/test_runner.py
+      - tests/test_service.py
+      - tests/test_config_task_store.py
+      - tests/test_scheduler.py
+      - tests/test_worker.py
+      - tests/test_ppe.py
+      - tests/test_projection.py
+      - tests/test_evaluator.py
+      - tests/test_locks.py
   memory:
-    description: "Execution evidence collection, digests, proposal patches, active memory, approved skills."
     paths:
       - src/autobugfix/memory/**
       - src/autobugfix/memory_worker.py
@@ -29,23 +42,40 @@ layers:
       - .agents/role-skills/memory/**
       - .autobugfix-memory/active/**
       - .autobugfix-memory/skills/**
+      - tests/test_memory.py
+      - tests/test_memory_worker.py
+      - tests/test_memory_gradio_app.py
   eval:
-    description: "Dataset adapters, isolated execution harnesses, scorers, diagnosis, eval supervision."
     paths:
       - src/autobugfix/dataset.py
       - src/autobugfix/eval/**
       - .agents/role-skills/eval/**
+      - tests/test_dataset.py
+      - tests/test_eval.py
   operator:
-    description: "Operator governance, operator skills, operator records, supervision policy."
     paths:
+      - .autobugfix-governance/**
+      - .autobugfix-baselines/**
       - src/autobugfix/operator/**
       - .agents/skills/autobugfix-eval-operator/**
       - .agents/skills/oncall-bugfix/**
       - scripts/validate_operator_policy.py
+      - scripts/validate_operator_pr.py
+      - scripts/install_operator_governance.py
+      - scripts/real_toy_acceptance.py
+      - tests/test_operator_*.py
+      - .github/workflows/operator-policy.yml
+      - .github/CODEOWNERS
+      - .github/CODEOWNERS.example
+      - .github/autobugfix-allowed-signers
   shared_runtime:
-    description: "Configuration, Codex runtime, shared role resolution, CLI/controller/UI adapters."
     paths:
+      - src/autobugfix/__init__.py
       - src/autobugfix/config.py
+      - src/autobugfix/git_utils.py
+      - src/autobugfix/models.py
+      - src/autobugfix/prompts.py
+      - src/autobugfix/verification_policy.py
       - src/autobugfix/role_config.py
       - src/autobugfix/codex_backend.py
       - src/autobugfix/codex_runtime.py
@@ -54,42 +84,124 @@ layers:
       - src/autobugfix/cli.py
       - src/autobugfix/controller.py
       - src/autobugfix/gradio_app.py
+      - tests/test_cli.py
+      - tests/test_codex_*.py
+      - tests/test_config_*.py
+      - tests/test_controller.py
+      - tests/test_gradio_app.py
+      - tests/test_prompts.py
+      - tests/helpers.py
       - pyproject.toml
+      - uv.lock
   docs_skills:
-    description: "Project documentation, Trellis specs, rebuild docs, public README and skill contracts."
     paths:
       - README.md
       - AGENTS.md
       - docs/**
       - .trellis/spec/**
+      - .trellis/tasks/**
       - .agents/skills/**
       - .agents/role-skills/**
+      - scripts/README.md
+      - scripts/validate_role_skills.py
+      - .gitignore
 
-common_paths:
-  - tests/**
-  - scripts/README.md
-  - .gitignore
+protected_paths:
+  - .autobugfix-baselines/**
+  - src/autobugfix/operator/**
+  - scripts/validate_operator_policy.py
+  - scripts/validate_operator_pr.py
+  - scripts/install_operator_governance.py
+  - scripts/real_toy_acceptance.py
+  - .github/workflows/operator-policy.yml
+  - .github/CODEOWNERS
+  - .github/CODEOWNERS.example
+  - .github/autobugfix-allowed-signers
+  - .trellis/spec/backend/autobugfix-loop-harness-contract.md
+  - .trellis/spec/backend/operator-governance-policy.md
+  - .trellis/spec/guides/autobugfix-task-start-checklist.md
+  - src/autobugfix/models.py
+  - src/autobugfix/task_store.py
+  - src/autobugfix/service.py
+  - src/autobugfix/runner.py
+  - src/autobugfix/worktree.py
+  - src/autobugfix/memory/store.py
+  - src/autobugfix/memory/service.py
+  - src/autobugfix/eval/scorers.py
+  - src/autobugfix/codex_runtime.py
+  - src/autobugfix/codex_sdk.py
 
-architecture_change:
-  requires_human: true
-  protected_paths:
-    - src/autobugfix/operator/constitution.yaml
-    - .trellis/spec/backend/autobugfix-loop-harness-contract.md
-    - .trellis/spec/guides/autobugfix-task-start-checklist.md
-    - src/autobugfix/models.py
-    - src/autobugfix/task_store.py
-    - src/autobugfix/service.py
-    - src/autobugfix/memory/store.py
-    - src/autobugfix/memory/service.py
-    - src/autobugfix/eval/scorers.py
-    - src/autobugfix/codex_runtime.py
-    - src/autobugfix/codex_sdk.py
+approval:
+  allowed_signers_env: AUTOBUGFIX_OPERATOR_ALLOWED_SIGNERS
+  allowed_signers_file: .github/autobugfix-allowed-signers
+  github_allowed_reviewers: []
+  github_require_online_recheck: true
+  namespace: autobugfix-operator
 
-review_policy:
-  cross_layer_requires_review: true
-  medium_risk_requires_review: true
-  high_risk_requires_human: true
-  architecture_requires_human: true
+validation_profiles:
+  operator:
+    timeout_seconds: 180
+    commands:
+      - name: operator-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_operator_policy.py]
+  execution:
+    timeout_seconds: 240
+    commands:
+      - name: execution-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_runner.py, tests/test_service.py, tests/test_config_task_store.py]
+  memory:
+    timeout_seconds: 240
+    commands:
+      - name: memory-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_memory.py, tests/test_memory_worker.py]
+  eval:
+    timeout_seconds: 240
+    commands:
+      - name: eval-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_eval.py, tests/test_dataset.py]
+  shared_runtime:
+    timeout_seconds: 240
+    commands:
+      - name: runtime-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_config_task_store.py, tests/test_codex_runtime.py, tests/test_codex_sdk.py]
+  docs_skills:
+    timeout_seconds: 120
+    commands:
+      - name: role-skill-validation
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, python, scripts/validate_role_skills.py]
+  full:
+    timeout_seconds: 300
+    commands:
+      - name: full-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q]
+      - name: compileall
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, python, -m, compileall, -q, src, tests, scripts]
+      - name: diff-check
+        argv: [git, diff, --check]
+
+risk_required_profiles:
+  low: []
+  medium: [full]
+  high: [full]
+  constitutional: [full]
+
+metrics:
+  pass_rate:
+    direction: higher_is_better
+    required: true
+    minimum: 1.0
+  artifact_completeness:
+    direction: higher_is_better
+    required: true
+    minimum: 1.0
+  runtime_seconds:
+    direction: lower_is_better
+    required: false
+    max_regression_percent: 20.0
+  codex_calls:
+    direction: lower_is_better
+    required: false
+    max_regression_percent: 25.0
 
 static_invariants:
   required_gitignore:
@@ -107,9 +219,9 @@ static_invariants:
       sandbox: read-only
       approval_mode: deny_all
   eval_forbidden_calls:
-    - apply_gate(
-    - deploy_ppe(
-    - archive(
-    - approve-ppe
+    - apply_gate
+    - deploy_ppe
+    - archive
+    - approve_ppe
   production_service_requires:
     - CodexSDKBackend

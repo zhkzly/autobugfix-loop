@@ -91,6 +91,7 @@ codex:
   role_runtime:
     enabled: true
     runtime_root: .autobugfix/runtime/codex-sdk
+    codex_bin: null
     bridge_auth: true
     skill_guard: true
     strict_skill_guard: true
