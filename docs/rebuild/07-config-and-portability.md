@@ -11,8 +11,10 @@ repo = config.repo(repo_id)
 service.create_task(repo_id, title, body)
 worktree = repo.worktree_root / task_id
 
-Execution Config
-.autobugfix/config.yaml owns execution-loop settings only:
+Control Config
+.autobugfix/config.yaml owns shared runtime, Execution, Eval role selection,
+and Operator harness settings. Memory content/approval state remains under its
+separate boundary:
 task_root: .autobugfix/tasks
 scheduler:
   default_max_concurrent: 2
@@ -71,6 +73,30 @@ codex:
       skill_paths:
         - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
         - .agents/role-skills/eval/judge/autobugfix-eval-judge/SKILL.md
+    operator_supervisor:
+      backend: codex
+      model: null
+      sandbox: read-only
+      approval_mode: deny_all
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/operator/supervisor/autobugfix-operator-supervisor/SKILL.md
+    operator_writer:
+      backend: codex
+      model: null
+      sandbox: workspace-write
+      approval_mode: auto_review
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/operator/writer/autobugfix-operator-writer/SKILL.md
+    operator_verifier:
+      backend: codex
+      model: null
+      sandbox: read-only
+      approval_mode: deny_all
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/operator/verifier/autobugfix-operator-verifier/SKILL.md
 worker:
   tick_interval_seconds: 5
 memory_worker:
@@ -78,12 +104,46 @@ memory_worker:
 eval:
   model_mode: codex
   roles: {}
+operator:
+  state: {root: .autobugfix/operator-v3, database_name: governance.sqlite3}
+  artifacts: {root: .autobugfix/operator-artifacts}
+  worktrees:
+    root: .autobugfix/operator-worktrees
+    branch_template: operator/experiment/{request_id}
+  retry:
+    max_attempts: 5
+    max_auto_retries: 2
+    auto_retry_deterministic_failures: true
+  verification:
+    fast_profiles: [operator]
+    full_profiles: [full]
+    require_semantic_verifier: true
+    process_sandbox: auto
+    require_process_sandbox: true
+    network_access: false
+    runtime_venv: .venv
+  experiments:
+    enabled: true
+    trusted_ref: origin/main
+    default_profile: real-e2e
+    profiles: {}
+  promotion:
+    release_root: .autobugfix/releases
+    active_release_link: .autobugfix/active-release
+    require_pull_request: true
+    require_canary: true
+    auto_rollback_on_canary_failure: true
+    canary_profiles: [full]
 repos: {}
 
 Default config must contain no repo profiles. A user must configure the target repo explicitly.
 `codex.roles` is the primary model/skill/sandbox/approval surface. Legacy
 `writer_model`, `evaluator_model`, and `controller_model` remain compatibility
 inputs only.
+Operator role model/timeouts are configurable. There is no hardcoded model
+default: `model: null` delegates to the installed Codex runtime. The trusted
+machine constitution enforces backend, sandbox, approval mode, required skill,
+and process-sandbox minima, so project config cannot widen Operator authority.
 Repo Profile Defaults
 If a repo profile omits worktree_root, derive:
 <project-root>/.autobugfix/worktrees/<repo-id>
@@ -102,6 +162,23 @@ ppe:
   command_template: null
 
 Deploy must fail clearly if PPE command is missing.
+
+Codex Hook Placement
+The repository `.codex/hooks.json` belongs only to `operator_host`: the human
+or current main agent supervising Autobugfix from the trusted source checkout.
+It must not be treated as a generic agent policy.
+
+The following SDK roles run in isolated `CODEX_HOME` directories with
+`features.hooks = false`: Execution `writer` and `evaluator`,
+`memory_maintainer`, `eval_judge`, Eval's inner Execution roles, and Operator
+`operator_supervisor`, `operator_writer`, and `operator_verifier`.
+
+Disabling `codex.role_runtime.enabled` is invalid. If Autobugfix cannot locate
+the control root config or create the isolated runtime, production role launch
+fails instead of inheriting user/global hooks. The authoritative boundaries are
+the owning service, role sandbox, Git worktree, verifier/scorer, approval, and
+trusted CI.
+
 Memory Config
 .autobugfix-memory/config.yaml owns memory maintainer settings only:
 maintainer:

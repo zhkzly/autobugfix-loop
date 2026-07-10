@@ -42,6 +42,15 @@ class MemoryService:
         self.store.init()
         execution_config = load_config(self.project_root)
         task_store = TaskStore(self.project_root, execution_config.task_root)
+        task = task_store.load(task_id)
+        accepted = task.state == "accepted" or (
+            task.state == "archived" and task.archived_result == "accepted"
+        )
+        if not accepted:
+            raise MemoryServiceError(
+                f"memory may collect only accepted execution evidence: "
+                f"task {task_id} is {task.state} with result {task.archived_result or 'none'}"
+            )
         packet = collect_task_packet(task_store, task_id)
         raw_dir = self.store.raw_task_dir(task_id)
         raw_dir.mkdir(parents=True, exist_ok=True)

@@ -3,6 +3,8 @@ name: Operator Governance
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
 
 permissions:
   contents: read
@@ -33,6 +35,9 @@ jobs:
       - name: Install trusted dependencies
         working-directory: trusted
         run: uv sync --locked
+
+      - name: Install process sandbox
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
 
       - name: Validate candidate with trusted base policy
         env:

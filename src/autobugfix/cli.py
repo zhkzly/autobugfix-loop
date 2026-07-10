@@ -51,6 +51,18 @@ def _print_yaml(data: object) -> None:
     print(yaml.safe_dump(data, sort_keys=False).strip())
 
 
+def _parse_values(values: list[str]) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for item in values:
+        if "=" not in item:
+            raise ValueError(f"value must use key=value: {item}")
+        key, value = item.split("=", 1)
+        if not key.strip():
+            raise ValueError("value key must not be empty")
+        parsed[key.strip()] = value
+    return parsed
+
+
 def _installed_version(distribution: str) -> str:
     try:
         return importlib.metadata.version(distribution)
@@ -351,6 +363,7 @@ def command_operator(args: argparse.Namespace) -> int:
             summary=args.summary,
             primary_layer=args.primary_layer,
             secondary_layers=args.secondary_layer or (),
+            planned_paths=args.planned_path or (),
             requested_risk=args.risk,
             validation_profiles=args.validation_profile or (),
             performance_baseline=args.performance_baseline,
@@ -368,6 +381,7 @@ def command_operator(args: argparse.Namespace) -> int:
             allowed_layers=args.allowed_layer or None,
             allowed_paths=args.allowed_path or (),
             expires_at=args.expires_at,
+            scope_revision_id=args.scope_revision_id,
         )
         _print_yaml(approval.to_dict())
     elif action == "approval-payload":
@@ -378,8 +392,10 @@ def command_operator(args: argparse.Namespace) -> int:
                 approver=args.approver,
                 stage=args.stage,
                 reason=args.reason,
+                allowed_layers=args.allowed_layer or None,
                 allowed_paths=args.allowed_path or (),
                 expires_at=args.expires_at,
+                scope_revision_id=args.scope_revision_id,
             )
         )
     elif action == "approve-signed":
@@ -387,6 +403,7 @@ def command_operator(args: argparse.Namespace) -> int:
             args.request_id,
             payload_path=Path(args.payload),
             signature_path=Path(args.signature),
+            scope_revision_id=args.scope_revision_id,
         )
         _print_yaml(approval.to_dict())
     elif action == "approve-github":
@@ -403,22 +420,108 @@ def command_operator(args: argparse.Namespace) -> int:
         report = service.preflight(args.request_id, actor=args.actor)
         _print_yaml(report)
         return 0 if report["allowed"] else 1
-    elif action == "workspace-create":
-        _print_yaml(service.create_workspace(args.request_id, actor=args.actor))
+    elif action in {"workspace-create", "start"}:
+        _print_yaml(service.start(args.request_id, actor=args.actor))
+    elif action == "guide":
+        _print_yaml(service.governance_context())
+    elif action == "advance":
+        _print_yaml(service.advance(args.request_id, actor=args.actor))
+    elif action == "supervise":
+        _print_yaml(service.run_supervisor(args.request_id, actor=args.actor))
+    elif action == "writer-start":
+        _print_yaml(service.start_writer(args.request_id, actor=args.actor))
+    elif action == "writer-retry":
+        _print_yaml(service.retry_writer(args.request_id, actor=args.actor))
+    elif action == "writer-cancel":
+        _print_yaml(service.cancel_writer(args.request_id, reason=args.reason, actor=args.actor))
+    elif action == "candidate-commit":
+        _print_yaml(
+            service.commit_candidate(
+                args.request_id,
+                message=args.message,
+                include_manifest=not args.no_manifest,
+                actor=args.actor,
+            )
+        )
     elif action == "postflight":
         report = service.postflight(args.request_id, actor=args.actor)
         _print_yaml(report)
-        return 0 if report["allowed"] else 1
-    elif action == "validate":
-        report = service.validate(args.request_id, current_metrics=parse_metric(args.metric or []), actor=args.actor)
+        return 0 if report["check_run"]["status"] == "PASSED" else 1
+    elif action in {"validate", "verify"}:
+        report = service.verify(
+            args.request_id,
+            mode=getattr(args, "mode", "full"),
+            current_metrics=parse_metric(args.metric or []),
+            actor=args.actor,
+        )
         _print_yaml(report)
-        return 0 if report["policy"]["allowed"] else 1
+        return 0 if report["check_run"]["status"] == "PASSED" else 1
+    elif action == "scope-change":
+        _print_yaml(
+            service.request_scope_change(
+                args.request_id,
+                add_layers=args.add_layer or (),
+                add_paths=args.add_path or (),
+                requested_risk=args.risk,
+                reason=args.reason,
+                actor=args.actor,
+            )
+        )
+    elif action == "scope-activate":
+        _print_yaml(service.activate_scope_revision(args.request_id, args.revision_id, actor=args.actor))
+    elif action == "experiment-run":
+        report = service.run_experiment(
+            args.request_id,
+            profile=args.profile,
+            values=_parse_values(args.value or []),
+            actor=args.actor,
+        )
+        _print_yaml(report)
+        return 0 if report["status"] == "COMPLETED" else 1
+    elif action == "reopen":
+        _print_yaml(service.reopen(args.request_id, reason=args.reason, actor=args.actor))
+    elif action == "close":
+        _print_yaml(service.close(args.request_id, outcome=args.outcome, actor=args.actor))
+    elif action == "promotion-prepare":
+        _print_yaml(service.prepare_promotion(args.request_id, actor=args.actor))
+    elif action == "promotion-open-pr":
+        _print_yaml(
+            service.open_pull_request(
+                args.promotion_id,
+                title=args.title,
+                body=args.body,
+                base=args.base,
+                push=not args.no_push,
+            )
+        )
+    elif action == "promotion-observe-merge":
+        _print_yaml(service.observe_merge(args.promotion_id, repository=args.repository))
+    elif action == "promotion-canary":
+        report = service.run_canary(args.promotion_id)
+        _print_yaml(report)
+        return 0 if report["promotion"]["status"] == "ACTIVE" else 1
+    elif action == "promotion-rollback":
+        _print_yaml(service.rollback(args.promotion_id, reason=args.reason, actor=args.actor))
+    elif action == "promotion-revert-pr":
+        _print_yaml(
+            service.open_revert_pull_request(
+                args.promotion_id,
+                title=args.title,
+                body=args.body,
+                base=args.base,
+                push=not args.no_push,
+            )
+        )
     elif action == "finalize":
         report = service.finalize(args.request_id, actor=args.actor)
         _print_yaml(report)
-        return 0 if report["allowed"] else 1
+        return 0
     elif action == "status":
         _print_yaml(service.status(args.request_id))
+    elif action == "audit":
+        report = service.audit(args.request_id)
+        _print_yaml(report)
+        return 0 if report["allowed"] else 1
     elif action == "export-bundle":
         print(service.export_bundle(args.request_id, output_root=Path(args.output_root) if args.output_root else None))
     elif action == "revoke":
@@ -443,6 +546,32 @@ def command_operator(args: argparse.Namespace) -> int:
             )
             _print_yaml(report)
             return 0 if report["ok"] else 1
+    return 0
+
+
+def command_writer_view(args: argparse.Namespace) -> int:
+    root = Path(args.control_root).resolve()
+    service = OperatorGovernanceService(
+        root,
+        trusted_ref=args.trusted_ref,
+        trusted_file=Path(args.trusted_file) if args.trusted_file else None,
+        bootstrap_policy=args.bootstrap_policy,
+    )
+    view = service.writer_view(args.request_id)
+    action = args.writer_view_action
+    if action == "task":
+        payload = {"request_id": view["request_id"], "phase": view["phase"], "task": view["task"]}
+    elif action == "context":
+        payload = {"request_id": view["request_id"], "evidence": view["evidence"]}
+    elif action == "scope":
+        payload = {"request_id": view["request_id"], "scope": view["scope"]}
+    elif action == "feedback":
+        payload = {"request_id": view["request_id"], "feedback": view["feedback"]}
+    elif action == "check-result":
+        payload = {"request_id": view["request_id"], "latest_check": view["latest_check"]}
+    else:
+        raise RuntimeError(f"unsupported writer view action: {action}")
+    _print_yaml(payload)
     return 0
 
 
@@ -596,7 +725,20 @@ def build_parser() -> argparse.ArgumentParser:
     codex = sub.add_parser("codex")
     codex_sub = codex.add_subparsers(dest="codex_action", required=True)
     probe = codex_sub.add_parser("probe-role")
-    probe.add_argument("--role", required=True, choices=["writer", "evaluator", "controller", "memory_maintainer", "eval_judge"])
+    probe.add_argument(
+        "--role",
+        required=True,
+        choices=[
+            "writer",
+            "evaluator",
+            "controller",
+            "memory_maintainer",
+            "eval_judge",
+            "operator_supervisor",
+            "operator_writer",
+            "operator_verifier",
+        ],
+    )
     probe.add_argument("--repo")
     probe.add_argument("--execute", action="store_true", help="Run a real read-only Codex SDK compatibility probe")
     probe.set_defaults(func=command_codex)
@@ -628,6 +770,7 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--summary", required=True)
     request.add_argument("--primary-layer", choices=VALID_LAYERS, required=True)
     request.add_argument("--secondary-layer", action="append", choices=VALID_LAYERS)
+    request.add_argument("--planned-path", action="append")
     request.add_argument("--risk", choices=VALID_RISKS, default="low")
     request.add_argument("--validation-profile", action="append")
     request.add_argument("--performance-baseline")
@@ -645,6 +788,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--allowed-layer", action="append", choices=VALID_LAYERS)
     review.add_argument("--allowed-path", action="append")
     review.add_argument("--expires-at")
+    review.add_argument("--scope-revision-id")
     review.set_defaults(func=command_operator)
 
     payload = operator_sub.add_parser("approval-payload")
@@ -654,8 +798,10 @@ def build_parser() -> argparse.ArgumentParser:
     payload.add_argument("--approver", required=True)
     payload.add_argument("--stage", choices=["scope", "merge"], required=True)
     payload.add_argument("--reason", required=True)
+    payload.add_argument("--allowed-layer", action="append", choices=VALID_LAYERS)
     payload.add_argument("--allowed-path", action="append")
     payload.add_argument("--expires-at")
+    payload.add_argument("--scope-revision-id")
     payload.set_defaults(func=command_operator)
 
     signed = operator_sub.add_parser("approve-signed")
@@ -663,6 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     signed.add_argument("request_id")
     signed.add_argument("--payload", required=True)
     signed.add_argument("--signature", required=True)
+    signed.add_argument("--scope-revision-id")
     signed.set_defaults(func=command_operator)
 
     github = operator_sub.add_parser("approve-github")
@@ -675,12 +822,38 @@ def build_parser() -> argparse.ArgumentParser:
     github.add_argument("--stage", choices=["scope", "merge"], default="merge")
     github.set_defaults(func=command_operator)
 
-    for name in ("preflight", "workspace-create", "postflight", "finalize", "status"):
+    guide = operator_sub.add_parser("guide")
+    governance_options(guide)
+    guide.set_defaults(func=command_operator)
+
+    for name in ("preflight", "start", "workspace-create", "postflight", "finalize", "status", "audit", "advance", "supervise"):
         command = operator_sub.add_parser(name)
         governance_options(command)
         command.add_argument("--request-id", required=True)
         command.add_argument("--actor")
         command.set_defaults(func=command_operator)
+
+    for name in ("writer-start", "writer-retry"):
+        command = operator_sub.add_parser(name)
+        governance_options(command)
+        command.add_argument("--request-id", required=True)
+        command.add_argument("--actor")
+        command.set_defaults(func=command_operator)
+
+    writer_cancel = operator_sub.add_parser("writer-cancel")
+    governance_options(writer_cancel)
+    writer_cancel.add_argument("--request-id", required=True)
+    writer_cancel.add_argument("--reason", required=True)
+    writer_cancel.add_argument("--actor")
+    writer_cancel.set_defaults(func=command_operator)
+
+    candidate_commit = operator_sub.add_parser("candidate-commit")
+    governance_options(candidate_commit)
+    candidate_commit.add_argument("--request-id", required=True)
+    candidate_commit.add_argument("--message", required=True)
+    candidate_commit.add_argument("--no-manifest", action="store_true")
+    candidate_commit.add_argument("--actor")
+    candidate_commit.set_defaults(func=command_operator)
 
     export_bundle = operator_sub.add_parser("export-bundle")
     governance_options(export_bundle)
@@ -694,6 +867,95 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--metric", action="append", help="Current metric as key=value")
     validate.add_argument("--actor")
     validate.set_defaults(func=command_operator)
+
+    verify = operator_sub.add_parser("verify")
+    governance_options(verify)
+    verify.add_argument("--request-id", required=True)
+    verify.add_argument("--mode", choices=["fast", "full"], default="full")
+    verify.add_argument("--metric", action="append", help="Current metric as key=value")
+    verify.add_argument("--actor")
+    verify.set_defaults(func=command_operator)
+
+    scope_change = operator_sub.add_parser("scope-change")
+    governance_options(scope_change)
+    scope_change.add_argument("--request-id", required=True)
+    scope_change.add_argument("--add-layer", action="append", choices=VALID_LAYERS)
+    scope_change.add_argument("--add-path", action="append")
+    scope_change.add_argument("--risk", choices=VALID_RISKS, default="low")
+    scope_change.add_argument("--reason", required=True)
+    scope_change.add_argument("--actor")
+    scope_change.set_defaults(func=command_operator)
+
+    scope_activate = operator_sub.add_parser("scope-activate")
+    governance_options(scope_activate)
+    scope_activate.add_argument("--request-id", required=True)
+    scope_activate.add_argument("--revision-id", required=True)
+    scope_activate.add_argument("--actor")
+    scope_activate.set_defaults(func=command_operator)
+
+    experiment_run = operator_sub.add_parser("experiment-run")
+    governance_options(experiment_run)
+    experiment_run.add_argument("--request-id", required=True)
+    experiment_run.add_argument("--profile")
+    experiment_run.add_argument("--value", action="append", help="Experiment input as key=value")
+    experiment_run.add_argument("--actor")
+    experiment_run.set_defaults(func=command_operator)
+
+    reopen = operator_sub.add_parser("reopen")
+    governance_options(reopen)
+    reopen.add_argument("--request-id", required=True)
+    reopen.add_argument("--reason", required=True)
+    reopen.add_argument("--actor")
+    reopen.set_defaults(func=command_operator)
+
+    close = operator_sub.add_parser("close")
+    governance_options(close)
+    close.add_argument("--request-id", required=True)
+    close.add_argument("--outcome", required=True, choices=["merged", "abandoned", "rejected", "superseded", "rolled_back"])
+    close.add_argument("--actor")
+    close.set_defaults(func=command_operator)
+
+    promotion_prepare = operator_sub.add_parser("promotion-prepare")
+    governance_options(promotion_prepare)
+    promotion_prepare.add_argument("--request-id", required=True)
+    promotion_prepare.add_argument("--actor")
+    promotion_prepare.set_defaults(func=command_operator)
+
+    promotion_pr = operator_sub.add_parser("promotion-open-pr")
+    governance_options(promotion_pr)
+    promotion_pr.add_argument("--promotion-id", required=True)
+    promotion_pr.add_argument("--title", required=True)
+    promotion_pr.add_argument("--body", required=True)
+    promotion_pr.add_argument("--base", default="main")
+    promotion_pr.add_argument("--no-push", action="store_true")
+    promotion_pr.set_defaults(func=command_operator)
+
+    promotion_merge = operator_sub.add_parser("promotion-observe-merge")
+    governance_options(promotion_merge)
+    promotion_merge.add_argument("--promotion-id", required=True)
+    promotion_merge.add_argument("--repository", required=True)
+    promotion_merge.set_defaults(func=command_operator)
+
+    promotion_canary = operator_sub.add_parser("promotion-canary")
+    governance_options(promotion_canary)
+    promotion_canary.add_argument("--promotion-id", required=True)
+    promotion_canary.set_defaults(func=command_operator)
+
+    promotion_rollback = operator_sub.add_parser("promotion-rollback")
+    governance_options(promotion_rollback)
+    promotion_rollback.add_argument("--promotion-id", required=True)
+    promotion_rollback.add_argument("--reason", required=True)
+    promotion_rollback.add_argument("--actor")
+    promotion_rollback.set_defaults(func=command_operator)
+
+    promotion_revert = operator_sub.add_parser("promotion-revert-pr")
+    governance_options(promotion_revert)
+    promotion_revert.add_argument("--promotion-id", required=True)
+    promotion_revert.add_argument("--title", required=True)
+    promotion_revert.add_argument("--body", required=True)
+    promotion_revert.add_argument("--base", default="main")
+    promotion_revert.add_argument("--no-push", action="store_true")
+    promotion_revert.set_defaults(func=command_operator)
 
     revoke = operator_sub.add_parser("revoke")
     governance_options(revoke)
@@ -717,6 +979,17 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_compare.add_argument("--name", required=True)
     baseline_compare.add_argument("--metric", action="append", help="Current numeric metric as key=value")
     baseline_compare.set_defaults(func=command_operator)
+
+    writer_view = sub.add_parser("writer")
+    writer_view_sub = writer_view.add_subparsers(dest="writer_view_action", required=True)
+    for name in ("task", "context", "scope", "feedback", "check-result"):
+        command = writer_view_sub.add_parser(name)
+        command.add_argument("--request-id", required=True)
+        command.add_argument("--control-root", default=".")
+        command.add_argument("--trusted-ref", default="origin/main")
+        command.add_argument("--trusted-file")
+        command.add_argument("--bootstrap-policy", action="store_true")
+        command.set_defaults(func=command_writer_view)
     return parser
 
 

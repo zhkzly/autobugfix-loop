@@ -76,8 +76,10 @@
 - Memory loop purpose:
   - Convert execution evidence into precompiled memory, LLM wiki content, and
     reusable skills.
-  - Memory may read execution evidence but must not mutate execution task
-    state, locks, gates, branches, or target worktrees.
+  - Memory may collect only evidence that the Execution human gate accepted,
+    either in `accepted` state or an archive whose result is `accepted`.
+  - Memory must not mutate execution task state, locks, gates, branches, or
+    target worktrees.
   - Memory proposals require explicit approval before becoming active memory or
     approved skills.
 - Eval loop purpose:
@@ -92,6 +94,14 @@
   - Operator should diagnose whether failures belong to repo config, task
     context, worktree isolation, writer role/skill/model, verifier command,
     evaluator, memory, eval harness, scheduler/state machine, or UI/projection.
+  - Operator is the supervisor harness for the other loops, not their state
+    owner. It requests transitions; a trusted Guard/service validates and
+    records them.
+  - The human constitution is normative soft guidance. The machine
+    constitution injects that guidance into Operator roles and enforces path,
+    risk, runtime-role, transition, and verification minima.
+  - Project Codex hooks guard the supervising main-agent Operator session only;
+    isolated SDK role runtimes disable hooks and remain safe without them.
 
 ### 4. Validation & Error Matrix
 
@@ -102,6 +112,7 @@
 - Missing verifier command -> invalid repo profile.
 - No raw logs/events/artifacts for a run -> invalid observability.
 - Memory auto-approves its own proposal -> invalid memory loop behavior.
+- Memory collects an unaccepted/failed/active task -> invalid memory input.
 - Eval creates a second task state machine -> invalid eval loop behavior.
 - Operator changes main directly -> invalid operator loop behavior.
 - New task starts without restating this baseline -> process violation.

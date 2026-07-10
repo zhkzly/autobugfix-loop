@@ -1,145 +1,227 @@
-# Operator Governance Policy
+# Operator Governance Policy V3
 
-> Executable contract for constraining the Operator as a bounded Autobugfix
-> execution node.
+> Executable and normative contract for constraining Operator self-improvement
+> without turning the Operator into a trusted state owner.
 
----
-
-## Scenario: Trusted Operator Permission Gate
+## Scenario: Trusted Operator State-Transition Harness
 
 ### 1. Scope / Trigger
 
-- Trigger: Any Operator-created change to Autobugfix code, config, skills,
-  tests, validation, baselines, workflow, or constitution.
-- Execution continues to own target-repo task state, Memory owns reviewed
-  knowledge state, and Eval owns benchmark run state. Operator governance owns
-  only diagnosis, authorization, workspaces, validation, regression, and audit.
-- Candidate branches are untrusted. Merge authority must use policy and code
-  from a trusted base ref or explicit trusted external file.
+Trigger this contract for every Operator diagnosis, candidate modification,
+scope change, experiment, verification, promotion, rollback, policy change,
+or runtime-role/configuration change.
+
+Autobugfix is a loop-engineering and harness-engineering control system.
+Execution repairs configured target repositories, Memory compiles accepted
+Execution evidence into reviewed wiki/skills, Eval reproducibly measures the
+real Execution loop, and Operator diagnoses and improves Autobugfix itself.
+
+The human constitution defines these purposes and ownership boundaries. The
+machine constitution at `src/autobugfix/operator/constitution.yaml` repeats
+them for every Operator role and compiles enforceable paths, risks, runtime
+minimums, transitions, and validation profiles. Agents and candidate
+worktrees are untrusted. `OperatorGovernanceService`, its external SQLite
+store, Git facts, isolated checks, external approvals, and trusted-base CI own
+authority.
 
 ### 2. Signatures
 
-- CLI lifecycle:
-  - `autobugfix operator triage --evidence ...`
-  - `autobugfix operator request --triage-id ... --primary-layer ...`
-  - `autobugfix operator review <id> --reviewer ... --decision ...`
-  - `autobugfix operator approval-payload <id> --stage scope|merge ...`
-  - `autobugfix operator approve-signed <id> --payload ... --signature ...`
-  - `autobugfix operator approve-github <id> --repository ... --pull-request ... --review-id ...`
-  - `autobugfix operator preflight --request-id ...`
-  - `autobugfix operator workspace-create --request-id ...`
-  - `autobugfix operator postflight --request-id ...`
-  - `autobugfix operator validate --request-id ... --metric key=value`
-  - `autobugfix operator finalize --request-id ...`
-  - `autobugfix operator export-bundle --request-id ...`
-- Trusted scripts:
-  - `scripts/validate_operator_policy.py --bundle|--request-id ...`
-  - `scripts/validate_operator_pr.py --trusted-root ... --candidate-root ...`
-- Python owners:
-  - `OperatorGovernanceService`
-  - `OperatorStore`
-  - `project_request(events)`
-  - `evaluate_policy(candidate_root, request, approvals, constitution=...)`
-  - `validate_bundle(...)`
+- Read/diagnosis: `operator guide|status|audit|supervise`.
+- Request lifecycle: `triage`, `request`, `start`, `reopen`, `close`.
+- Child runs: `writer-start|writer-retry|writer-cancel`, `verify`,
+  `experiment-run`.
+- Authority: `review`, `approval-payload`, `approve-signed`,
+  `approve-github`, `scope-change`, `scope-activate`.
+- Promotion: `candidate-commit`, `promotion-prepare`, `promotion-open-pr`,
+  `promotion-observe-merge`, `promotion-canary`, `promotion-rollback`, and
+  `promotion-revert-pr`.
+- Python owners: `OperatorGovernanceService`, `OperatorStore`,
+  `TransitionGuard`, `evaluate_policy`, `validate_bundle`, and
+  `project_request`.
+- DB authority tables: requests, events, writer_runs, check_runs, gates,
+  feedback, scope_revisions, approvals, experiments, promotions, artifacts,
+  and request_leases.
 
 ### 3. Contracts
 
-- Triage requires evidence and has a canonical SHA-256 digest.
-- Request is immutable and freezes `triage_digest`, `base_sha`, patch branch,
-  layer scope, validation profiles, expiry, and request digest.
-- Store writes immutable YAML records with exclusive creation. Request events
-  are append-only JSONL with a verified SHA-256 hash chain.
-- Permission classes:
-  - `layer_local`: automatic after preflight;
-  - `cross_layer`: independent reviewer, where reviewer != creator;
-  - `constitutional`: OpenSSH-signed human scope/merge approval or allowlisted
-    GitHub approved review.
-- Candidate risk is computed from trusted path rules. Requested risk can raise
-  but never lower computed risk.
-- Postflight compares frozen `base_sha` with candidate HEAD and includes
-  committed, staged, unstaged, and untracked files.
-- Operator patching occurs in a real request-specific Git worktree under
-  `.autobugfix/operator/worktrees`.
-- Validation profiles come from trusted constitution argv arrays and run with
-  `shell=False`. Request-provided shell commands are forbidden.
-- Baselines under `.autobugfix-baselines/**` are versioned trusted contracts;
-  runtime measurements cannot overwrite them.
-- Runtime records remain in ignored `.autobugfix/operator/**`. PR authority is
-  exported to `.autobugfix-governance/<request-id>/bundle.yaml`; trusted CI
-  rechecks the bundle and reruns validation profiles.
-- Bundle metadata is excluded from code patch digest to avoid circular signing,
-  but its schema and digest are validated.
+#### Aggregate
 
-Environment/configuration:
+Operator Request has exactly four phases:
 
-- `AUTOBUGFIX_OPERATOR_ALLOWED_SIGNERS`: optional local OpenSSH allowed-signers
-  path.
-- Trusted CI reads `.github/autobugfix-allowed-signers` from the base checkout.
-- `approval.github_allowed_reviewers` is configured in trusted constitution.
+```text
+REQUESTED -> ACTIVE -> VERIFIED -> CLOSED
+                 ^         |
+                 +---------+  reopen on patch/scope change
+```
+
+WriterRun, CheckRun, GateSnapshot, FeedbackPacket, ScopeRevision, Experiment,
+and Promotion are child records with independent statuses. Failed Writer or
+Check runs do not create more Request phases. No API accepts an arbitrary
+target state.
+
+#### State And Isolation
+
+- Trusted state defaults to `.autobugfix/operator-v3/governance.sqlite3` in
+  the control checkout and is configurable under `operator.state`.
+- Raw logs and large evidence live under the configured artifact root.
+- Candidate code lives in a real Git worktree under `operator.worktrees.root`.
+- State/artifact roots must be outside the candidate worktree.
+- WriterView excludes control-store paths and exposes only task, evidence,
+  effective scope, filtered checks, and feedback.
+- Authoritative commands run in a separate detached verification worktree.
+  Bubblewrap mounts the candidate writable, hides authority roots, removes
+  network by default, and binds the trusted runtime venv read-only while
+  `PYTHONPATH` selects candidate source.
+
+#### Roles
+
+- `operator_supervisor`: read-only; diagnoses and requests typed actions.
+- `operator_writer`: workspace-write only in one candidate; cannot approve,
+  verify, promote, merge, or write control state.
+- `operator_verifier`: read-only semantic review after deterministic checks;
+  cannot override a failed check.
+
+The service checks effective backend, sandbox, approval mode, and required
+skill against the trusted machine constitution before launching a role.
+Project config may choose model/timeouts but may not weaken permission minima.
+
+#### Transition Protocol
+
+1. `guide`: read project purpose, loop ownership, roles, and transitions.
+2. `triage`: record evidence-backed diagnosis without granting write scope.
+3. `request`: freeze triage digest, base SHA, branch, initial scope, profiles,
+   baseline, creator, expiry, and constitution digest.
+4. `start`: validate authority and create the real non-main worktree.
+5. `writer-start|writer-retry|writer-cancel`: create one bounded WriterRun.
+6. `verify --mode fast`: derive complete diff and publish feedback; it cannot
+   transition to VERIFIED.
+7. `scope-change`: append a version. Cross-layer approval binds to that exact
+   version; protected scope requires verified human authority.
+8. `candidate-commit`: generate an advisory PR manifest, stage, and commit the
+   candidate through the service.
+9. `experiment-run`: run configured toy/SWE-bench profiles in a detached
+   shadow worktree/state root and preserve host-observed results.
+10. `verify --mode full`: run policy, isolated deterministic profiles,
+    regression checks, artifact capture, and patch-bound semantic review.
+    Every required gate must pass before ACTIVE -> VERIFIED.
+11. `promotion-prepare`: bind a clean VERIFIED patch/head and current full
+    CheckRun into an external receipt.
+12. `promotion-open-pr` -> `promotion-observe-merge` -> `promotion-canary`:
+    merge and active-release activation remain separate.
+13. `promotion-rollback`: atomically restore last-known-good and write a
+    revert intent; `promotion-revert-pr` creates the non-force Git revert PR.
+
+`operator advance` performs one legal scheduler step at a time. It may
+auto-retry deterministic failures within budget, but stops on scope,
+authority, semantic, or retry-budget blocks.
+
+#### Authorization
+
+- Layer-local, unprotected scope may start automatically.
+- Cross-layer scope needs an independent reviewer bound to scope version.
+- Protected/constitutional scope needs OpenSSH-signed human or allowlisted
+  GitHub authority.
+- Candidate risk is recomputed from the trusted constitution and complete diff.
+- Requested risk may raise but never lower computed risk.
+- A changed patch, HEAD, scope version, policy digest, or approval binding
+  makes previous verification/promotion authority stale.
+
+#### Manifest And Remote Admission
+
+`.autobugfix-governance/<request-id>/bundle.yaml` is an advisory transport
+manifest, not authority. It is generated before the candidate commit to avoid
+a head/digest cycle. A Writer could forge it, so trusted CI:
+
+- loads validator and constitution from the PR base checkout;
+- derives the actual full diff and risk from the candidate checkout;
+- re-reads allowlisted GitHub reviews and binds them to request/head/PR;
+- ignores candidate local phase/check claims for the merge decision;
+- mounts a trusted read-only venv but imports candidate source;
+- reruns required trusted validation profiles in Bubblewrap.
+
+The project hook blocks obvious direct merge/protected push/state-write
+commands, but hooks are only accident prevention. It must allow read-only
+inspection of authority metadata and raw artifacts; observability cannot depend
+on bypassing the hook. Service and remote admission remain authoritative.
+
+`.codex/hooks.json` is a project-checkout guard for the human/main Codex session
+acting as Operator. It must not be injected into Execution Writer/Evaluator,
+Memory maintainer, Eval case agents, or bounded Operator role subprocesses.
+Production SDK roles use an isolated `CODEX_HOME` whose generated config sets
+`features.hooks = false`; their real boundaries are role sandbox, service-owned
+state, Git worktrees, deterministic verification, and external admission.
 
 ### 4. Validation & Error Matrix
 
-- Candidate loads its own policy for merge authority -> reject; use trusted
-  base/file.
-- Missing triage evidence -> request creation fails.
-- Existing request id -> immutable-write failure.
-- Event hash/previous hash mismatch -> projection fails.
-- Candidate branch differs from frozen branch -> policy failure.
-- Frozen base is not an ancestor of HEAD -> policy failure.
-- Changed file is unclassified or outside declared layers -> policy failure.
-- Protected file without verified human scope approval -> policy failure.
-- Signed payload fields differ from approval record -> signature proof failure.
-- GitHub review belongs to another repository/PR/commit -> proof failure.
-- Medium+ change has no trusted baseline -> validation failure.
-- Required metric is missing or regresses beyond threshold -> validation
-  failure.
-- Validation command fails/times out -> `VALIDATION_FAILED` with durable logs.
-- Patch or HEAD changes after validation -> finalize failure.
-- Bootstrap policy attempts to produce merge authority -> reject.
+- Missing evidence, stale base/policy, protected branch -> request/start fails.
+- Running Writer/Check exists -> concurrent transition fails.
+- Out-of-scope/unclassified/protected diff -> CheckRun fails with feedback.
+- Scope revision approval bound to another version -> activation fails.
+- Candidate config weakens role/process sandbox -> preflight or role launch fails.
+- Preview Codex SDK cannot accept isolated `env`/`codex_bin` configuration ->
+  production role launch fails closed instead of using global runtime state.
+- Validation command fails/times out/harness errors -> CheckRun fails closed.
+- Semantic verifier errors -> full check fails closed.
+- Candidate changes during check -> check fails.
+- Full check on dirty/uncommitted/no-Writer patch -> fails.
+- Patch/head changes after VERIFIED -> request reopens before promotion.
+- Canary fails -> active pointer stays/restores last-known-good and rollback
+  evidence is preserved.
 
-### 5. Good/Base/Bad Cases
+### 5. Good / Base / Bad Cases
 
-- Good: An Eval-only low-risk request creates a worktree, changes only Eval,
-  runs trusted Eval profile, exports a bundle, and reaches `MERGE_READY`.
-- Good: Eval + shared runtime uses an independent reviewer and trusted baseline.
-- Good: Governance code has signed scope approval before patch and signed merge
-  approval bound to final patch digest.
-- Base: `preflight` may authorize a low-risk workspace, but postflight can
-  elevate actual risk after reading the real diff.
-- Bad: `review --kind human` or a hand-written YAML claims human authority.
-- Bad: Validation defaults to `HEAD`, sees an empty post-commit diff, and passes.
-- Bad: Candidate removes its own protected paths and runs candidate validator.
-- Bad: PR supplies its own performance baseline.
+- Good: Eval-only diagnosis creates a real candidate worktree, runs one
+  production Writer, commits an advisory manifest, passes isolated fast/full
+  checks, and reaches VERIFIED without writing main or control state.
+- Good: A required shared-runtime path creates ScopeRevision v2; an approval
+  bound to v1 is rejected and an independent v2 approval activates it.
+- Base: A deterministic test failure leaves Request ACTIVE, writes CheckRun,
+  GateSnapshot, raw logs, and FeedbackPacket, then permits a bounded retry.
+- Bad: Candidate YAML claims VERIFIED, edits protected paths, or supplies fake
+  approvals/results. Trusted Git/policy/review/check derivation rejects it.
+- Bad: Operator bypasses promotion with direct merge/force push. Hook blocks
+  the common command and branch protection remains the authoritative backstop.
 
 ### 6. Tests Required
 
-- Immutable request overwrite and event-chain tamper rejection.
-- Independent reviewer requirement and self-review rejection.
-- Real OpenSSH signing and signed-payload field binding.
-- Candidate constitution self-modification checked by trusted policy.
-- Committed changes remain visible from frozen base.
-- Real request-specific Git worktree creation.
-- Named validation process execution, timeout/log artifacts, and no shell.
-- Required/missing/regressed metric behavior against trusted baseline.
-- Bundle digest/projection/policy/profile round trip.
-- GitHub repository/PR/review/commit binding.
-- Full project tests, compileall, diff check, role-skill validation, and isolated
-  real toy acceptance.
+```text
+uv run --cache-dir /tmp/uv-cache pytest -q
+uv run --cache-dir /tmp/uv-cache python -m compileall -q src tests scripts
+git diff --check
+uv run --cache-dir /tmp/uv-cache python scripts/validate_role_skills.py
+uv run --cache-dir /tmp/uv-cache python scripts/real_repository_acceptance.py --model gpt-5.4-mini
+uv run --cache-dir /tmp/uv-cache python scripts/real_operator_acceptance.py --model gpt-5.4-mini
+```
+
+Assertions must cover four Request phases, event/record tamper detection,
+request leases, Writer cancellation/timeout/retry, scope-version authority,
+candidate constitution self-amendment, process/root isolation, advisory
+manifest revalidation, shadow experiments, stale patch reopening, canary,
+last-known-good rollback, and retained raw SDK/check artifacts.
+
+Acceptance oracles assert observable behavior, changed-path scope, Git
+identity, and evidence completeness rather than requiring one exact source
+spelling. Real-repository smoke tests must pin the upstream commit and identify
+fault injection explicitly; they are not SWE-bench scores. When a verifier
+borrows the trusted project venv, preserve the `.venv/bin/python` entry path:
+resolving that symlink can bypass `pyvenv.cfg` and select the base interpreter.
+Toy-repository runs may remain as fast developer fixtures but cannot satisfy a
+promotion or release acceptance gate.
 
 ### 7. Wrong vs Correct
 
-#### Wrong
+Wrong:
 
 ```text
-Operator edits governance policy -> writes kind: human YAML -> commits ->
-validator compares HEAD -> reports empty diff -> merge.
+Operator edits candidate and a local status YAML -> model says tests passed ->
+direct push/merge main.
 ```
 
-#### Correct
+Correct:
 
 ```text
-Evidence -> immutable triage/request at base SHA -> trusted preflight -> real
-Operator worktree -> complete postflight diff -> independent/signed approval ->
-trusted argv validation + baseline -> bundle -> base-version GitHub gate ->
-human merge.
+evidence -> triage/request -> trusted start -> one WriterRun -> fast feedback
+-> versioned scope authority -> service commit -> shadow experiment/full check
+-> VERIFIED -> promotion receipt/PR -> trusted-base CI -> observed merge ->
+canary -> activate or rollback/revert PR
 ```

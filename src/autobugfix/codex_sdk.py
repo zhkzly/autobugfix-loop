@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import shutil
+import tomllib
 import traceback
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -95,26 +96,79 @@ class CodexSDKBackend(CodexBackend):
                     return parent.resolve()
         return None
 
-    def _runtime_env(self, request: CodexRequest) -> dict[str, str] | None:
+    def _runtime_env(self, request: CodexRequest) -> dict[str, str]:
         project_root = self._project_root_for(request)
         if project_root is None:
-            return None
+            raise CodexSDKError(
+                "cannot locate .autobugfix/config.yaml for SDK role; refusing to inherit global Codex hooks/runtime"
+            )
         cfg = load_config(project_root)
         runtime = cfg.codex.role_runtime
-        if not runtime.enabled or not runtime.bridge_auth:
-            return None
+        if not runtime.enabled:
+            raise CodexSDKError("isolated Codex role runtime is disabled")
         runtime_root = runtime.runtime_root
         if not runtime_root.is_absolute():
             runtime_root = project_root / runtime_root
         codex_home = runtime_root / "home"
         codex_home.mkdir(parents=True, exist_ok=True)
         source_home = Path.home() / ".codex"
-        for name in ("auth.json", "config.toml", "version.json", "installation_id", ".personality_migration"):
+        for name in ("auth.json", "version.json", "installation_id", ".personality_migration"):
+            if name == "auth.json" and not runtime.bridge_auth:
+                continue
             source = source_home / name
             dest = codex_home / name
-            if source.exists() and not dest.exists():
+            if source.exists():
                 shutil.copy2(source, dest)
-        env = os.environ.copy()
+                if name == "auth.json":
+                    dest.chmod(0o600)
+        source_config = source_home / "config.toml"
+        values: dict[str, Any] = {}
+        if source_config.is_file():
+            try:
+                source_values = tomllib.loads(source_config.read_text(encoding="utf-8"))
+            except (OSError, tomllib.TOMLDecodeError):
+                source_values = {}
+            for key in (
+                "model",
+                "review_model",
+                "model_reasoning_effort",
+                "service_tier",
+                "disable_response_storage",
+            ):
+                value = source_values.get(key)
+                if isinstance(value, (str, bool, int, float)):
+                    values[key] = value
+        if values.get("model_reasoning_effort") == "max":
+            values["model_reasoning_effort"] = "xhigh"
+
+        def scalar(value: Any) -> str:
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            if isinstance(value, str):
+                return json.dumps(value, ensure_ascii=True)
+            return str(value)
+
+        config_lines = [f"{key} = {scalar(value)}" for key, value in values.items()]
+        config_lines.extend(
+            [
+                "",
+                "[features]",
+                "hooks = false",
+                "multi_agent = false",
+                "",
+                f"[projects.{json.dumps(str(request.cwd.resolve()))}]",
+                'trust_level = "trusted"',
+                "",
+            ]
+        )
+        (codex_home / "config.toml").write_text("\n".join(config_lines), encoding="utf-8")
+        allowed_secret_env = {"OPENAI_API_KEY", "CODEX_API_KEY"}
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in allowed_secret_env
+            or not any(marker in key.upper() for marker in ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY"))
+        }
         env["CODEX_HOME"] = str(codex_home)
         return env
 
@@ -135,8 +189,11 @@ class CodexSDKBackend(CodexBackend):
                 env=self._runtime_env(request),
                 codex_bin=self._codex_bin(request),
             )
-        except TypeError:
-            config = module.CodexConfig(cwd=str(request.cwd))
+        except TypeError as exc:
+            raise CodexSDKError(
+                "installed preview Codex SDK does not support the required "
+                "isolated env/codex_bin configuration; install a compatible openai-codex preview"
+            ) from exc
         client = module.Codex(config)
         try:
             sandbox = module.Sandbox(request.sandbox)

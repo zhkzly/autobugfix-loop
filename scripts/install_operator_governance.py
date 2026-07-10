@@ -8,19 +8,6 @@ from pathlib import Path
 import yaml
 
 
-PROTECTED_CODEOWNER_PATHS = (
-    "/.autobugfix-baselines/",
-    "/src/autobugfix/operator/",
-    "/scripts/validate_operator_policy.py",
-    "/scripts/validate_operator_pr.py",
-    "/.github/workflows/operator-policy.yml",
-    "/.github/CODEOWNERS",
-    "/.github/autobugfix-allowed-signers",
-    "/.trellis/spec/backend/autobugfix-loop-harness-contract.md",
-    "/.trellis/spec/backend/operator-governance-policy.md",
-)
-
-
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(args, text=True, capture_output=True, check=False)
     if result.returncode != 0:
@@ -52,12 +39,18 @@ def main() -> int:
     repository = args.repository or _repository()
     reviewers = sorted({value.lstrip("@") for value in args.reviewer})
     owners = " ".join(f"@{value}" for value in reviewers)
-    codeowners = root / ".github/CODEOWNERS"
-    codeowners.parent.mkdir(parents=True, exist_ok=True)
-    codeowners.write_text("\n".join(f"{path} {owners}" for path in PROTECTED_CODEOWNER_PATHS) + "\n", encoding="utf-8")
-
     constitution_path = root / "src/autobugfix/operator/constitution.yaml"
     constitution = yaml.safe_load(constitution_path.read_text(encoding="utf-8")) or {}
+    protected_paths = [f"/{str(path).lstrip('/')}" for path in constitution.get("protected_paths") or []]
+    if not protected_paths:
+        raise RuntimeError("machine constitution has no protected_paths")
+    codeowners = root / ".github/CODEOWNERS"
+    codeowners.parent.mkdir(parents=True, exist_ok=True)
+    codeowners.write_text(
+        "\n".join(f"{path} {owners}" for path in protected_paths) + "\n",
+        encoding="utf-8",
+    )
+
     constitution.setdefault("approval", {})["github_allowed_reviewers"] = reviewers
     constitution_path.write_text(yaml.safe_dump(constitution, sort_keys=False), encoding="utf-8")
 

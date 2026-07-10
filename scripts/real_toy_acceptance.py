@@ -73,7 +73,7 @@ def create_toy_repo(root: Path) -> Path:
     return main
 
 
-def write_control_config(project_root: Path, main_checkout: Path) -> None:
+def write_control_config(project_root: Path, main_checkout: Path, model: str) -> None:
     system_codex = shutil.which("codex")
     data = {
         "task_root": ".autobugfix/tasks",
@@ -86,6 +86,7 @@ def write_control_config(project_root: Path, main_checkout: Path) -> None:
             "evaluator_timeout_seconds": 300,
         },
         "codex": {
+            "default_model": model,
             "writer_model": None,
             "evaluator_model": None,
             "controller_model": None,
@@ -118,6 +119,7 @@ def write_control_config(project_root: Path, main_checkout: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default="/tmp/autobugfix-real-e2e")
+    parser.add_argument("--model", default="gpt-5.4-mini")
     args = parser.parse_args()
     source_root = Path.cwd().resolve()
     root = Path(args.root)
@@ -125,7 +127,7 @@ def main() -> int:
     control_root = root / "control"
     control_root.mkdir()
     shutil.copytree(source_root / ".agents/role-skills", control_root / ".agents/role-skills")
-    write_control_config(control_root, main_checkout)
+    write_control_config(control_root, main_checkout, args.model)
     run(autobugfix_cmd(source_root, "doctor"), cwd=control_root)
     create = run(
         autobugfix_cmd(

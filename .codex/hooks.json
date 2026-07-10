@@ -1,5 +1,18 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -X utf8 \"$(git rev-parse --show-toplevel)/.codex/hooks/operator-governance.py\"",
+            "timeout": 15,
+            "statusMessage": "Checking host Operator governance boundary"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [

@@ -1,84 +1,92 @@
-# Operator Governance v2 Implementation Plan
+# Operator Governance V3 Implementation Plan
 
-## Purpose and ownership
+1. Extend typed config and role contracts.
+   - Add Operator state/artifact/worktree/retry/verification/experiment/
+     promotion configuration.
+   - Add `operator_supervisor`, `operator_writer`, and `operator_verifier`.
 
-This work constrains the Operator loop without changing the responsibilities of
-Execution, Memory, or Eval. Operator governance service owns only diagnosis,
-authorization, workspace, validation, regression, and audit state.
+2. Replace the V2 aggregate and projection.
+   - Four Request phases.
+   - Typed WriterRun, CheckRun, GateSnapshot, FeedbackPacket, ScopeRevision,
+     Experiment, Promotion, and event contracts.
 
-## Ordered implementation
+3. Replace the V2 runtime store.
+   - Configurable external SQLite store with WAL/transactions.
+   - Content-addressed artifact registry with provenance.
+   - Legacy V2 audit reader only.
 
-1. Replace v1 models and store.
-   - Canonical SHA-256 payload digests.
-   - Mandatory triage/evidence and frozen Git identity.
-   - Immutable record creation and append-only events.
-   - Projection reducer and transition validation.
+4. Implement Transition Guard and service.
+   - Explicit command dispatcher and transition registry.
+   - Request/start/writer/retry/cancel/verify/scope/reopen/close.
+   - Complete Git snapshots and stale-patch invalidation.
 
-2. Rebuild policy and trust loading.
-   - Trusted ref/file constitution loader.
-   - Layer classification including layer-aware tests.
-   - Computed risk floor and permission class.
-   - Frozen-base committed/staged/unstaged/untracked diff collection.
+5. Implement real Writer and verification loops.
+   - Launch production Codex Python SDK in candidate worktree.
+   - Read-only WriterView and structured feedback.
+   - Trusted deterministic profiles and patch-bound semantic verifier.
 
-3. Implement approvals.
-   - Independent reviewer constraints.
-   - OpenSSH signed canonical human approvals.
-   - GitHub review evidence import/allowlist validation.
-   - Interactive approvals restricted to local experiments.
+6. Implement shadow experiments and promotion.
+   - Isolated experiment state/worktrees and outer trusted scoring.
+   - PR preparation, merge observation, canary, immutable release activation,
+     last-known-good rollback, and revert intent.
 
-4. Implement Operator workspace and service.
-   - Real request-specific Git branch/worktree.
-   - Service-owned preflight, authorization, postflight, revoke, and status.
-   - No direct CLI writes to governance files.
+7. Replace CLI and agent guidance.
+   - Typed Operator mutation/read commands.
+   - Writer read-only commands.
+   - Independent role skills and minimal lifecycle hooks.
 
-5. Replace validation and metrics.
-   - Trusted named argv profiles, no shell.
-   - Durable command logs and patch/head digests.
-   - Typed complete baseline contracts.
-   - Merge-ready decision from authorization + scope + validation + metrics.
+8. Enforce remote admission.
+   - Trusted-base bundle/receipt validation.
+   - Required GitHub check and branch-protection installer updates.
 
-6. Replace CLI and scripts.
-   - Remove fake human review labels.
-   - Add approve-sign/approve-import/workspace/status/revoke/trusted-validate.
-   - Preserve compatible low-risk commands through the service.
+9. Add migration, adversarial, integration, and acceptance tests.
+   - Fake candidate state/approval/result rejection.
+   - Retry, timeout, scope revision, stale verification, promotion, canary,
+     rollback, and real worktree behavior.
+   - Real pinned-upstream E2E and production SDK path; fake backend only in tests.
 
-7. Add Git/GitHub enforcement.
-   - Trusted validator launcher.
-   - Read-only workflow, CODEOWNERS, and hook/protection installer contracts.
+## Completion Record
 
-8. Isolate acceptance and expose Codex compatibility.
-   - Run toy acceptance in a temporary control copy/root.
-   - Preserve current control Memory and Operator state.
-   - Report SDK/runtime versions and explicit compatibility failures.
+- [x] Machine constitution carries project/loop purpose plus executable policy.
+- [x] Four-phase Request aggregate and typed child records implemented.
+- [x] External SQLite authority, hash-chain events, request leases, artifact
+  registry, audit, and crash-time worktree recovery implemented.
+- [x] Production Operator Supervisor/Writer/Verifier use Codex Python SDK;
+  Writer runs in a cancellable host worker process.
+- [x] Bubblewrap verification worktrees hide authority roots and bind the
+  trusted runtime venv read-only while importing candidate source.
+- [x] Version-bound scope expansion and external constitutional approval
+  implemented.
+- [x] Shadow experiment, full verification, promotion, canary activation,
+  last-known-good rollback, and revert PR paths implemented.
+- [x] Advisory candidate manifest and trusted-base GitHub revalidation
+  implemented.
+- [x] Operator/Writer/Verifier skills and Codex accident-prevention hook added.
+- [x] Real Operator SDK acceptance passed.
+- [x] Hook read-only artifact access and direct-state-mutation regression tests
+  added after real observability review.
+- [x] Pinned ItsDangerous real-repository fault-injection E2E passed with
+  `gpt-5.4-mini`; two Execution runs, pending Memory proposal, and exact
+  generated/oracle Eval scoring completed while target main remained clean.
+- [x] Sequential Memory review enforced accepted-evidence-only collection.
+- [x] Sequential Codex runtime review removed the isolation-weakening SDK
+  compatibility fallback and added a fail-closed regression test.
+- [x] Machine constitution assigns project hooks only to `operator_host`,
+  projects that mapping to role context, and enforces `hooks=false` for every
+  isolated SDK role.
 
-9. Add adversarial and integration tests.
-   - Self-modified constitution.
-   - Forged/mismatched/stale approval.
-   - Request overwrite and post-approval scope expansion.
-   - Committed diff after frozen base.
-   - Unclassified/test bypass.
-   - Missing profile/metric and regression.
-   - Real worktree creation and protected branch rejection.
-
-## Validation commands
+## Validation
 
 ```text
 uv run --cache-dir /tmp/uv-cache pytest -q
 uv run --cache-dir /tmp/uv-cache python -m compileall -q src tests scripts
 git diff --check
 uv run --cache-dir /tmp/uv-cache python scripts/validate_role_skills.py
-uv run --cache-dir /tmp/uv-cache python scripts/validate_operator_policy.py ...
-uv run --cache-dir /tmp/uv-cache python scripts/real_toy_acceptance.py
+uv run --cache-dir /tmp/uv-cache python scripts/real_repository_acceptance.py --model gpt-5.4-mini
+uv run --cache-dir /tmp/uv-cache python scripts/real_operator_acceptance.py --model gpt-5.4-mini
 ```
 
-The toy acceptance is mandatory for final product acceptance. If real Codex
-rejects the installed SDK/model combination, preserve that real failure as a
-blocker and do not substitute a fake production backend.
+## Rollback
 
-## Rollback points
-
-- After immutable store/projection tests, before CLI migration.
-- After policy/approval tests, before workspace and GitHub integration.
-- Before replacing v1 CLI surfaces.
-- Before installing any external GitHub branch-protection setting.
-
+The V2 implementation remains in commit `534e5cb`. V3 is a new commit and
+does not amend or erase V2 history. Legacy runtime files remain untouched.

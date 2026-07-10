@@ -1,7 +1,7 @@
 [project]
 name = "autobugfix-loop"
 version = "0.1.0"
-description = "Local, repo-agnostic, Git-disciplined on-call bugfix control system."
+description = "Local, repo-agnostic loop and harness control system for real bugfix agents."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

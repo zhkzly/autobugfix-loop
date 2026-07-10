@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from autobugfix.config import DEFAULT_CONFIG
 from autobugfix.git_utils import GitError, current_branch, rev_parse, run_git
 from autobugfix.operator.approvals import (
     OperatorApprovalError,
@@ -241,20 +240,72 @@ def static_constitution_violations(project_root: Path, constitution: Mapping[str
         if str(required) not in gitignore_text:
             violations.append(f"missing gitignore runtime pattern: {required}")
 
-    roles = ((DEFAULT_CONFIG.get("codex") or {}).get("roles") or {})
+    roles: Mapping[str, Any] = {}
+    role_runtime: Mapping[str, Any] = {}
+    config_path = project_root / "src/autobugfix/config.py"
+    if not config_path.is_file():
+        violations.append("candidate is missing src/autobugfix/config.py")
+    else:
+        try:
+            config_tree = ast.parse(config_path.read_text(encoding="utf-8"), filename=str(config_path))
+            default_node = next(
+                node.value
+                for node in config_tree.body
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+                and (
+                    any(isinstance(target, ast.Name) and target.id == "DEFAULT_CONFIG" for target in node.targets)
+                    if isinstance(node, ast.Assign)
+                    else isinstance(node.target, ast.Name) and node.target.id == "DEFAULT_CONFIG"
+                )
+            )
+            candidate_defaults = ast.literal_eval(default_node)
+            if isinstance(candidate_defaults, dict):
+                candidate_codex = candidate_defaults.get("codex") or {}
+                roles = candidate_codex.get("roles") or {} if isinstance(candidate_codex, dict) else {}
+                role_runtime = (
+                    candidate_codex.get("role_runtime") or {}
+                    if isinstance(candidate_codex, dict)
+                    else {}
+                )
+        except (SyntaxError, TypeError, ValueError, StopIteration) as exc:
+            violations.append(f"cannot statically inspect candidate DEFAULT_CONFIG: {exc}")
     for role, expected in (invariants.get("role_defaults") or {}).items():
         actual = roles.get(role) if isinstance(roles, dict) else None
         if not isinstance(actual, dict) or not isinstance(expected, dict):
             violations.append(f"missing role default for {role}")
             continue
         for key, expected_value in expected.items():
+            if key == "required_skill":
+                skills = [str(item) for item in actual.get("skill_paths") or []]
+                if not any(path.endswith(str(expected_value)) for path in skills):
+                    violations.append(f"role {role} is missing required skill {expected_value!r}")
+                continue
             if actual.get(key) != expected_value:
                 violations.append(f"role {role}.{key} expected {expected_value!r}, got {actual.get(key)!r}")
 
-    service_text = (project_root / "src/autobugfix/service.py").read_text(encoding="utf-8")
-    for marker in invariants.get("production_service_requires") or []:
-        if str(marker) not in service_text:
-            violations.append(f"production service missing required marker: {marker}")
+    for key, expected_value in (invariants.get("role_runtime_defaults") or {}).items():
+        if role_runtime.get(key) != expected_value:
+            violations.append(
+                f"codex.role_runtime.{key} expected {expected_value!r}, got {role_runtime.get(key)!r}"
+            )
+
+    service_path = project_root / "src/autobugfix/service.py"
+    if not service_path.is_file():
+        violations.append("candidate is missing src/autobugfix/service.py")
+    else:
+        service_text = service_path.read_text(encoding="utf-8")
+        for marker in invariants.get("production_service_requires") or []:
+            if str(marker) not in service_text:
+                violations.append(f"production service missing required marker: {marker}")
+
+    sdk_path = project_root / "src/autobugfix/codex_sdk.py"
+    if not sdk_path.is_file():
+        violations.append("candidate is missing src/autobugfix/codex_sdk.py")
+    else:
+        sdk_text = sdk_path.read_text(encoding="utf-8")
+        for marker in invariants.get("production_sdk_requires") or []:
+            if str(marker) not in sdk_text:
+                violations.append(f"production SDK runtime missing required marker: {marker}")
 
     forbidden = {str(item) for item in invariants.get("eval_forbidden_calls") or []}
     eval_root = project_root / "src/autobugfix/eval"
@@ -285,6 +336,7 @@ def evaluate_policy(
     allowed_signers: Path | None = None,
     expected_github_repository: str | None = None,
     expected_pull_request: int | None = None,
+    scope_version: int = 1,
 ) -> PolicyDecision:
     root = project_root.resolve()
     metadata_patterns = [str(item) for item in constitution.get("governance_metadata_paths") or []]
@@ -307,6 +359,8 @@ def evaluate_policy(
         for layer in file_layers:
             changed_layers.setdefault(layer, []).append(file_path)
         if not (set(file_layers) & request.declared_layers):
+            out_of_scope.append(file_path)
+        if request.planned_paths and not _matches_any(file_path, request.planned_paths):
             out_of_scope.append(file_path)
 
     changed_layer_set = set(changed_layers)
@@ -368,6 +422,7 @@ def evaluate_policy(
                 files=snapshot.changed_files,
                 require_human=human_required,
                 stage="scope",
+                scope_version=scope_version,
             )
             for approval in valid_approvals
         )
@@ -383,6 +438,7 @@ def evaluate_policy(
                 stage="merge",
                 patch_digest=snapshot.patch_digest,
                 head_sha=snapshot.head_sha,
+                scope_version=scope_version,
             )
             for approval in valid_approvals
         )

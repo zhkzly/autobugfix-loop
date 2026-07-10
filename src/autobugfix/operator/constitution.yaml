@@ -1,4 +1,132 @@
-version: 2
+version: 3
+
+operator_prompt_context: |
+  Autobugfix is a local, repo-agnostic loop-engineering and harness-engineering control system.
+  Execution repeatedly repairs a configured target repository in an isolated task worktree.
+  Memory compiles accepted Execution evidence into reviewed LLM wiki knowledge and skills.
+  Eval reproducibly measures the real Execution loop against datasets, oracles, and scorers.
+  Operator diagnoses and improves Autobugfix itself through governed non-main experiments.
+  LLM agents are bounded execution/review nodes. Services, Git facts, deterministic checks,
+  external approval, and trusted CI own truth. Restate this contract, name the affected loop
+  and state owner, and name the real validation command before every new Operator task.
+  Project Codex hooks belong only to the trusted operator_host session. SDK roles run with
+  hooks disabled and rely on their service, sandbox, worktree, and verifier boundaries.
+
+project:
+  id: autobugfix
+  purpose: >-
+    A local, repo-agnostic, Git-controlled loop-engineering and
+    harness-engineering system for repeatedly producing, verifying, observing,
+    evaluating, learning from, and safely promoting real bug fixes.
+  principles:
+    - llm_agents_are_bounded_nodes
+    - authoritative_state_is_service_owned
+    - candidate_worktrees_are_untrusted
+    - deterministic_checks_precede_semantic_judgment
+    - every_run_preserves_observable_evidence
+    - main_is_the_only_trust_root
+
+loops:
+  execution:
+    purpose: Produce a real target-repository fix in an isolated task worktree.
+    state_owner: AutobugfixService
+    may_read: [target_config, task, context, feedback, active_memory]
+    may_write: [task_worktree, execution_state, execution_artifacts]
+    forbidden: [target_main_checkout, memory_approval, eval_authority]
+  memory:
+    purpose: Compile accepted execution evidence into reviewed wiki, memory, and skills.
+    state_owner: MemoryService
+    may_read: [accepted_execution_evidence]
+    may_write: [memory_packets, digests, proposals, approved_memory]
+    forbidden: [execution_state, task_worktree, self_approval]
+  eval:
+    purpose: Reproducibly measure the real execution loop against cases and oracles.
+    state_owner: EvalRunner
+    may_read: [datasets, execution_artifacts, generated_diff, oracle]
+    may_write: [eval_runs, scores, diagnoses]
+    forbidden: [approve_ppe, archive_execution, approve_memory]
+  operator:
+    purpose: Diagnose and improve Autobugfix through governed non-main experiments.
+    state_owner: OperatorGovernanceService
+    may_read: [trusted_constitution, control_projection, artifacts, candidate_diff]
+    may_write: [transition_requests, diagnoses, candidate_via_writer]
+    forbidden: [set_state, write_main, write_authority_store, self_approval, direct_merge]
+
+operator_roles:
+  operator_supervisor:
+    purpose: Diagnose failures and request legal transitions.
+    sandbox: read-only
+    capabilities:
+      allow: [operator_read, transition_request, writer_control]
+      deny: [candidate_write, state_write, approve, merge]
+  operator_writer:
+    purpose: Modify only the assigned candidate worktree using trusted feedback.
+    sandbox: workspace-write
+    capabilities:
+      allow: [writer_read_view, candidate_write]
+      deny: [operator_mutation, state_write, approve, verify, promote, merge]
+  operator_verifier:
+    purpose: Perform patch-bound read-only semantic review after deterministic checks.
+    sandbox: read-only
+    capabilities:
+      allow: [verification_read_view, semantic_verdict]
+      deny: [candidate_write, state_write, deterministic_override, approve, merge]
+
+hook_assignments:
+  operator_host:
+    systems: [operator]
+    roles: [human_operator, main_agent_operator]
+    config: .codex/hooks.json
+    runtime: trusted_autobugfix_source_checkout
+    hooks:
+      - operator-governance.py
+      - inject-workflow-state.py
+    authority: advisory_accident_prevention
+  isolated_sdk_roles:
+    systems: [execution, memory, eval, operator]
+    roles:
+      - writer
+      - evaluator
+      - controller
+      - memory_maintainer
+      - eval_judge
+      - operator_supervisor
+      - operator_writer
+      - operator_verifier
+    runtime: isolated_codex_home
+    hooks_enabled: false
+    authority: service_sandbox_git_verifier_and_external_gates
+  invariant: Operator host hooks must never be injected into an isolated SDK role.
+
+transition_contract:
+  request_phases: [REQUESTED, ACTIVE, VERIFIED, CLOSED]
+  commands:
+    request:
+      from: [NONE]
+      to: REQUESTED
+      checks: [evidence, git_base, scope_schema, trusted_constitution_digest]
+    start:
+      from: [REQUESTED]
+      to: ACTIVE
+      checks: [scope_authority, non_main_branch, real_worktree, writer_role]
+    verify:
+      from: [ACTIVE]
+      to: VERIFIED
+      checks: [git_snapshot, scope, deterministic_profiles, baseline, semantic_verdict, approvals]
+    reopen:
+      from: [VERIFIED]
+      to: ACTIVE
+      checks: [patch_or_scope_changed]
+    close:
+      from: [REQUESTED, ACTIVE, VERIFIED]
+      to: CLOSED
+      checks: [terminal_outcome]
+  invariant: Operators request actions; only the trusted service appends transition events.
+
+operator_runtime_minimums:
+  require_process_sandbox: true
+  verification_network_access: false
+  candidate_authority_state: forbidden
 
 protected_branches:
   - main
@@ -63,6 +191,8 @@ layers:
       - scripts/validate_operator_pr.py
       - scripts/install_operator_governance.py
       - scripts/real_toy_acceptance.py
+      - scripts/real_operator_acceptance.py
+      - scripts/real_repository_acceptance.py
       - tests/test_operator_*.py
       - .github/workflows/operator-policy.yml
       - .github/CODEOWNERS
@@ -90,6 +220,8 @@ layers:
       - tests/test_controller.py
       - tests/test_gradio_app.py
       - tests/test_prompts.py
+      - .codex/hooks/operator-governance.py
+      - .codex/hooks.json
       - tests/helpers.py
       - pyproject.toml
       - uv.lock
@@ -107,16 +239,27 @@ layers:
       - .gitignore
 
 protected_paths:
+  - pyproject.toml
+  - uv.lock
   - .autobugfix-baselines/**
   - src/autobugfix/operator/**
+  - src/autobugfix/cli.py
+  - src/autobugfix/config.py
+  - src/autobugfix/models.py
   - scripts/validate_operator_policy.py
   - scripts/validate_operator_pr.py
   - scripts/install_operator_governance.py
   - scripts/real_toy_acceptance.py
+  - scripts/real_operator_acceptance.py
+  - scripts/real_repository_acceptance.py
   - .github/workflows/operator-policy.yml
   - .github/CODEOWNERS
   - .github/CODEOWNERS.example
   - .github/autobugfix-allowed-signers
+  - .codex/hooks/operator-governance.py
+  - .codex/hooks.json
+  - .agents/role-skills/operator/**
+  - .agents/skills/autobugfix-operator-governance/**
   - .trellis/spec/backend/autobugfix-loop-harness-contract.md
   - .trellis/spec/backend/operator-governance-policy.md
   - .trellis/spec/guides/autobugfix-task-start-checklist.md
@@ -177,7 +320,7 @@ validation_profiles:
       - name: compileall
         argv: [uv, run, --cache-dir, /tmp/uv-cache, python, -m, compileall, -q, src, tests, scripts]
       - name: diff-check
-        argv: [git, diff, --check]
+        argv: [git, diff, --check, "{base_sha}", --]
 
 risk_required_profiles:
   low: []
@@ -205,6 +348,9 @@ metrics:
 
 static_invariants:
   required_gitignore:
+    - .venv/
+    - __pycache__/
+    - "*.pyc"
     - .autobugfix/
     - .autobugfix-evals/
     - .autobugfix-experiments/
@@ -218,6 +364,23 @@ static_invariants:
     eval_judge:
       sandbox: read-only
       approval_mode: deny_all
+    operator_supervisor:
+      sandbox: read-only
+      approval_mode: deny_all
+      required_skill: autobugfix-operator-supervisor/SKILL.md
+    operator_writer:
+      sandbox: workspace-write
+      approval_mode: auto_review
+      required_skill: autobugfix-operator-writer/SKILL.md
+    operator_verifier:
+      sandbox: read-only
+      approval_mode: deny_all
+      required_skill: autobugfix-operator-verifier/SKILL.md
+  role_runtime_defaults:
+    enabled: true
+  production_sdk_requires:
+    - hooks = false
+    - multi_agent = false
   eval_forbidden_calls:
     - apply_gate
     - deploy_ppe

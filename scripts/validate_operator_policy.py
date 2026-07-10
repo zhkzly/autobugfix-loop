@@ -11,7 +11,7 @@ from autobugfix.operator.validator import validate_operator_request
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the trusted Autobugfix Operator Governance v2 gate.")
+    parser = argparse.ArgumentParser(description="Run the trusted Autobugfix Operator Governance v3 gate.")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--request-id")
     source.add_argument("--bundle")

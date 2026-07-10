@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
 from autobugfix.models import utc_now
+from autobugfix.config import load_config
+from autobugfix.operator.guard import effective_request
 from autobugfix.operator.metrics import OperatorMetricsError, compare_baseline
 from autobugfix.operator.models import digest_payload
 from autobugfix.operator.policy import PolicyDecision, evaluate_policy
@@ -22,12 +26,24 @@ def _format_argv(argv: list[Any], values: Mapping[str, str]) -> list[str]:
     return [str(item).format_map(values) for item in argv]
 
 
+def _safe_log_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
+    return cleaned or "command"
+
+
 def _run_command(
     candidate_root: Path,
     log_root: Path,
     name: str,
     argv: list[str],
     timeout_seconds: int | None,
+    *,
+    process_sandbox: str,
+    require_process_sandbox: bool,
+    network_access: bool,
+    hidden_roots: tuple[Path, ...],
+    writable_roots: tuple[Path, ...],
+    read_only_binds: tuple[tuple[Path, Path], ...],
 ) -> dict[str, Any]:
     started_at = utc_now()
     timed_out = False
@@ -36,9 +52,65 @@ def _run_command(
         for key, value in os.environ.items()
         if not any(marker in key.upper() for marker in ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY"))
     }
+    environment["UV_NO_SYNC"] = "1"
+    candidate_src = candidate_root / "src"
+    python_path = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        f"{candidate_src}{os.pathsep}{python_path}" if python_path else str(candidate_src)
+    )
+    sandboxed = False
+    executed_argv = list(argv)
+    if process_sandbox not in {"auto", "bubblewrap", "none"}:
+        raise OperatorValidationError(f"unsupported process sandbox: {process_sandbox}")
+    bubblewrap = shutil.which("bwrap") if process_sandbox in {"auto", "bubblewrap"} else None
+    if bubblewrap:
+        sandboxed = True
+        wrapper = [
+            bubblewrap,
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-pid",
+            "--ro-bind",
+            "/",
+            "/",
+            "--tmpfs",
+            "/tmp",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+        ]
+        if not network_access:
+            wrapper.append("--unshare-net")
+        for root in hidden_roots:
+            resolved = root.resolve()
+            if resolved.exists():
+                try:
+                    candidate_root.resolve().relative_to(resolved)
+                except ValueError:
+                    wrapper.extend(["--tmpfs", str(resolved)])
+        for root in writable_roots:
+            resolved = root.resolve()
+            resolved.mkdir(parents=True, exist_ok=True)
+            wrapper.extend(["--bind", str(resolved), str(resolved)])
+        for source, destination in read_only_binds:
+            source = source.resolve()
+            destination = destination.resolve()
+            if not source.exists():
+                raise OperatorValidationError(f"read-only sandbox bind does not exist: {source}")
+            destination.mkdir(parents=True, exist_ok=True)
+            wrapper.extend(["--ro-bind", str(source), str(destination)])
+        wrapper.extend(
+            ["--bind", str(candidate_root), str(candidate_root), "--chdir", str(candidate_root), "--"]
+        )
+        executed_argv = [*wrapper, *argv]
+    elif require_process_sandbox:
+        raise OperatorValidationError(
+            "authoritative command execution requires Bubblewrap; install bwrap or configure a supported sandbox"
+        )
     try:
         result = subprocess.run(
-            argv,
+            executed_argv,
             cwd=candidate_root,
             text=True,
             shell=False,
@@ -64,6 +136,8 @@ def _run_command(
     return {
         "name": name,
         "argv": argv,
+        "executed_argv": executed_argv,
+        "sandbox": "bubblewrap" if sandboxed else "none",
         "cwd": str(candidate_root),
         "timeout_seconds": timeout_seconds,
         "timed_out": timed_out,
@@ -83,6 +157,14 @@ def run_validation_profiles(
     validation_id: str,
     decision: PolicyDecision,
     constitution: Mapping[str, Any],
+    *,
+    log_root_override: Path | None = None,
+    process_sandbox: str = "auto",
+    require_process_sandbox: bool = True,
+    network_access: bool = False,
+    hidden_roots: tuple[Path, ...] = (),
+    writable_roots: tuple[Path, ...] = (),
+    read_only_binds: tuple[tuple[Path, Path], ...] = (),
 ) -> list[dict[str, Any]]:
     profiles = constitution.get("validation_profiles") or {}
     values = {
@@ -92,7 +174,11 @@ def run_validation_profiles(
         "candidate_root": str(candidate_root),
     }
     results: list[dict[str, Any]] = []
-    log_root = record_root / ".autobugfix/operator/logs" / request_id / validation_id
+    log_root = (
+        log_root_override.resolve()
+        if log_root_override is not None
+        else record_root / ".autobugfix/operator/logs" / request_id / validation_id
+    )
     for profile_name in decision.required_profiles:
         profile = profiles.get(profile_name)
         if not isinstance(profile, dict):
@@ -101,20 +187,62 @@ def run_validation_profiles(
         commands = profile.get("commands") or []
         if not commands:
             raise OperatorValidationError(f"trusted validation profile has no commands: {profile_name}")
-        for index, raw in enumerate(commands, start=1):
-            if not isinstance(raw, dict) or not isinstance(raw.get("argv"), list):
-                raise OperatorValidationError(f"invalid command in validation profile {profile_name}")
-            command_name = str(raw.get("name") or f"{profile_name}-{index}")
-            argv = _format_argv(raw["argv"], values)
-            results.append(
-                _run_command(
-                    candidate_root,
-                    log_root,
-                    command_name,
-                    argv,
-                    int(raw.get("timeout_seconds", default_timeout)),
-                )
+        results.extend(
+            run_command_specs(
+                candidate_root,
+                log_root,
+                commands,
+                values=values,
+                default_timeout_seconds=default_timeout,
+                name_prefix=profile_name,
+                process_sandbox=process_sandbox,
+                require_process_sandbox=require_process_sandbox,
+                network_access=network_access,
+                hidden_roots=hidden_roots,
+                writable_roots=writable_roots,
+                read_only_binds=read_only_binds,
             )
+        )
+    return results
+
+
+def run_command_specs(
+    candidate_root: Path,
+    log_root: Path,
+    commands: list[Any],
+    *,
+    values: Mapping[str, str],
+    default_timeout_seconds: int = 300,
+    name_prefix: str = "command",
+    process_sandbox: str = "auto",
+    require_process_sandbox: bool = True,
+    network_access: bool = False,
+    hidden_roots: tuple[Path, ...] = (),
+    writable_roots: tuple[Path, ...] = (),
+    read_only_binds: tuple[tuple[Path, Path], ...] = (),
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for index, raw in enumerate(commands, start=1):
+        if not isinstance(raw, dict) or not isinstance(raw.get("argv"), list):
+            raise OperatorValidationError(f"invalid configured command {name_prefix}[{index}]")
+        display_name = str(raw.get("name") or f"{name_prefix}-{index}")
+        log_name = f"{index:02d}-{_safe_log_name(display_name)}"
+        argv = _format_argv(raw["argv"], values)
+        result = _run_command(
+            candidate_root,
+            log_root,
+            log_name,
+            argv,
+            int(raw.get("timeout_seconds", default_timeout_seconds)),
+            process_sandbox=process_sandbox,
+            require_process_sandbox=require_process_sandbox,
+            network_access=network_access,
+            hidden_roots=hidden_roots,
+            writable_roots=writable_roots,
+            read_only_binds=read_only_binds,
+        )
+        result["name"] = display_name
+        results.append(result)
     return results
 
 
@@ -135,8 +263,17 @@ def validate_operator_request(
 ) -> dict[str, Any]:
     record_root = Path(project_root).resolve()
     candidate = Path(candidate_root or project_root).resolve()
-    store = OperatorStore(record_root)
-    request = store.read_request(request_id)
+    config = load_config(record_root)
+    store = OperatorStore(
+        record_root,
+        state_root=config.operator.state.root,
+        artifact_root=config.operator.artifacts.root,
+        database_name=config.operator.state.database_name,
+        lease_timeout_seconds=config.operator.state.lease_timeout_seconds,
+    )
+    request, scope_version = effective_request(
+        store.read_request(request_id), store.read_scope_revisions(request_id)
+    )
     approvals = store.read_approvals(request_id)
     policy = trusted_policy or load_trusted_policy(
         record_root,
@@ -153,6 +290,7 @@ def validate_operator_request(
         trusted_policy=policy.trusted,
         phase=phase,
         allowed_signers=allowed_signers,
+        scope_version=scope_version,
     )
     validation_id = f"validation-{uuid.uuid4().hex[:12]}"
     command_results: list[dict[str, Any]] = []
@@ -167,6 +305,12 @@ def validate_operator_request(
         decision.allowed = False
 
     if decision.allowed and run_profiles:
+        runtime_binds = (
+            ((config.operator.verification.runtime_venv, candidate / ".venv"),)
+            if config.operator.verification.runtime_venv
+            and config.operator.verification.runtime_venv.is_dir()
+            else ()
+        )
         command_results = run_validation_profiles(
             candidate,
             record_root,
@@ -174,6 +318,12 @@ def validate_operator_request(
             validation_id,
             decision,
             policy.data,
+            log_root_override=store.artifact_root / request_id / "standalone" / validation_id,
+            process_sandbox=config.operator.verification.process_sandbox,
+            require_process_sandbox=config.operator.verification.require_process_sandbox,
+            network_access=config.operator.verification.network_access,
+            hidden_roots=(store.root, store.artifact_root),
+            read_only_binds=runtime_binds,
         )
         if any(not item["passed"] for item in command_results):
             decision.violations.append("one or more trusted validation profile commands failed")

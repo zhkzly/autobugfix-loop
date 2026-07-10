@@ -11,14 +11,17 @@ class OperatorWorkspaceError(RuntimeError):
     pass
 
 
-def workspace_path(control_root: Path, request_id: str) -> Path:
-    return control_root.resolve() / ".autobugfix/operator/worktrees" / request_id
+def workspace_path(control_root: Path, request_id: str, worktree_root: Path | None = None) -> Path:
+    root = worktree_root.resolve() if worktree_root else control_root.resolve() / ".autobugfix/operator-worktrees"
+    return root / request_id
 
 
 def create_operator_workspace(
     control_root: Path,
     request: OperatorRequest,
     constitution: Mapping[str, Any],
+    *,
+    worktree_root: Path | None = None,
 ) -> dict[str, Any]:
     root = control_root.resolve()
     protected = {str(item) for item in constitution.get("protected_branches") or []}
@@ -30,7 +33,7 @@ def create_operator_workspace(
         raise OperatorWorkspaceError(str(exc)) from exc
     if resolved_base != request.base_sha:
         raise OperatorWorkspaceError("request base SHA is not canonical")
-    path = workspace_path(root, request.request_id)
+    path = workspace_path(root, request.request_id, worktree_root)
     if path.exists():
         raise OperatorWorkspaceError(f"operator workspace already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -50,4 +53,33 @@ def create_operator_workspace(
         "branch": request.branch,
         "base_sha": request.base_sha,
         "control_root": str(root),
+    }
+
+
+def recover_operator_workspace(
+    control_root: Path,
+    request: OperatorRequest,
+    *,
+    worktree_root: Path | None = None,
+) -> dict[str, Any] | None:
+    root = control_root.resolve()
+    path = workspace_path(root, request.request_id, worktree_root)
+    if not path.exists():
+        return None
+    inside = run_git(path, ["rev-parse", "--is-inside-work-tree"], check=False)
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        raise OperatorWorkspaceError(f"existing Operator path is not a Git worktree: {path}")
+    actual_head = rev_parse(path, "HEAD")
+    actual_branch = run_git(path, ["branch", "--show-current"], check=True).stdout.strip()
+    if actual_head != request.base_sha or actual_branch != request.branch:
+        raise OperatorWorkspaceError(
+            "existing Operator worktree does not match the frozen request base/branch"
+        )
+    return {
+        "request_id": request.request_id,
+        "path": str(path.resolve()),
+        "branch": request.branch,
+        "base_sha": request.base_sha,
+        "control_root": str(root),
+        "recovered": True,
     }

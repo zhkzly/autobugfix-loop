@@ -1,9 +1,18 @@
 # Autobugfix
 
-Autobugfix is a local, repo-agnostic, Git-disciplined, observable on-call
-bugfix control system. It is not the target application repository. It creates
-controlled task state, target-repo worktrees, Codex writer/evaluator runs,
-verifier artifacts, human gates, memory proposals, and eval reports.
+Autobugfix is a local, repo-agnostic, Git-disciplined loop-engineering and
+harness-engineering control system. Given a configured target repository and a
+real bug/problem, its Execution loop repeatedly drives an isolated Codex
+Writer, real verifier commands, a read-only evaluator, feedback, and human
+gates until the task reaches a reproducible outcome. It is not the target
+application repository.
+
+Memory precompiles accepted Execution evidence into a reviewed LLM wiki and
+reusable skills. Eval reproduces real cases and measures the actual Execution
+loop against tests/oracles. Operator is the meta-loop that diagnoses and
+improves Autobugfix itself through governed non-main experiments. LLM agents
+are bounded nodes; services, Git, deterministic checks, scorers, artifacts,
+and explicit gates own control flow and truth.
 
 ## Install
 
@@ -11,6 +20,11 @@ verifier artifacts, human gates, memory proposals, and eval reports.
 uv sync --prerelease allow
 uv run autobugfix doctor
 ```
+
+Authoritative Operator checks require an OS process sandbox. The current
+adapter uses Bubblewrap (`bwrap`) on Linux; install it before running Operator
+verification. The requirement cannot be disabled by project config while the
+trusted machine constitution requires it.
 
 The production runtime uses the local preview Python Codex SDK package
 `openai-codex`. It does not use `codex exec` and it does not fall back to a
@@ -60,12 +74,65 @@ codex:
       skill_paths:
         - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
         - .agents/role-skills/execution/evaluator/autobugfix-evaluator/SKILL.md
+    operator_supervisor:
+      model: null
+      sandbox: read-only
+      approval_mode: deny_all
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/operator/supervisor/autobugfix-operator-supervisor/SKILL.md
+    operator_writer:
+      model: null
+      sandbox: workspace-write
+      approval_mode: auto_review
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/operator/writer/autobugfix-operator-writer/SKILL.md
+    operator_verifier:
+      model: null
+      sandbox: read-only
+      approval_mode: deny_all
+      skill_paths:
+        - .agents/role-skills/base/autobugfix-runtime-base/SKILL.md
+        - .agents/role-skills/operator/verifier/autobugfix-operator-verifier/SKILL.md
 worker:
   tick_interval_seconds: 5
 memory_worker:
   tick_interval_seconds: 10
 eval:
   model_mode: codex
+operator:
+  state:
+    root: .autobugfix/operator-v3
+    database_name: governance.sqlite3
+  artifacts:
+    root: .autobugfix/operator-artifacts
+  worktrees:
+    root: .autobugfix/operator-worktrees
+    branch_template: operator/experiment/{request_id}
+  retry:
+    max_attempts: 5
+    max_auto_retries: 2
+    auto_retry_deterministic_failures: true
+  verification:
+    fast_profiles: [operator]
+    full_profiles: [full]
+    require_semantic_verifier: true
+    process_sandbox: auto
+    require_process_sandbox: true
+    network_access: false
+    runtime_venv: .venv
+  experiments:
+    enabled: true
+    trusted_ref: origin/main
+    default_profile: real-e2e
+  promotion:
+    release_root: .autobugfix/releases
+    active_release_link: .autobugfix/active-release
+    require_pull_request: true
+    require_canary: true
+    auto_rollback_on_canary_failure: true
+    canary_profiles: [full]
 repos:
   target_repo:
     main_checkout: ../target-repo
@@ -121,12 +188,15 @@ uv run autobugfix eval run --dataset problem_prompts.jsonl --out .autobugfix-eva
 
 ## Operator Governance
 
-Governance v2 treats the Operator as a bounded execution node. Requests are
-immutable, freeze a Git base SHA and branch, and create a real dedicated
-worktree. Merge authority uses policy from a trusted base ref; a candidate
-cannot weaken its own constitution and approve itself.
+Governance V3 makes the Operator a bounded supervisor, not a state owner.
+Request phases are only `REQUESTED`, `ACTIVE`, `VERIFIED`, and `CLOSED`;
+Writer attempts, checks, gates, scope revisions, experiments, and promotions
+are independent records in the control checkout's SQLite store. Candidate
+worktrees contain no authoritative state.
 
 ```bash
+uv run autobugfix operator guide
+
 uv run autobugfix operator triage \
   --triage-id triage-eval-diff \
   --summary "eval harness did not preserve generated diff" \
@@ -143,27 +213,49 @@ uv run autobugfix operator request \
   --validation-profile eval
 
 uv run autobugfix operator preflight --request-id op-eval-diff
-uv run autobugfix operator workspace-create --request-id op-eval-diff
-# Patch only the returned worktree.
-uv run autobugfix operator postflight --request-id op-eval-diff
-uv run autobugfix operator validate --request-id op-eval-diff
-uv run autobugfix operator export-bundle --request-id op-eval-diff
+uv run autobugfix operator start --request-id op-eval-diff
+uv run autobugfix operator writer-start --request-id op-eval-diff
+uv run autobugfix operator verify --request-id op-eval-diff --mode fast
+uv run autobugfix operator candidate-commit \
+  --request-id op-eval-diff --message "Repair eval artifact capture"
+uv run autobugfix operator experiment-run \
+  --request-id op-eval-diff --profile real-e2e
+uv run autobugfix operator verify --request-id op-eval-diff --mode full
+uv run autobugfix operator audit --request-id op-eval-diff
+uv run autobugfix operator promotion-prepare --request-id op-eval-diff
 ```
 
-Cross-layer requests require an independent reviewer. The request creator
-cannot review itself:
+`operator advance` performs one legal scheduler action at a time: start,
+Writer, fast check, candidate commit, full check, or stop for intervention.
+Writer has only the filtered read surface `autobugfix writer
+task|context|scope|feedback|check-result`; it cannot call Operator mutations.
+
+Cross-layer scope expansion is versioned. An earlier approval does not grant a
+new revision:
 
 ```bash
-uv run autobugfix operator review op-eval-config \
+uv run autobugfix operator scope-change \
+  --request-id op-eval-diff \
+  --add-layer shared_runtime \
+  --add-path src/autobugfix/config.py \
+  --risk medium \
+  --reason "isolated config generation is in the failing data flow"
+
+uv run autobugfix operator review op-eval-diff \
   --reviewer scope-reviewer \
   --decision approve \
   --allowed-layer eval \
   --allowed-layer shared_runtime \
-  --reason "eval runner consumes isolated config generation"
+  --scope-revision-id <revision-id> \
+  --reason "cross-layer diagnosis and path scope verified"
+
+uv run autobugfix operator scope-activate \
+  --request-id op-eval-diff --revision-id <revision-id>
 ```
 
 Constitutional changes require a real OpenSSH signature or an allowlisted
-GitHub approved review. A local `kind: human` label is not accepted:
+GitHub review. A local `kind: human` label is not accepted. Add
+`--scope-revision-id` when approving a proposed revision.
 
 ```bash
 uv run autobugfix operator approval-payload op-architecture \
@@ -181,20 +273,35 @@ uv run autobugfix operator approve-signed op-architecture \
   --allowed-signers ~/.config/autobugfix/allowed_signers
 ```
 
-After validation, create a merge-stage payload bound to the patch digest,
-import its signature, run `finalize`, and export the bundle. GitHub runs the
-base branch's trusted validator, not the PR's candidate validator.
+Promotion is separate from verification:
+
+```bash
+uv run autobugfix operator promotion-open-pr \
+  --promotion-id <promotion-id> \
+  --title "Repair eval artifact capture" \
+  --body "Autobugfix-Request-Digest: <request-digest>"
+
+uv run autobugfix operator promotion-observe-merge \
+  --promotion-id <promotion-id> --repository owner/repository
+uv run autobugfix operator promotion-canary --promotion-id <promotion-id>
+```
+
+On a regression, `promotion-rollback` restores the exact last-known-good
+active-release link. `promotion-revert-pr` then creates a normal Git revert
+branch/PR; it never resets or force-pushes shared main.
 
 GitHub approval review bodies must include
-`Autobugfix-Request-Digest: <request-digest>` and may be imported with
-`approve-github --stage scope|merge`.
+`Autobugfix-Request-Digest: <request-digest>`. The committed
+`.autobugfix-governance/<request-id>/bundle.yaml` is advisory transport only.
+The GitHub check loads code/policy from the trusted base, recalculates the
+actual diff, re-reads reviews, and reruns profiles in Bubblewrap.
 
 The trusted script supports runtime records and exported bundles:
 
 ```bash
 uv run python scripts/validate_operator_policy.py \
   --request-id op-eval-diff \
-  --candidate-root .autobugfix/operator/worktrees/op-eval-diff \
+  --candidate-root .autobugfix/operator-worktrees/op-eval-diff \
   --trusted-ref origin/main
 ```
 
@@ -204,13 +311,13 @@ trusted baseline:
 
 ```bash
 uv run autobugfix operator baseline record \
-  --name toy-e2e \
+  --name real-e2e \
   --metric pass_rate=1 \
   --metric artifact_completeness=1 \
   --metric runtime_seconds=12
 
 uv run autobugfix operator baseline compare \
-  --name toy-e2e \
+  --name real-e2e \
   --metric pass_rate=1 \
   --metric artifact_completeness=1 \
   --metric runtime_seconds=14
@@ -218,6 +325,31 @@ uv run autobugfix operator baseline compare \
 
 Install repository-specific reviewer/public-key allowlists, CODEOWNERS, and
 optional branch protection with `scripts/install_operator_governance.py`.
+Codex hooks block obvious direct merge/protected push/state-write commands,
+but hooks are not authority; Service and trusted-base CI are the final gates.
+These project hooks apply to the supervising main Codex session in the
+Autobugfix source checkout. Isolated SDK roles explicitly disable hooks and are
+constrained by their role sandbox, worktree, service, and verifier instead.
+
+The mandatory docs acceptance uses a pinned ItsDangerous upstream commit and a
+reproducible fault injection to cover Execution, Memory, and Eval with real
+Codex roles. It is deliberately reported as a real-repository E2E, not as an
+official SWE-bench score:
+
+```bash
+uv run python scripts/real_repository_acceptance.py --model gpt-5.4-mini
+```
+
+The script clones the public upstream commit, commits a reproducible regression
+to a local fixture remote, verifies that Execution changes only its task
+worktree, compiles accepted evidence into a pending Memory proposal, and runs a
+second isolated Eval execution whose generated diff must equal the committed
+oracle. The configured target main checkout must remain byte-for-byte clean.
+Official SWE-bench Verified scoring still requires its container harness; a
+local run without that harness must not be labeled as a benchmark result.
+
+`scripts/real_toy_acceptance.py` remains an optional fast development fixture;
+it is not a release or promotion acceptance gate.
 
 Runtime state under `.autobugfix/`, generated memory evidence, eval runs, and
 UI screenshots are gitignored.

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import pytest
 import yaml
 
-from autobugfix.config import load_config
+from autobugfix.config import ConfigError, load_config
 from autobugfix.models import TaskRecord
 from autobugfix.role_config import resolve_role
 from autobugfix.task_store import TaskStore
@@ -13,6 +14,11 @@ def test_config_defaults_and_task_store_round_trip(tmp_path):
     project_root, _ = make_service_project(tmp_path)
     cfg = load_config(project_root)
     assert cfg.repo("toy_repo").worktree_root == project_root / ".autobugfix/worktrees/toy_repo"
+    assert cfg.codex.default_model is None
+    assert cfg.operator.experiments.default_profile == "real-e2e"
+    real_profile = cfg.operator.experiments.profiles["real-e2e"]
+    assert real_profile["network_access"] is True
+    assert "scripts/real_repository_acceptance.py" in real_profile["commands"][0]["argv"]
     store = TaskStore(project_root, cfg.task_root)
     record = TaskRecord(task_id="t1", repo_id="toy_repo", title="title", body="body", state="ready")
     store.create(record)
@@ -55,3 +61,14 @@ def test_role_config_defaults_legacy_models_and_repo_override(tmp_path):
     assert evaluator.model == "global-evaluator"
     assert evaluator.sandbox == "read-only"
     assert evaluator.timeout_seconds == 77
+
+
+def test_config_rejects_disabling_isolated_codex_role_runtime(tmp_path):
+    project_root, _ = make_service_project(tmp_path)
+    path = project_root / ".autobugfix/config.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["codex"]["role_runtime"]["enabled"] = False
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="isolated CODEX_HOME"):
+        load_config(project_root)

@@ -9,8 +9,12 @@ REQUIRED = [
     ".agents/role-skills/execution/evaluator/autobugfix-evaluator/SKILL.md",
     ".agents/role-skills/memory/maintainer/autobugfix-memory-maintainer/SKILL.md",
     ".agents/role-skills/eval/judge/autobugfix-eval-judge/SKILL.md",
+    ".agents/role-skills/operator/supervisor/autobugfix-operator-supervisor/SKILL.md",
+    ".agents/role-skills/operator/writer/autobugfix-operator-writer/SKILL.md",
+    ".agents/role-skills/operator/verifier/autobugfix-operator-verifier/SKILL.md",
     ".agents/skills/oncall-bugfix/SKILL.md",
     ".agents/skills/autobugfix-eval-operator/SKILL.md",
+    ".agents/skills/autobugfix-operator-governance/SKILL.md",
 ]
 
 

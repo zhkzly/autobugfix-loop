@@ -9,6 +9,14 @@ from autobugfix.models import (
     AutobugfixConfig,
     CodexConfig,
     EvalConfig,
+    OperatorArtifactConfig,
+    OperatorConfig,
+    OperatorExperimentConfig,
+    OperatorPromotionConfig,
+    OperatorRetryConfig,
+    OperatorStateConfig,
+    OperatorVerificationConfig,
+    OperatorWorktreeConfig,
     PpeConfig,
     RepoProfile,
     RoleConfig,
@@ -117,6 +125,48 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "stderr_log_template": "judge.stderr.log",
                 "allow_repo_overrides": False,
             },
+            "operator_supervisor": {
+                "backend": "codex",
+                "model": None,
+                "sandbox": "read-only",
+                "approval_mode": "deny_all",
+                "timeout_seconds": None,
+                "skill_paths": [
+                    ".agents/role-skills/base/autobugfix-runtime-base/SKILL.md",
+                    ".agents/role-skills/operator/supervisor/autobugfix-operator-supervisor/SKILL.md",
+                ],
+                "raw_log_template": ".autobugfix/operator-runs/{role}.raw.jsonl",
+                "stderr_log_template": ".autobugfix/operator-runs/{role}.stderr.log",
+                "allow_repo_overrides": False,
+            },
+            "operator_writer": {
+                "backend": "codex",
+                "model": None,
+                "sandbox": "workspace-write",
+                "approval_mode": "auto_review",
+                "timeout_seconds": None,
+                "skill_paths": [
+                    ".agents/role-skills/base/autobugfix-runtime-base/SKILL.md",
+                    ".agents/role-skills/operator/writer/autobugfix-operator-writer/SKILL.md",
+                ],
+                "raw_log_template": "writer.raw.jsonl",
+                "stderr_log_template": "writer.stderr.log",
+                "allow_repo_overrides": False,
+            },
+            "operator_verifier": {
+                "backend": "codex",
+                "model": None,
+                "sandbox": "read-only",
+                "approval_mode": "deny_all",
+                "timeout_seconds": None,
+                "skill_paths": [
+                    ".agents/role-skills/base/autobugfix-runtime-base/SKILL.md",
+                    ".agents/role-skills/operator/verifier/autobugfix-operator-verifier/SKILL.md",
+                ],
+                "raw_log_template": "verifier.raw.jsonl",
+                "stderr_log_template": "verifier.stderr.log",
+                "allow_repo_overrides": False,
+            },
         },
     },
     "worker": {
@@ -130,6 +180,106 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "eval": {
         "model_mode": "codex",
         "roles": {},
+    },
+    "operator": {
+        "state": {
+            "root": ".autobugfix/operator-v3",
+            "database_name": "governance.sqlite3",
+            "lease_timeout_seconds": 7200,
+        },
+        "artifacts": {"root": ".autobugfix/operator-artifacts"},
+        "worktrees": {
+            "root": ".autobugfix/operator-worktrees",
+            "branch_template": "operator/experiment/{request_id}",
+        },
+        "retry": {
+            "max_attempts": 5,
+            "max_auto_retries": 2,
+            "auto_retry_deterministic_failures": True,
+        },
+        "verification": {
+            "fast_profiles": ["operator"],
+            "full_profiles": ["full"],
+            "require_semantic_verifier": True,
+            "process_sandbox": "auto",
+            "require_process_sandbox": True,
+            "network_access": False,
+            "runtime_venv": ".venv",
+        },
+        "experiments": {
+            "enabled": True,
+            "trusted_ref": "origin/main",
+            "default_profile": "real-e2e",
+            "profiles": {
+                "real-e2e": {
+                    "timeout_seconds": 3600,
+                    "network_access": True,
+                    "commands": [
+                        {
+                            "name": "real-repository-e2e",
+                            "argv": [
+                                "uv",
+                                "run",
+                                "--cache-dir",
+                                "/tmp/uv-cache",
+                                "python",
+                                "scripts/real_repository_acceptance.py",
+                                "--root",
+                                "{shadow_state_root}/real-e2e",
+                                "--model",
+                                "gpt-5.4-mini",
+                            ],
+                        }
+                    ],
+                },
+                "toy-fast": {
+                    "timeout_seconds": 900,
+                    "commands": [
+                        {
+                            "name": "real-toy-acceptance",
+                            "argv": [
+                                "uv",
+                                "run",
+                                "--cache-dir",
+                                "/tmp/uv-cache",
+                                "python",
+                                "scripts/real_toy_acceptance.py",
+                            ],
+                        }
+                    ],
+                },
+                "swebench-smoke": {
+                    "timeout_seconds": 7200,
+                    "required_values": ["dataset"],
+                    "commands": [
+                        {
+                            "name": "swebench-verified-smoke",
+                            "argv": [
+                                "uv",
+                                "run",
+                                "--cache-dir",
+                                "/tmp/uv-cache",
+                                "autobugfix",
+                                "eval",
+                                "run",
+                                "--dataset",
+                                "{dataset}",
+                                "--out",
+                                "{shadow_state_root}/swebench",
+                            ],
+                        }
+                    ],
+                },
+            },
+        },
+        "promotion": {
+            "release_root": ".autobugfix/releases",
+            "active_release_link": ".autobugfix/active-release",
+            "require_pull_request": True,
+            "require_canary": True,
+            "auto_rollback_on_canary_failure": True,
+            "canary_profiles": ["full"],
+        },
     },
     "repos": {},
 }
@@ -237,6 +387,10 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
         skill_guard=bool(runtime_raw.get("skill_guard", True)),
         strict_skill_guard=bool(runtime_raw.get("strict_skill_guard", True)),
     )
+    if not role_runtime.enabled:
+        raise ConfigError(
+            "codex.role_runtime.enabled must remain true so production SDK roles use an isolated CODEX_HOME"
+        )
     roles = _parse_roles(codex_raw.get("roles"), "codex.roles")
     legacy_role_models = {
         "writer": codex_raw.get("writer_model"),
@@ -271,6 +425,124 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
         model_mode=str(eval_raw.get("model_mode", "codex")),
         roles=_parse_roles(eval_raw.get("roles"), "eval.roles"),
     )
+
+    operator_raw = _as_mapping(merged.get("operator"), "operator")
+    state_raw = _as_mapping(operator_raw.get("state"), "operator.state")
+    artifact_raw = _as_mapping(operator_raw.get("artifacts"), "operator.artifacts")
+    worktree_raw = _as_mapping(operator_raw.get("worktrees"), "operator.worktrees")
+    retry_raw = _as_mapping(operator_raw.get("retry"), "operator.retry")
+    verification_raw = _as_mapping(operator_raw.get("verification"), "operator.verification")
+    experiment_raw = _as_mapping(operator_raw.get("experiments"), "operator.experiments")
+    promotion_raw = _as_mapping(operator_raw.get("promotion"), "operator.promotion")
+
+    def _string_tuple(raw_value: Any, field: str) -> tuple[str, ...]:
+        if not isinstance(raw_value, list):
+            raise ConfigError(f"{field} must be a list")
+        return tuple(str(item) for item in raw_value)
+
+    operator_config = OperatorConfig(
+        state=OperatorStateConfig(
+            root=_resolve(root, state_raw.get("root")) or (root / ".autobugfix/operator-v3"),
+            database_name=str(state_raw.get("database_name", "governance.sqlite3")),
+            lease_timeout_seconds=int(state_raw.get("lease_timeout_seconds", 7200)),
+        ),
+        artifacts=OperatorArtifactConfig(
+            root=_resolve(root, artifact_raw.get("root")) or (root / ".autobugfix/operator-artifacts"),
+        ),
+        worktrees=OperatorWorktreeConfig(
+            root=_resolve(root, worktree_raw.get("root")) or (root / ".autobugfix/operator-worktrees"),
+            branch_template=str(worktree_raw.get("branch_template", "operator/experiment/{request_id}")),
+        ),
+        retry=OperatorRetryConfig(
+            max_attempts=int(retry_raw.get("max_attempts", 5)),
+            max_auto_retries=int(retry_raw.get("max_auto_retries", 2)),
+            auto_retry_deterministic_failures=bool(
+                retry_raw.get("auto_retry_deterministic_failures", True)
+            ),
+        ),
+        verification=OperatorVerificationConfig(
+            fast_profiles=_string_tuple(
+                verification_raw.get("fast_profiles", ["operator"]),
+                "operator.verification.fast_profiles",
+            ),
+            full_profiles=_string_tuple(
+                verification_raw.get("full_profiles", ["full"]),
+                "operator.verification.full_profiles",
+            ),
+            require_semantic_verifier=bool(verification_raw.get("require_semantic_verifier", True)),
+            process_sandbox=str(verification_raw.get("process_sandbox", "auto")),
+            require_process_sandbox=bool(verification_raw.get("require_process_sandbox", True)),
+            network_access=bool(verification_raw.get("network_access", False)),
+            runtime_venv=_resolve(root, verification_raw.get("runtime_venv")),
+        ),
+        experiments=OperatorExperimentConfig(
+            enabled=bool(experiment_raw.get("enabled", True)),
+            trusted_ref=str(experiment_raw.get("trusted_ref", "origin/main")),
+            default_profile=str(experiment_raw.get("default_profile", "real-e2e")),
+            profiles={
+                str(name): _as_mapping(value, f"operator.experiments.profiles.{name}")
+                for name, value in _as_mapping(
+                    experiment_raw.get("profiles"), "operator.experiments.profiles"
+                ).items()
+            },
+        ),
+        promotion=OperatorPromotionConfig(
+            release_root=_resolve(root, promotion_raw.get("release_root")) or (root / ".autobugfix/releases"),
+            active_release_link=_resolve(root, promotion_raw.get("active_release_link"))
+            or (root / ".autobugfix/active-release"),
+            require_pull_request=bool(promotion_raw.get("require_pull_request", True)),
+            require_canary=bool(promotion_raw.get("require_canary", True)),
+            auto_rollback_on_canary_failure=bool(
+                promotion_raw.get("auto_rollback_on_canary_failure", True)
+            ),
+            canary_profiles=_string_tuple(
+                promotion_raw.get("canary_profiles", ["full"]),
+                "operator.promotion.canary_profiles",
+            ),
+        ),
+    )
+    if operator_config.retry.max_attempts < 1:
+        raise ConfigError("operator.retry.max_attempts must be positive")
+    if operator_config.state.lease_timeout_seconds < 1:
+        raise ConfigError("operator.state.lease_timeout_seconds must be positive")
+    if operator_config.retry.max_auto_retries < 0:
+        raise ConfigError("operator.retry.max_auto_retries must not be negative")
+    if operator_config.retry.max_auto_retries >= operator_config.retry.max_attempts:
+        raise ConfigError("operator.retry.max_auto_retries must be lower than max_attempts")
+    if "{request_id}" not in operator_config.worktrees.branch_template:
+        raise ConfigError("operator.worktrees.branch_template must contain {request_id}")
+    if operator_config.verification.process_sandbox not in {"auto", "bubblewrap", "none"}:
+        raise ConfigError("operator.verification.process_sandbox must be auto, bubblewrap, or none")
+    if (
+        operator_config.verification.require_process_sandbox
+        and operator_config.verification.process_sandbox == "none"
+    ):
+        raise ConfigError("required Operator process sandbox cannot use process_sandbox: none")
+    if not operator_config.verification.fast_profiles:
+        raise ConfigError("operator.verification.fast_profiles must not be empty")
+    if not operator_config.verification.full_profiles:
+        raise ConfigError("operator.verification.full_profiles must not be empty")
+    if operator_config.experiments.enabled:
+        if operator_config.experiments.default_profile not in operator_config.experiments.profiles:
+            raise ConfigError("operator.experiments.default_profile is not defined in profiles")
+        for name, profile in operator_config.experiments.profiles.items():
+            commands = profile.get("commands")
+            if not isinstance(commands, list) or not commands:
+                raise ConfigError(f"operator.experiments.profiles.{name}.commands must be a non-empty list")
+            for index, command in enumerate(commands):
+                if not isinstance(command, dict) or not isinstance(command.get("argv"), list):
+                    raise ConfigError(
+                        f"operator.experiments.profiles.{name}.commands[{index}].argv must be a list"
+                    )
+    if operator_config.promotion.require_canary and not operator_config.promotion.canary_profiles:
+        raise ConfigError("operator.promotion.canary_profiles must not be empty when canary is required")
+    authority_roots = {
+        operator_config.state.root.resolve(),
+        operator_config.artifacts.root.resolve(),
+        operator_config.worktrees.root.resolve(),
+    }
+    if len(authority_roots) != 3:
+        raise ConfigError("operator state, artifact, and worktree roots must be distinct")
 
     repos: dict[str, RepoProfile] = {}
     for repo_id, repo_raw_any in _as_mapping(merged.get("repos"), "repos").items():
@@ -309,6 +581,7 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
         worker=worker,
         memory_worker=memory_worker,
         eval=eval_config,
+        operator=operator_config,
         repos=repos,
     )
 

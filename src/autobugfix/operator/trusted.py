@@ -27,9 +27,21 @@ def _parse_constitution(text: str, source: str) -> dict[str, Any]:
     data = yaml.safe_load(text) or {}
     if not isinstance(data, dict):
         raise TrustedPolicyError(f"operator constitution must be a mapping: {source}")
-    if int(data.get("version", 0)) < 2:
-        raise TrustedPolicyError(f"trusted operator constitution must be version 2 or newer: {source}")
-    for key in ("layers", "protected_paths", "validation_profiles", "metrics"):
+    if int(data.get("version", 0)) < 3:
+        raise TrustedPolicyError(f"trusted operator constitution must be version 3 or newer: {source}")
+    for key in (
+        "project",
+        "operator_prompt_context",
+        "loops",
+        "operator_roles",
+        "hook_assignments",
+        "transition_contract",
+        "operator_runtime_minimums",
+        "layers",
+        "protected_paths",
+        "validation_profiles",
+        "metrics",
+    ):
         if key not in data:
             raise TrustedPolicyError(f"trusted operator constitution missing {key}: {source}")
     return data

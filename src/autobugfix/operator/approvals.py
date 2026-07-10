@@ -26,9 +26,10 @@ def approval_signing_payload(
     expires_at: str | None = None,
     patch_digest: str | None = None,
     head_sha: str | None = None,
+    scope_version: int = 1,
 ) -> dict[str, Any]:
     return {
-        "schema": "autobugfix-operator-approval-v2",
+        "schema": "autobugfix-operator-approval-v3",
         "request_id": request.request_id,
         "request_digest": request.request_digest,
         "base_sha": request.base_sha,
@@ -37,6 +38,7 @@ def approval_signing_payload(
         "decision": "approve",
         "reason": reason,
         "allowed_layers": sorted(set(allowed_layers or request.declared_layers)),
+        "scope_version": scope_version,
         "allowed_paths": sorted(set(allowed_paths)),
         "expires_at": expires_at,
         "patch_digest": patch_digest,
@@ -115,7 +117,7 @@ def signed_approval_from_files(
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise OperatorApprovalError("signed approval payload must be an object")
-    if payload.get("schema") != "autobugfix-operator-approval-v2":
+    if payload.get("schema") != "autobugfix-operator-approval-v3":
         raise OperatorApprovalError("unsupported signed approval payload schema")
     if payload.get("request_id") != request.request_id or payload.get("request_digest") != request.request_digest:
         raise OperatorApprovalError("signed approval does not bind to this request")
@@ -135,6 +137,7 @@ def signed_approval_from_files(
         decision=str(payload.get("decision") or "approve"),
         reason=str(payload.get("reason") or "signed human approval"),
         allowed_layers=tuple(str(item) for item in payload.get("allowed_layers") or []),
+        scope_version=int(payload.get("scope_version", 1)),
         allowed_paths=tuple(str(item) for item in payload.get("allowed_paths") or []),
         expires_at=payload.get("expires_at"),
         patch_digest=payload.get("patch_digest"),
@@ -166,6 +169,7 @@ def github_approval(
     constitution: Mapping[str, Any],
     reason: str,
     stage: str = "merge",
+    scope_version: int = 1,
 ) -> OperatorApproval:
     review = _run_gh_api(f"repos/{repository}/pulls/{pull_request}/reviews/{review_id}")
     login = str((review.get("user") or {}).get("login") or "")
@@ -191,6 +195,7 @@ def github_approval(
         decision="approve",
         reason=reason,
         allowed_layers=tuple(sorted(request.declared_layers)),
+        scope_version=scope_version,
         head_sha=commit_id,
         proof={
             "repository": repository,
@@ -215,7 +220,7 @@ def verify_external_approval(
         if not isinstance(payload, dict) or not isinstance(signature_text, str):
             raise OperatorApprovalError("signed approval proof is incomplete")
         expected_payload = {
-            "schema": "autobugfix-operator-approval-v2",
+            "schema": "autobugfix-operator-approval-v3",
             "request_id": approval.request_id,
             "request_digest": approval.request_digest,
             "base_sha": approval.base_sha,
@@ -224,6 +229,7 @@ def verify_external_approval(
             "decision": approval.decision,
             "reason": approval.reason,
             "allowed_layers": list(approval.allowed_layers),
+            "scope_version": approval.scope_version,
             "allowed_paths": list(approval.allowed_paths),
             "expires_at": approval.expires_at,
             "patch_digest": approval.patch_digest,
@@ -276,12 +282,15 @@ def approval_matches(
     stage: str = "scope",
     patch_digest: str | None = None,
     head_sha: str | None = None,
+    scope_version: int = 1,
 ) -> bool:
     if not approval.approved or approval.stage != stage:
         return False
     if approval.request_id != request.request_id or approval.request_digest != request.request_digest:
         return False
     if approval.base_sha != request.base_sha:
+        return False
+    if approval.scope_version != scope_version:
         return False
     if approval.approver == request.creator and approval.kind == "reviewer":
         return False

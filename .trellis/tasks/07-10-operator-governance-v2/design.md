@@ -1,133 +1,131 @@
-# Operator Governance v2 Design
+# Operator Governance V3 Design
 
-## Trust Model
-
-The candidate branch and the Operator process are untrusted for authorization
-purposes. They may propose policy changes, but the authoritative decision uses
-constitution data loaded from a trusted Git ref or trusted external path. Local
-candidate validation remains useful feedback but is not merge authority.
-
-The system enforces official workspace, validation, commit, and merge paths.
-It does not claim that a process with unrestricted operating-system access is
-physically unable to edit arbitrary files; instead, unauthorized edits cannot
-produce a valid Governance v2 authorization and validation chain.
-
-## Components
-
-### Models and canonical digests
-
-`models.py` defines typed triage, request, approval, event, projection, and
-validation records. Canonical JSON with sorted keys is hashed with SHA-256.
-Mutable projection fields are excluded from immutable request payloads.
-
-### Append-only store and projection
-
-`store.py` owns `.autobugfix/operator/**`. Immutable records use exclusive
-creation. `events/<request-id>.jsonl` is append-only. `projection.py` is the
-single reducer from events to request state.
-
-### Governance service
-
-`service.py` owns transitions and validates cross-record references. CLI code
-calls this service and never writes request, review, approval, workspace, or
-validation files directly.
-
-### Policy and trusted loading
-
-`policy.py` classifies paths, computes risk floors, resolves required profiles,
-and evaluates scope. `trusted.py` loads constitution bytes from:
-
-1. an explicit trusted file;
-2. `git show <trusted-ref>:src/autobugfix/operator/constitution.yaml`;
-3. the installed package only for explicit bootstrap/local feedback mode.
-
-Policy evaluation always compares frozen `request.base_sha` to the current
-candidate, including untracked files.
-
-### Approval providers
-
-`approvals.py` supports:
-
-- independent agent/script reviews bound to request digest;
-- OpenSSH signed human approval payloads verified through `ssh-keygen -Y
-  verify` and an allowed-signers file;
-- imported GitHub review evidence whose reviewer and commit are checked against
-  configured policy allowlists;
-- interactive local experiment approval that is never sufficient for
-  constitutional merge readiness.
-
-### Operator workspaces
-
-`workspace.py` creates a real Git worktree under
-`.autobugfix/operator/worktrees/<request-id>` from `request.base_sha` and a
-request-derived branch. Workspace metadata records path, branch, and base SHA.
-Existing paths or branches are rejected unless they refer to the same request.
-
-### Validation and metrics
-
-`validator.py` resolves named profiles from trusted policy, executes argv arrays
-without a shell, stores command artifacts, computes patch/head digests, and
-emits events. `metrics.py` validates complete typed metric contracts and records
-regression results.
-
-## State Flow
+## Architecture
 
 ```text
-triage created
-  -> request created (TRIAGED)
-  -> authorization evaluation (REVIEW_PENDING or AUTHORIZED)
-  -> workspace created (PATCHING)
-  -> postflight (PATCHED)
-  -> validation (VALIDATING)
-  -> pass + approval chain (MERGE_READY)
-
-Any stage may transition to REJECTED, EXPIRED, REVOKED, or
-VALIDATION_FAILED through an append-only event.
+trusted main/package
+  constitution + config + skills + Transition Guard
+                  |
+                  v
+external control plane
+  OperatorGovernanceService + SQLite event store + artifact registry
+        |                                  |
+        | typed Operator requests          | read-only WriterView
+        v                                  v
+Operator Supervisor                    Operator Writer
+read-only diagnosis                 candidate worktree-write only
+        |                                  |
+        +-------------- feedback ----------+
+                          |
+                  deterministic checks
+                          |
+                  semantic verifier (RO)
+                          |
+                   Request VERIFIED
+                          |
+                Promotion + trusted CI
+                          |
+              canary -> activate/rollback
 ```
 
-## Permission Classes
+The host process is the control plane. Agents do not own state. Candidate
+worktrees are untrusted execution planes and contain no authoritative state.
 
-- `layer_local`: one non-protected layer and computed low risk. Automatic
-  authorization is permitted.
-- `cross_layer`: more than one layer, tests shared across layers, or computed
-  medium/high risk. Requires an independent reviewer.
-- `constitutional`: protected files or semantics, governance trust code,
-  production authority, merge, or release. Requires verified human evidence.
+## Aggregate Model
 
-Requested risk is `max(requested_risk, computed_risk)` under an explicit order.
+`OperatorRequest` is the root aggregate with exactly four phases:
+`REQUESTED`, `ACTIVE`, `VERIFIED`, `CLOSED`. Child records are independent:
 
-## Git Comparison
+- `WriterRun`: queued/running/completed/failed/timed_out/cancelled.
+- `CheckRun`: pending/running/passed/failed/error/cancelled.
+- `GateSnapshot`: scope/tests/semantic/approval/merge pass/fail/pending/stale.
+- `ScopeRevision`: proposed/approved/rejected/superseded.
+- `Experiment`: created/running/completed/failed/closed.
+- `Promotion`: prepared/pr_open/merged/canary/active/failed/rolled_back.
 
-Request creation stores `base_sha=git rev-parse HEAD`. Validation uses the
-equivalent of:
+Events are the source of truth. Projection rows are rebuildable caches. No API
+accepts an arbitrary target state.
 
-```text
-git diff --name-only <base_sha>
-git ls-files --others --exclude-standard
-```
+## Transition Contracts
 
-This includes commits made after request creation as well as staged and
-unstaged changes. The request branch is also frozen and checked.
+- `request`: validate evidence and trusted Git identity; create REQUESTED.
+- `start`: validate authority and workspace contract; create ACTIVE.
+- `writer_start/retry`: enforce ACTIVE, concurrency, budget, and role contract;
+  launch one SDK run without changing Request phase.
+- `verify`: derive Git snapshot; run trusted profiles; produce CheckRun and
+  feedback; transition ACTIVE to VERIFIED only when every required gate passes.
+- `scope_change`: append revision and invalidate checks; activate only after
+  risk-derived authority succeeds.
+- `promote`: require current VERIFIED patch and create Promotion PREPARED.
+- `merge_observed`: accept only externally verified PR/head/merge facts.
+- `activate`: require post-merge canary and compatible state schema.
+- `rollback`: restore recorded previous active release and create revert intent.
+- `close`: record merged/abandoned/rejected/superseded/rolled_back outcome.
 
-## GitHub Boundary
+Failures generally retain the Request phase and write a typed CheckRun,
+GateSnapshot, and FeedbackPacket. This preserves retry without state explosion.
 
-The repository includes a `pull_request_target` workflow with read-only
-permissions. It checks out the trusted base into one directory and the
-candidate into another, then runs the base validator against the candidate.
-The workflow must not execute arbitrary candidate scripts with secrets. A
-separate setup command documents/configures required branch protection.
+## Storage
 
-## Compatibility and Migration
+The configured state root defaults to an XDG state path. SQLite uses WAL,
+foreign keys, explicit transactions, and append-only events. Runtime tables
+store typed projections and references. Large artifacts are content-addressed
+under a separate root. Every artifact has producer and trust class metadata.
 
-Governance v1 runtime records are not trusted as v2 approvals. They remain
-readable for audit but must be migrated by creating a new v2 triage/request.
-Existing `operator triage`, `request`, `review`, `preflight`, `validate`, and
-`baseline` command names remain where semantics are compatible. Human-labelled
-v1 review creation is removed.
+Candidate-produced artifacts are advisory. Host raw SDK captures, Git facts,
+verifier process output, external approvals, and GitHub facts are authoritative
+for their declared purpose. The store path is never included in WriterView.
 
-## Rollback
+## Agent Surfaces
 
-The previous implementation remains available in Git commit `ac2eed2`. A code
-rollback may restore it for inspection, but merge protection must not downgrade
-to v1 after Governance v2 has become the trusted main policy.
+Operator Supervisor receives project constitution, request projection, latest
+gate snapshot, evidence references, and allowed transition actions. It can call
+typed Operator tools only.
 
+Operator Writer receives the task, evidence excerpts, active scope, changed
+path constraints, latest feedback, and test artifacts through read-only views.
+Its filesystem write root is the candidate worktree. It cannot invoke Operator
+mutation, approval, promotion, or state APIs.
+
+Semantic Verifier receives trusted diff/test evidence and has a read-only
+candidate cwd. Its report is advisory until the Guard validates its binding.
+
+## Configuration
+
+Configuration adds `operator.state`, `operator.artifacts`, `operator.worktrees`,
+`operator.retry`, `operator.verification`, `operator.experiments`,
+`operator.promotion`, and three Codex roles. Trusted policy determines minimum
+requirements; project config may tighten them but cannot weaken them.
+
+## Merge And Rollback
+
+The candidate transports a promotion manifest/receipt, but trusted CI derives
+the actual patch and reruns required checks. Main remains the only trust root.
+Merge creates an immutable candidate release; canary activation is a separate
+step. Rollback switches to the recorded last-known-good release before opening
+a Git revert PR. State events are never rewound.
+
+## Migration
+
+Governance v2 records remain readable as legacy audit evidence. V3 starts a new
+SQLite authority namespace and does not treat v2 approvals or projections as
+current authority. Existing CLI names may remain as compatibility aliases only
+when they preserve V3 transition semantics.
+
+## Acceptance Findings
+
+- Hook policy is deliberately narrow: artifact/state reads are allowed, while
+  obvious direct mutation, direct merge, protected push, and force push are
+  denied. The service and remote check remain the actual authority boundary.
+- Project hooks belong only to the external `operator_host` main session.
+  Execution, Memory, Eval, and bounded Operator SDK roles use isolated
+  `CODEX_HOME` runtimes with hooks disabled; their services and harnesses own
+  enforcement.
+- Semantic acceptance uses behavior contracts rather than exact patch text so
+  a correct stronger implementation is not scored as a failure.
+- Model-backed acceptance sets the temporary config model explicitly without
+  changing the production `runtime-default` setting.
+- The real-repository smoke pins an ItsDangerous upstream commit, injects and
+  commits a reproducible regression to a local fixture remote, and verifies the
+  target main checkout remains unchanged. It is not labeled SWE-bench because
+  the official container harness is unavailable in this environment.
