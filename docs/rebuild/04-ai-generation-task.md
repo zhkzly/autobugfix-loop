@@ -91,6 +91,7 @@ codex:
   role_runtime:
     enabled: true
     runtime_root: .autobugfix/runtime/codex-sdk
+    codex_bin: null
     bridge_auth: true
     skill_guard: true
     strict_skill_guard: true
@@ -183,7 +184,8 @@ real Codex SDK writer/evaluator execution;
 real verifier command;
 real memory maintainer execution;
 real eval run that calls the execution loop;
-generated diff equals oracle diff for the toy case.
+generated diff and diagnostic oracle diff are retained, while the independent
+real verifier determines whether the case is solved.
 Definition Of Done
 The task is complete only when:
 uv run pytest -q passes;

@@ -17,6 +17,8 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
 | [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
+| [Autobugfix Loop And Harness Contract](./autobugfix-loop-harness-contract.md) | Project purpose, loop boundaries, harness boundaries | Active |
+| [Operator Governance Policy](./operator-governance-policy.md) | Machine-readable operator permission gate and validation contracts | Active |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | In progress |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
 

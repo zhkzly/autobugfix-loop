@@ -135,7 +135,7 @@ uv run pytest -q
 uv run python -m compileall -q src tests scripts
 git diff --check
 available role-skill validators
-the real toy-repo acceptance in 05-real-acceptance.md
+the pinned public real-repository acceptance in 05-real-acceptance.md
 Questions:
 Did production paths use real Git, worktrees, Codex SDK, verifier commands,
 memory maintainer, and eval execution?

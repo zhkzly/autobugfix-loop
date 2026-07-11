@@ -1,0 +1,415 @@
+version: 3
+
+operator_prompt_context: |
+  Autobugfix is a local, repo-agnostic loop-engineering and harness-engineering control system.
+  Execution repeatedly repairs a configured target repository in an isolated task worktree.
+  Memory compiles accepted Execution evidence into reviewed LLM wiki knowledge and skills.
+  Eval reproducibly measures the real Execution loop against datasets, oracles, and scorers.
+  Operator diagnoses and improves Autobugfix itself through governed non-main experiments.
+  LLM agents are bounded execution/review nodes. Services, Git facts, deterministic checks,
+  external approval, and trusted CI own truth. Restate this contract, name the affected loop
+  and state owner, and name the real validation command before every new Operator task.
+  Project Codex hooks belong only to the trusted operator_host session. SDK roles run with
+  hooks disabled and rely on their service, sandbox, worktree, and verifier boundaries.
+
+project:
+  id: autobugfix
+  purpose: >-
+    A local, repo-agnostic, Git-controlled loop-engineering and
+    harness-engineering system for repeatedly producing, verifying, observing,
+    evaluating, learning from, and safely promoting real bug fixes.
+  principles:
+    - llm_agents_are_bounded_nodes
+    - authoritative_state_is_service_owned
+    - candidate_worktrees_are_untrusted
+    - deterministic_checks_precede_semantic_judgment
+    - every_run_preserves_observable_evidence
+    - main_is_the_only_trust_root
+
+loops:
+  execution:
+    purpose: Produce a real target-repository fix in an isolated task worktree.
+    state_owner: AutobugfixService
+    may_read: [target_config, task, context, feedback, active_memory]
+    may_write: [task_worktree, execution_state, execution_artifacts]
+    forbidden: [target_main_checkout, memory_approval, eval_authority]
+  memory:
+    purpose: Compile accepted execution evidence into reviewed wiki, memory, and skills.
+    state_owner: MemoryService
+    may_read: [accepted_execution_evidence]
+    may_write: [memory_packets, digests, proposals, approved_memory]
+    forbidden: [execution_state, task_worktree, self_approval]
+  eval:
+    purpose: Reproducibly measure the real execution loop against cases and oracles.
+    state_owner: EvalRunner
+    may_read: [datasets, execution_artifacts, generated_diff, oracle]
+    may_write: [eval_runs, scores, diagnoses]
+    forbidden: [approve_ppe, archive_execution, approve_memory]
+  operator:
+    purpose: Diagnose and improve Autobugfix through governed non-main experiments.
+    state_owner: OperatorGovernanceService
+    may_read: [trusted_constitution, control_projection, artifacts, candidate_diff]
+    may_write: [transition_requests, diagnoses, candidate_via_writer]
+    forbidden: [set_state, write_main, write_authority_store, self_approval, direct_merge]
+
+operator_roles:
+  operator_supervisor:
+    purpose: Diagnose failures and request legal transitions.
+    sandbox: read-only
+    capabilities:
+      allow: [operator_read, transition_request, writer_control]
+      deny: [candidate_write, state_write, approve, merge]
+  operator_writer:
+    purpose: Modify only the assigned candidate worktree using trusted feedback.
+    sandbox: workspace-write
+    capabilities:
+      allow: [writer_read_view, candidate_write]
+      deny: [operator_mutation, state_write, approve, verify, promote, merge]
+  operator_verifier:
+    purpose: Perform patch-bound read-only semantic review after deterministic checks.
+    sandbox: read-only
+    capabilities:
+      allow: [verification_read_view, semantic_verdict]
+      deny: [candidate_write, state_write, deterministic_override, approve, merge]
+
+hook_assignments:
+  operator_host:
+    systems: [operator]
+    roles: [human_operator, main_agent_operator]
+    config: .codex/hooks.json
+    runtime: trusted_autobugfix_source_checkout
+    hooks:
+      - operator-governance.py
+      - inject-workflow-state.py
+    authority: advisory_accident_prevention
+  isolated_sdk_roles:
+    systems: [execution, memory, eval, operator]
+    roles:
+      - writer
+      - evaluator
+      - controller
+      - memory_maintainer
+      - eval_judge
+      - operator_supervisor
+      - operator_writer
+      - operator_verifier
+    runtime: isolated_codex_home
+    hooks_enabled: false
+    authority: service_sandbox_git_verifier_and_external_gates
+  invariant: Operator host hooks must never be injected into an isolated SDK role.
+
+transition_contract:
+  request_phases: [REQUESTED, ACTIVE, VERIFIED, CLOSED]
+  commands:
+    request:
+      from: [NONE]
+      to: REQUESTED
+      checks: [evidence, git_base, scope_schema, trusted_constitution_digest]
+    start:
+      from: [REQUESTED]
+      to: ACTIVE
+      checks: [scope_authority, non_main_branch, real_worktree, writer_role]
+    verify:
+      from: [ACTIVE]
+      to: VERIFIED
+      checks: [git_snapshot, scope, deterministic_profiles, baseline, semantic_verdict, approvals]
+    reopen:
+      from: [VERIFIED]
+      to: ACTIVE
+      checks: [patch_or_scope_changed]
+    close:
+      from: [REQUESTED, ACTIVE, VERIFIED]
+      to: CLOSED
+      checks: [terminal_outcome]
+  invariant: Operators request actions; only the trusted service appends transition events.
+
+operator_runtime_minimums:
+  require_process_sandbox: true
+  verification_network_access: false
+  candidate_authority_state: forbidden
+
+protected_branches:
+  - main
+  - master
+
+governance_metadata_paths:
+  - .autobugfix-governance/**
+
+baseline_root: .autobugfix-baselines
+baseline_authority:
+  capture_owner: trusted_guard
+  publication_owner: human_or_trusted_ci
+  candidate_supplied_authority: forbidden
+  permitted_post_measurement_changes: [.autobugfix-baselines/**]
+baseline_required_layers:
+  - execution
+  - memory
+  - eval
+  - operator
+  - shared_runtime
+
+layer_resolution:
+  strategy: most_specific
+  ambiguity: reject
+  governed_prefixes:
+    - src/
+    - tests/
+    - scripts/
+    - .github/
+    - .agents/
+    - .trellis/spec/
+    - .trellis/tasks/
+    - docs/
+
+layers:
+  execution:
+    paths:
+      - src/autobugfix/service.py
+      - src/autobugfix/task_store.py
+      - src/autobugfix/runner.py
+      - src/autobugfix/worktree.py
+      - src/autobugfix/verifier.py
+      - src/autobugfix/evaluator.py
+      - src/autobugfix/scheduler.py
+      - src/autobugfix/worker.py
+      - src/autobugfix/ppe.py
+      - src/autobugfix/projection.py
+      - src/autobugfix/events.py
+      - src/autobugfix/locks.py
+      - .agents/role-skills/execution/**
+      - tests/test_runner.py
+      - tests/test_service.py
+      - tests/test_config_task_store.py
+      - tests/test_scheduler.py
+      - tests/test_worker.py
+      - tests/test_ppe.py
+      - tests/test_projection.py
+      - tests/test_evaluator.py
+      - tests/test_locks.py
+  memory:
+    paths:
+      - src/autobugfix/memory/**
+      - src/autobugfix/memory_worker.py
+      - src/autobugfix/memory_gradio_app.py
+      - .agents/role-skills/memory/**
+      - .autobugfix-memory/active/**
+      - .autobugfix-memory/skills/**
+      - tests/test_memory.py
+      - tests/test_memory_worker.py
+      - tests/test_memory_gradio_app.py
+  eval:
+    paths:
+      - src/autobugfix/dataset.py
+      - src/autobugfix/eval/**
+      - .agents/role-skills/eval/**
+      - tests/test_dataset.py
+      - tests/test_eval.py
+  operator:
+    paths:
+      - .autobugfix-governance/**
+      - .autobugfix-baselines/**
+      - src/autobugfix/operator/**
+      - .agents/skills/autobugfix-eval-operator/**
+      - .agents/skills/oncall-bugfix/**
+      - scripts/validate_operator_policy.py
+      - scripts/validate_operator_pr.py
+      - scripts/install_operator_governance.py
+      - scripts/real_toy_acceptance.py
+      - scripts/real_operator_acceptance.py
+      - scripts/real_repository_acceptance.py
+      - tests/test_operator_*.py
+      - .github/workflows/operator-policy.yml
+      - .github/CODEOWNERS
+      - .github/CODEOWNERS.example
+      - .github/autobugfix-allowed-signers
+  shared_runtime:
+    paths:
+      - src/autobugfix/__init__.py
+      - src/autobugfix/config.py
+      - src/autobugfix/git_utils.py
+      - src/autobugfix/models.py
+      - src/autobugfix/prompts.py
+      - src/autobugfix/verification_policy.py
+      - src/autobugfix/role_config.py
+      - src/autobugfix/codex_backend.py
+      - src/autobugfix/codex_runtime.py
+      - src/autobugfix/codex_sdk.py
+      - src/autobugfix/codex_sdk_worker.py
+      - src/autobugfix/cli.py
+      - src/autobugfix/controller.py
+      - src/autobugfix/gradio_app.py
+      - tests/test_cli.py
+      - tests/test_codex_*.py
+      - tests/test_config_*.py
+      - tests/test_controller.py
+      - tests/test_gradio_app.py
+      - tests/test_prompts.py
+      - .codex/hooks/operator-governance.py
+      - .codex/hooks.json
+      - tests/helpers.py
+      - pyproject.toml
+      - uv.lock
+  docs_skills:
+    paths:
+      - README.md
+      - AGENTS.md
+      - docs/**
+      - .trellis/spec/**
+      - .trellis/tasks/**
+      - .agents/skills/**
+      - .agents/role-skills/**
+      - scripts/README.md
+      - scripts/validate_role_skills.py
+      - .gitignore
+
+protected_paths:
+  - pyproject.toml
+  - uv.lock
+  - .autobugfix-baselines/**
+  - src/autobugfix/operator/**
+  - src/autobugfix/cli.py
+  - src/autobugfix/config.py
+  - src/autobugfix/models.py
+  - scripts/validate_operator_policy.py
+  - scripts/validate_operator_pr.py
+  - scripts/install_operator_governance.py
+  - scripts/real_toy_acceptance.py
+  - scripts/real_operator_acceptance.py
+  - scripts/real_repository_acceptance.py
+  - .github/workflows/operator-policy.yml
+  - .github/CODEOWNERS
+  - .github/CODEOWNERS.example
+  - .github/autobugfix-allowed-signers
+  - .codex/hooks/operator-governance.py
+  - .codex/hooks.json
+  - .agents/role-skills/operator/**
+  - .agents/skills/autobugfix-operator-governance/**
+  - .trellis/spec/backend/autobugfix-loop-harness-contract.md
+  - .trellis/spec/backend/operator-governance-policy.md
+  - .trellis/spec/guides/autobugfix-task-start-checklist.md
+  - src/autobugfix/models.py
+  - src/autobugfix/task_store.py
+  - src/autobugfix/service.py
+  - src/autobugfix/runner.py
+  - src/autobugfix/worktree.py
+  - src/autobugfix/memory/store.py
+  - src/autobugfix/memory/service.py
+  - src/autobugfix/eval/scorers.py
+  - src/autobugfix/codex_runtime.py
+  - src/autobugfix/codex_sdk.py
+
+approval:
+  allowed_signers_env: AUTOBUGFIX_OPERATOR_ALLOWED_SIGNERS
+  allowed_signers_file: .github/autobugfix-allowed-signers
+  github_allowed_reviewers: []
+  github_require_online_recheck: true
+  namespace: autobugfix-operator
+
+validation_profiles:
+  operator:
+    timeout_seconds: 180
+    commands:
+      - name: operator-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_operator_policy.py]
+  execution:
+    timeout_seconds: 240
+    commands:
+      - name: execution-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_runner.py, tests/test_service.py, tests/test_config_task_store.py]
+  memory:
+    timeout_seconds: 240
+    commands:
+      - name: memory-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_memory.py, tests/test_memory_worker.py]
+  eval:
+    timeout_seconds: 240
+    commands:
+      - name: eval-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_eval.py, tests/test_dataset.py]
+  shared_runtime:
+    timeout_seconds: 240
+    commands:
+      - name: runtime-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_config_task_store.py, tests/test_codex_runtime.py, tests/test_codex_sdk.py]
+  docs_skills:
+    timeout_seconds: 120
+    commands:
+      - name: role-skill-validation
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, python, scripts/validate_role_skills.py]
+  full:
+    timeout_seconds: 300
+    commands:
+      - name: full-tests
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q]
+      - name: compileall
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, python, -m, compileall, -q, src, tests, scripts]
+      - name: diff-check
+        argv: [git, diff, --check, "{base_sha}", --]
+
+risk_required_profiles:
+  low: []
+  medium: [full]
+  high: [full]
+  constitutional: [full]
+
+metrics:
+  pass_rate:
+    direction: higher_is_better
+    required: true
+    max_regression_absolute: 0.0
+  artifact_completeness:
+    direction: higher_is_better
+    required: true
+    minimum: 1.0
+  runtime_seconds:
+    direction: lower_is_better
+    required: false
+    max_regression_percent: 20.0
+    min_baseline_for_percent: 5.0
+  codex_calls:
+    direction: lower_is_better
+    required: false
+    max_regression_percent: 25.0
+
+static_invariants:
+  required_gitignore:
+    - .venv/
+    - __pycache__/
+    - "*.pyc"
+    - .autobugfix/
+    - .autobugfix-evals/
+    - .autobugfix-experiments/
+  role_defaults:
+    writer:
+      sandbox: workspace-write
+      approval_mode: auto_review
+    evaluator:
+      sandbox: read-only
+      approval_mode: deny_all
+    eval_judge:
+      sandbox: read-only
+      approval_mode: deny_all
+    operator_supervisor:
+      sandbox: read-only
+      approval_mode: deny_all
+      required_skill: autobugfix-operator-supervisor/SKILL.md
+    operator_writer:
+      sandbox: workspace-write
+      approval_mode: auto_review
+      required_skill: autobugfix-operator-writer/SKILL.md
+    operator_verifier:
+      sandbox: read-only
+      approval_mode: deny_all
+      required_skill: autobugfix-operator-verifier/SKILL.md
+  role_runtime_defaults:
+    enabled: true
+  production_sdk_requires:
+    - hooks = false
+    - multi_agent = false
+  eval_forbidden_calls:
+    - apply_gate
+    - deploy_ppe
+    - archive
+    - approve_ppe
+  production_service_requires:
+    - CodexSDKBackend

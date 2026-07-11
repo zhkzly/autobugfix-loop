@@ -1,212 +1,146 @@
-Real End-To-End Acceptance
-This acceptance plan is mandatory for a rebuild. It is intentionally not a unit test and not a mock. It uses a real local Git repository, real worktrees, real Autobugfix CLI commands, real Codex SDK writer/evaluator calls, real verifier commands, memory maintenance, and eval scoring.
-Prerequisites
-uv is installed.
-Git is installed.
-The local Codex Python SDK can authenticate using the user's normal Codex
-login/config.
-Network/model access is available for real writer/evaluator calls.
-The control project is on a non-main feature branch or a disposable checkout
-for testing.
-Create A Toy Target Repo
-Create a temporary bare remote, seed repo, and main checkout.
-ROOT=/tmp/autobugfix-real-e2e
-rm -rf "$ROOT"
-mkdir -p "$ROOT"
+# Real Acceptance
 
-git init --bare "$ROOT/toy-remote.git"
-git init -b main "$ROOT/toy-seed"
-git -C "$ROOT/toy-seed" config user.email toy@example.com
-git -C "$ROOT/toy-seed" config user.name "Toy User"
+## Purpose
 
-cat > "$ROOT/toy-seed/calc.py" <<'PY'
-def add(a, b):
-    return a + b + 1
-PY
+The release acceptance must demonstrate that Autobugfix operates as a real
+loop-engineering and harness-engineering control system. A toy repository is
+useful for fast development, but it is not sufficient evidence for promotion.
 
-cat > "$ROOT/toy-seed/test_calc.py" <<'PY'
-import unittest
+The canonical acceptance uses a real public repository at a pinned Git commit,
+adds a reproducible regression to a local fixture branch, and then exercises:
 
-from calc import add
+```text
+real GitHub source -> injected failing regression -> configured target repo
+-> isolated Execution worktree -> real Codex Writer -> real pytest verifier
+-> read-only Codex Evaluator -> human gate/archive
+-> accepted evidence -> Memory digest/proposal (pending only)
+-> committed diagnostic oracle -> isolated Eval Execution -> independent test scoring
+```
 
+The target main checkout must never be modified. Every model run must retain
+raw logs, events, run summaries, diffs, and verifier artifacts.
 
-class CalcTest(unittest.TestCase):
-    def test_add(self):
-        self.assertEqual(add(1, 2), 3)
+## Canonical Fixture
 
+- Upstream: `https://github.com/pallets/itsdangerous.git`
+- Pinned commit: `672971d66a2ef9f85151e53283113f33d642dabd`
+- Fault: `base64_encode` incorrectly retains URL padding.
+- Regression: `base64_encode(b"a")` must return `b"YQ"`.
+- Real verifier: the pinned repository's encoding tests executed with pytest.
+- Acceptance model default: `gpt-5.4-mini` (overridable with `--model`).
 
-if __name__ == "__main__":
-    unittest.main()
-PY
+The upstream URL and commit identify acceptance data, not a production target.
+The script writes the actual target repository exclusively through the
+temporary control root's `.autobugfix/config.yaml`.
 
-git -C "$ROOT/toy-seed" add .
-git -C "$ROOT/toy-seed" commit -m "base bug"
-git -C "$ROOT/toy-seed" remote add origin "$ROOT/toy-remote.git"
-git -C "$ROOT/toy-seed" push -u origin main
-git clone "$ROOT/toy-remote.git" "$ROOT/toy-main"
-git -C "$ROOT/toy-main" config user.email toy@example.com
-git -C "$ROOT/toy-main" config user.name "Toy User"
+## Prerequisites
 
-Verify the target repo really fails:
-cd "$ROOT/toy-main"
-python3 -m unittest discover
+- Python 3.11 or newer and `uv`.
+- Git and network access to clone the public upstream repository.
+- A compatible preview `openai-codex` Python SDK in the project environment.
+- Working local Codex authentication.
+- The project's `uv` environment, including pytest.
 
-Expected: test fails because add(1, 2) returns 4.
-Configure Autobugfix
-From the control project root, create .autobugfix/config.yaml:
-task_root: .autobugfix/tasks
-scheduler:
-  default_max_concurrent: 1
-  lock_timeout_seconds: 7200
-  max_auto_iterations: 2
-  codex_timeout_seconds: 500
-  writer_timeout_seconds: 500
-  evaluator_timeout_seconds: 300
-codex:
-  writer_model: null
-  evaluator_model: null
-  controller_model: null
-  role_runtime:
-    enabled: true
-    runtime_root: .autobugfix/runtime/codex-sdk
-    bridge_auth: true
-    skill_guard: true
-    strict_skill_guard: true
-repos:
-  toy_repo:
-    main_checkout: /tmp/autobugfix-real-e2e/toy-main
-    remote: origin
-    main_branch: main
-    # Omit worktree_root once to verify the default:
-    # .autobugfix/worktrees/toy_repo
-    branch_template: fix/{date}_oncall_{slug}
-    test_commands:
-      targeted: python3 -m unittest discover
-      full: python3 -m unittest discover
-    ppe:
-      enabled: false
-      command_template: null
+Authentication or upstream-network failures are environment failures. They are
+not permission to switch production Writer/Evaluator roles to fakes.
 
-Run:
-uv run autobugfix doctor
+## Run
 
-Expected:
-repo toy_repo is printed.
-worktree_root resolves under .autobugfix/worktrees/toy_repo.
-No private hardcoded repo is printed.
-Create And Run A Real Task
-printf '%s\n' \
-  'Bug: calc.add(1, 2) returns 4 instead of 3. Fix the smallest possible code path and verify with python3 -m unittest discover.' \
-  | uv run autobugfix create --repo toy_repo --title "fix toy add off by one" --from-stdin
+From the Autobugfix repository root:
 
-Capture the task id, then inspect:
-uv run autobugfix inspect <task-id>
-git -C /tmp/autobugfix-real-e2e/toy-main worktree list
+```bash
+uv sync --prerelease=allow
+uv run python scripts/real_repository_acceptance.py --model gpt-5.4-mini
+```
 
-Expected:
-task state is ready;
-repo is toy_repo;
-branch follows fix/{date}_oncall_{slug};
-worktree lives under .autobugfix/worktrees/toy_repo/<task-id>;
-target repo main checkout remains clean.
-Run the real execution loop:
-uv run autobugfix run <task-id>
+The script uses `/tmp/autobugfix-real-repository-e2e` by default. Override it
+with `--root` when needed. It deletes only that configured temporary root before
+starting so a previous run cannot provide false-positive state.
 
-Expected:
-production path uses the real Codex SDK writer/evaluator;
-writer changes calc.py;
-verifier runs python3 -m unittest discover;
-evaluator returns pass;
-task state becomes waiting_human_ppe_approval;
-block_reason is empty;
-artifacts exist:
-artifacts/diff.patch
-artifacts/test-result.md
-artifacts/ppe-brief.md
-writer/evaluator raw logs under logs/.
-Check the diff:
-git -C .autobugfix/worktrees/toy_repo/<task-id> diff origin/main -- calc.py
+## Required Execution Assertions
 
-Expected diff:
--    return a + b + 1
-+    return a + b
+The first Execution run must prove all of the following:
 
-Gate, Archive, And Memory
-uv run autobugfix gate <task-id> accepted
-uv run autobugfix archive <task-id> --result accepted
+- the fault-injected baseline test fails before Autobugfix runs;
+- the configured target repo and test command come from
+  `.autobugfix/config.yaml`;
+- Git creates a real task worktree from `origin/main`;
+- the production Writer uses the Codex Python SDK and edits only
+  `src/itsdangerous/encoding.py` in the task worktree;
+- the real pytest verifier passes;
+- the read-only Evaluator reaches `waiting_human_ppe_approval`;
+- the target main checkout retains its original SHA, file digest, and clean
+  status;
+- `events.jsonl`, Writer/Evaluator raw logs, run summaries, `diff.patch`,
+  `test-result.md`, and `ppe-brief.md` are present and non-empty;
+- acceptance/archive happens only after the harness checks those facts.
 
-uv run autobugfix memory init
-uv run autobugfix memory collect <task-id>
-uv run autobugfix memory digest <task-id>
-uv run autobugfix memory lint
-uv run autobugfix memory maintain <task-id>
-uv run autobugfix memory status
+## Required Memory Assertions
 
-Expected:
-archive path exists under .autobugfix/archive/accepted/<task-id>;
-raw packet exists under .autobugfix-memory/raw/tasks/<task-id>;
-digest exists under .autobugfix-memory/digests/tasks/<task-id>.md;
-lint passes;
-maintainer writes a proposal or no_change record;
-memory does not mutate execution task state.
-Dataset And Eval
-Commit the toy fix worktree so it can be an oracle:
-git -C .autobugfix/worktrees/toy_repo/<task-id> add calc.py
-git -C .autobugfix/worktrees/toy_repo/<task-id> commit -m "fix toy add off by one"
+After the accepted Execution task is archived:
 
-Build raw dataset:
-uv run autobugfix dataset build-raw \
-  --repo toy_repo \
-  --base-ref origin/main \
-  --out "$ROOT/raw_commit_pairs.jsonl"
+- `memory collect` accepts the archived result because it is `accepted`;
+- raw packet, digest, maintainer logs, proposal patch, and evidence exist;
+- `memory lint` passes;
+- the proposal remains `pending`;
+- Memory does not mutate the archived Execution task or self-approve active
+  memory.
 
-Convert the raw row into an eval problem JSONL row with fields:
-raw_id
-repo
-branch
-worktree_path
-base_commit
-final_commit
-task_kind
-problem_statement
-agent_prompt
-expected_behavior
-change_summary
-evidence
-confidence
+Collecting a ready, active, failed, abandoned, or otherwise unaccepted task
+must fail.
 
-Run eval:
-uv run autobugfix eval run \
-  --dataset "$ROOT/problem_prompts.jsonl" \
-  --case fix-toy-add-off-by-one \
-  --out "$ROOT/eval-runs" \
-  --run-id toy-e2e \
-  --model-mode fake \
-  --test-command 'python3 -m unittest discover' \
-  --codex-timeout-seconds 500 \
-  --writer-timeout-seconds 500 \
-  --evaluator-timeout-seconds 300
+## Required Eval Assertions
 
---model-mode fake is allowed here only for eval scorer cost control. The eval case must still call the real execution loop and real Codex writer/evaluator.
-Expected:
-eval creates an isolated repo/control root;
-setup contains "repo": "toy_repo";
-generated diff is non-empty;
-generated diff equals oracle diff;
-report decision is pass;
-run summary has no failures.
-Final Verification
-From the control project root:
+The accepted worktree fix is committed only to create the oracle pair. Eval
+then creates a second isolated remote, main checkout, control root, task, and
+worktree and invokes the real Execution loop again.
+
+The Eval result must prove:
+
+- the model mode is `codex`, with real Writer and Evaluator roles;
+- generated diff and diagnostic oracle diff are both non-empty;
+- the configured pytest command passes independently in the generated
+  worktree;
+- oracle diff equality is recorded only as diagnostic metadata and does not
+  reject a behaviorally correct alternative patch;
+- the report decision is `pass` and the run summary has no failures;
+- the Eval-owned Execution task stops at the human gate;
+- Eval does not accept, archive, deploy PPE, or approve Memory;
+- the second Execution run also retains complete raw evidence.
+
+## Operator Acceptance
+
+Operator governance is validated independently because its state owner and
+promotion lifecycle differ from Execution:
+
+```bash
+uv run python scripts/real_operator_acceptance.py --model gpt-5.4-mini
+```
+
+This must use a real Supervisor, process-isolated Writer, deterministic checks,
+read-only semantic verifier, audit, and a `PREPARED` promotion. It must not
+merge or activate main.
+
+## Final Verification
+
+```bash
 uv run pytest -q
 uv run python -m compileall -q src tests scripts
 git diff --check
-uv run python <path-to-skill-validator>/quick_validate.py .agents/skills/oncall-bugfix
+uv run python scripts/validate_role_skills.py
+uv run python scripts/real_repository_acceptance.py --model gpt-5.4-mini
+uv run python scripts/real_operator_acceptance.py --model gpt-5.4-mini
+```
 
-Skill validation is optional only if the validator is unavailable. All other checks are mandatory.
-Failure Interpretation
-Codex auth/state errors are environment failures, not a reason to replace the
-production backend with mocks.
-Target repo dependency failures should be recorded in test-result.md, not
-hidden.
-A successful rerun must clear stale block_reason.
-If generated eval diff is empty, the eval did not truly exercise execution.
+Use the skill validator when available. All other commands are mandatory.
+
+## Benchmark Labeling
+
+This acceptance uses real upstream code but a controlled injected regression.
+It is not an official SWE-bench Verified score. Official SWE-bench claims
+require its dataset instance and container evaluation harness. If Docker or the
+official harness is unavailable, report that limitation rather than relabeling
+this E2E.
+
+`scripts/real_toy_acceptance.py` may be used as a quick developer smoke test,
+but its result must not be used for release, promotion, or benchmark claims.

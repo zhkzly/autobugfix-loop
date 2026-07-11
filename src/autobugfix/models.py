@@ -123,6 +123,7 @@ class SchedulerConfig:
 class RoleRuntimeConfig:
     enabled: bool = True
     runtime_root: Path = Path(".autobugfix/runtime/codex-sdk")
+    codex_bin: Path | None = None
     bridge_auth: bool = True
     skill_guard: bool = True
     strict_skill_guard: bool = True
@@ -152,6 +153,71 @@ class EvalConfig:
 
 
 @dataclass(slots=True)
+class OperatorStateConfig:
+    root: Path = Path(".autobugfix/operator-v3")
+    database_name: str = "governance.sqlite3"
+    lease_timeout_seconds: int = 7200
+
+
+@dataclass(slots=True)
+class OperatorArtifactConfig:
+    root: Path = Path(".autobugfix/operator-artifacts")
+
+
+@dataclass(slots=True)
+class OperatorWorktreeConfig:
+    root: Path = Path(".autobugfix/operator-worktrees")
+    branch_template: str = "operator/experiment/{request_id}"
+
+
+@dataclass(slots=True)
+class OperatorRetryConfig:
+    max_attempts: int = 5
+    max_auto_retries: int = 2
+    auto_retry_deterministic_failures: bool = True
+
+
+@dataclass(slots=True)
+class OperatorVerificationConfig:
+    fast_profiles: tuple[str, ...] = ("operator",)
+    full_profiles: tuple[str, ...] = ("full",)
+    require_semantic_verifier: bool = True
+    process_sandbox: str = "auto"
+    require_process_sandbox: bool = True
+    network_access: bool = False
+    runtime_venv: Path | None = None
+
+
+@dataclass(slots=True)
+class OperatorExperimentConfig:
+    enabled: bool = True
+    trusted_ref: str = "origin/main"
+    default_profile: str = "real-e2e"
+    profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class OperatorPromotionConfig:
+    release_root: Path = Path(".autobugfix/releases")
+    active_release_link: Path = Path(".autobugfix/active-release")
+    require_pull_request: bool = True
+    require_canary: bool = True
+    auto_rollback_on_canary_failure: bool = True
+    canary_profiles: tuple[str, ...] = ("full",)
+
+
+@dataclass(slots=True)
+class OperatorConfig:
+    state: OperatorStateConfig = field(default_factory=OperatorStateConfig)
+    artifacts: OperatorArtifactConfig = field(default_factory=OperatorArtifactConfig)
+    worktrees: OperatorWorktreeConfig = field(default_factory=OperatorWorktreeConfig)
+    retry: OperatorRetryConfig = field(default_factory=OperatorRetryConfig)
+    verification: OperatorVerificationConfig = field(default_factory=OperatorVerificationConfig)
+    experiments: OperatorExperimentConfig = field(default_factory=OperatorExperimentConfig)
+    promotion: OperatorPromotionConfig = field(default_factory=OperatorPromotionConfig)
+
+
+@dataclass(slots=True)
 class AutobugfixConfig:
     project_root: Path
     task_root: Path = Path(".autobugfix/tasks")
@@ -160,6 +226,7 @@ class AutobugfixConfig:
     worker: WorkerConfig = field(default_factory=WorkerConfig)
     memory_worker: WorkerConfig = field(default_factory=lambda: WorkerConfig(tick_interval_seconds=10, heartbeat_interval_seconds=10))
     eval: EvalConfig = field(default_factory=EvalConfig)
+    operator: OperatorConfig = field(default_factory=OperatorConfig)
     repos: dict[str, RepoProfile] = field(default_factory=dict)
 
     @property

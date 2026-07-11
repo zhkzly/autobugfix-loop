@@ -10,9 +10,15 @@ from autobugfix.models import CodexRequest, CodexResult, RoleConfig
 
 
 class FakeCodexBackend:
-    def __init__(self, edit: bool = True, evaluator_text: str = "decision: pass\nreason: ok\n") -> None:
+    def __init__(
+        self,
+        edit: bool = True,
+        evaluator_text: str = "decision: pass\nreason: ok\n",
+        writer_source: str = "def add(a, b):\n    return a + b\n",
+    ) -> None:
         self.edit = edit
         self.evaluator_text = evaluator_text
+        self.writer_source = writer_source
         self.calls: list[CodexRequest] = []
 
     def run(self, request: CodexRequest) -> CodexResult:
@@ -26,7 +32,7 @@ class FakeCodexBackend:
         if request.role == "writer" and self.edit:
             calc = request.cwd / "calc.py"
             if calc.exists():
-                calc.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+                calc.write_text(self.writer_source, encoding="utf-8")
             return CodexResult(text="writer fixed calc.py")
         if request.role == "evaluator":
             return CodexResult(text=self.evaluator_text)

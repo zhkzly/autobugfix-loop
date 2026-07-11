@@ -23,7 +23,7 @@ project must create.
 Paste-ready task spec for an AI agent or Trellis task. It is strict about
 real code and real acceptance.
 05-real-acceptance.md
-End-to-end acceptance plan using a real toy Git repository, real worktrees,
+End-to-end acceptance plan using a pinned public Git repository, real worktrees,
 real Codex SDK writer/evaluator calls, memory loop, and eval loop.
 06-non-mock-guardrails.md
 Explicit constraints that prevent the AI from replacing the system with

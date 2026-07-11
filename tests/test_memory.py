@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from autobugfix.memory.maintainer_backend import CodexMemoryMaintainerBackend
-from autobugfix.memory.service import MemoryService
+from autobugfix.memory.service import MemoryService, MemoryServiceError
 from autobugfix.service import AutobugfixService
 from tests.helpers import FakeCodexBackend, FakeMaintainerBackend, make_service_project
 
@@ -54,3 +55,16 @@ def test_codex_memory_maintainer_uses_resolved_role(tmp_path):
     assert request.approval_mode == "auto_review"
     assert request.timeout_seconds == 66
     assert request.raw_log_path.name == "memory.raw.jsonl"
+
+
+def test_memory_collect_rejects_unaccepted_execution_evidence(tmp_path):
+    project_root, _ = make_service_project(tmp_path)
+    execution = AutobugfixService(project_root, backend=FakeCodexBackend())
+    task = execution.create_task("toy_repo", "unaccepted task", "Bug")
+    memory = MemoryService(project_root, backend=FakeMaintainerBackend())
+
+    with pytest.raises(MemoryServiceError, match="only accepted execution evidence"):
+        memory.collect(task.task_id)
+
+    assert execution.store.load(task.task_id).state == "ready"
+    assert not memory.store.raw_task_dir(task.task_id).exists()

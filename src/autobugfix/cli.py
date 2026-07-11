@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from autobugfix.codex_runtime import build_codex_request
+from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.config import load_config, write_default_config
 from autobugfix.dataset import build_raw_dataset
 from autobugfix.eval.diagnosis import diagnose_run
@@ -25,6 +27,14 @@ from autobugfix.worker import start_worker, stop_worker, worker_status
 from autobugfix.memory_worker import start_worker as start_memory_worker
 from autobugfix.memory_worker import stop_worker as stop_memory_worker
 from autobugfix.memory_worker import worker_status as memory_worker_status
+from autobugfix.operator.metrics import read_baseline
+from autobugfix.operator.models import (
+    VALID_APPROVAL_DECISIONS,
+    VALID_CONFIDENCE,
+    VALID_LAYERS,
+    VALID_RISKS,
+)
+from autobugfix.operator.service import OperatorGovernanceService
 
 
 def _stdin_or_file(args: argparse.Namespace) -> str:
@@ -40,6 +50,25 @@ def _print_yaml(data: object) -> None:
     print(yaml.safe_dump(data, sort_keys=False).strip())
 
 
+def _parse_values(values: list[str]) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for item in values:
+        if "=" not in item:
+            raise ValueError(f"value must use key=value: {item}")
+        key, value = item.split("=", 1)
+        if not key.strip():
+            raise ValueError("value key must not be empty")
+        parsed[key.strip()] = value
+    return parsed
+
+
+def _installed_version(distribution: str) -> str:
+    try:
+        return importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return "not-installed"
+
+
 def command_doctor(args: argparse.Namespace) -> int:
     if args.init_config:
         write_default_config(Path.cwd())
@@ -48,12 +77,15 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"project_root: {cfg.project_root}")
     print(f"task_root: {cfg.project_root / cfg.task_root}")
     print(f"codex_runtime_root: {cfg.codex.role_runtime.runtime_root}")
+    print(f"codex_binary: {cfg.codex.role_runtime.codex_bin or 'sdk-bundled'}")
+    print(f"codex_python_sdk_version: {_installed_version('openai-codex')}")
+    print(f"codex_bundled_cli_version: {_installed_version('openai-codex-cli-bin')}")
     print("roles:")
     for role in sorted(cfg.codex.roles):
         resolved = resolve_role(cfg, role)
         print(f"  {role}:")
         print(f"    backend: {resolved.backend}")
-        print(f"    model: {resolved.model}")
+        print(f"    model: {resolved.model if resolved.model is not None else 'runtime-default'}")
         print(f"    sandbox: {resolved.sandbox}")
         print(f"    approval_mode: {resolved.approval_mode}")
         print(f"    timeout_seconds: {resolved.timeout_seconds}")
@@ -230,20 +262,22 @@ def command_dataset(args: argparse.Namespace) -> int:
 def command_eval(args: argparse.Namespace) -> int:
     action = args.eval_action
     if action == "run":
-        print(
-            run_eval(
-                Path.cwd(),
-                Path(args.dataset),
-                Path(args.out),
-                case_selector=args.case,
-                run_id=args.run_id,
-                model_mode=args.model_mode,
-                test_command=args.test_command,
-                codex_timeout_seconds=args.codex_timeout_seconds,
-                writer_timeout_seconds=args.writer_timeout_seconds,
-                evaluator_timeout_seconds=args.evaluator_timeout_seconds,
-            )
+        run_dir = run_eval(
+            Path.cwd(),
+            Path(args.dataset),
+            Path(args.out),
+            case_selector=args.case,
+            run_id=args.run_id,
+            model_mode=args.model_mode,
+            test_command=args.test_command,
+            codex_timeout_seconds=args.codex_timeout_seconds,
+            writer_timeout_seconds=args.writer_timeout_seconds,
+            evaluator_timeout_seconds=args.evaluator_timeout_seconds,
         )
+        print(run_dir)
+        summary = yaml.safe_load((run_dir / "summary.yaml").read_text(encoding="utf-8")) or {}
+        if summary.get("failed_count") or summary.get("harness_error_count"):
+            return 1
     elif action == "score":
         print(score_path(Path(args.path)))
     elif action == "diagnose":
@@ -278,19 +312,261 @@ def command_codex(args: argparse.Namespace) -> int:
         repo_id=args.repo,
         resolved_role=resolved,
     )
-    _print_yaml(
-        {
-            "role": request.role,
-            "repo": args.repo,
-            "cwd": str(request.cwd),
-            "sandbox": request.sandbox,
-            "approval_mode": request.approval_mode,
-            "model": request.model,
-            "timeout_seconds": request.timeout_seconds,
-            "instructions_bytes": len(request.developer_instructions),
-            "resolved": resolved.to_dict(cfg.project_root),
-        }
+    report = {
+        "role": request.role,
+        "repo": args.repo,
+        "cwd": str(request.cwd),
+        "sandbox": request.sandbox,
+        "approval_mode": request.approval_mode,
+        "model": request.model,
+        "timeout_seconds": request.timeout_seconds,
+        "instructions_bytes": len(request.developer_instructions),
+        "resolved": resolved.to_dict(cfg.project_root),
+        "python_sdk_version": _installed_version("openai-codex"),
+        "bundled_cli_version": _installed_version("openai-codex-cli-bin"),
+    }
+    if args.execute:
+        result = CodexSDKBackend().run(request)
+        report["executed"] = True
+        report["response"] = result.text
+        report["backend"] = result.raw.get("module")
+    else:
+        report["executed"] = False
+    _print_yaml(report)
+    return 0
+
+
+def command_operator(args: argparse.Namespace) -> int:
+    root = Path.cwd()
+    service = OperatorGovernanceService(
+        root,
+        trusted_ref=args.trusted_ref,
+        trusted_file=Path(args.trusted_file) if args.trusted_file else None,
+        bootstrap_policy=args.bootstrap_policy,
+        allowed_signers=Path(args.allowed_signers) if args.allowed_signers else None,
     )
+    action = args.operator_action
+    if action == "triage":
+        triage = service.create_triage(
+            triage_id=args.triage_id,
+            summary=args.summary,
+            suspected_layers=args.suspected_layer,
+            confidence=args.confidence,
+            evidence=args.evidence,
+            next_actions=args.next_action or (),
+            creator=args.creator,
+        )
+        _print_yaml(triage.to_dict())
+    elif action == "request":
+        request = service.create_request(
+            request_id=args.request_id,
+            triage_id=args.triage_id,
+            summary=args.summary,
+            primary_layer=args.primary_layer,
+            secondary_layers=args.secondary_layer or (),
+            planned_paths=args.planned_path or (),
+            requested_risk=args.risk,
+            validation_profiles=args.validation_profile or (),
+            performance_baseline=args.performance_baseline,
+            creator=args.creator,
+            branch=args.branch,
+            expires_at=args.expires_at,
+        )
+        _print_yaml(request.to_dict())
+    elif action == "review":
+        approval = service.add_reviewer_decision(
+            args.request_id,
+            reviewer=args.reviewer,
+            decision=args.decision,
+            reason=args.reason,
+            allowed_layers=args.allowed_layer or None,
+            allowed_paths=args.allowed_path or (),
+            expires_at=args.expires_at,
+            scope_revision_id=args.scope_revision_id,
+        )
+        _print_yaml(approval.to_dict())
+    elif action == "approval-payload":
+        print(
+            service.create_approval_payload(
+                args.request_id,
+                Path(args.out),
+                approver=args.approver,
+                stage=args.stage,
+                reason=args.reason,
+                allowed_layers=args.allowed_layer or None,
+                allowed_paths=args.allowed_path or (),
+                expires_at=args.expires_at,
+                scope_revision_id=args.scope_revision_id,
+            )
+        )
+    elif action == "approve-signed":
+        approval = service.import_signed_approval(
+            args.request_id,
+            payload_path=Path(args.payload),
+            signature_path=Path(args.signature),
+            scope_revision_id=args.scope_revision_id,
+        )
+        _print_yaml(approval.to_dict())
+    elif action == "approve-github":
+        approval = service.import_github_approval(
+            args.request_id,
+            repository=args.repository,
+            pull_request=args.pull_request,
+            review_id=args.review_id,
+            reason=args.reason,
+            stage=args.stage,
+        )
+        _print_yaml(approval.to_dict())
+    elif action == "preflight":
+        report = service.preflight(args.request_id, actor=args.actor)
+        _print_yaml(report)
+        return 0 if report["allowed"] else 1
+    elif action in {"workspace-create", "start"}:
+        _print_yaml(service.start(args.request_id, actor=args.actor))
+    elif action == "guide":
+        _print_yaml(service.governance_context())
+    elif action == "advance":
+        _print_yaml(service.advance(args.request_id, actor=args.actor))
+    elif action == "supervise":
+        _print_yaml(service.run_supervisor(args.request_id, actor=args.actor))
+    elif action == "writer-start":
+        _print_yaml(service.start_writer(args.request_id, actor=args.actor))
+    elif action == "writer-retry":
+        _print_yaml(service.retry_writer(args.request_id, actor=args.actor))
+    elif action == "writer-cancel":
+        _print_yaml(service.cancel_writer(args.request_id, reason=args.reason, actor=args.actor))
+    elif action == "candidate-commit":
+        _print_yaml(
+            service.commit_candidate(
+                args.request_id,
+                message=args.message,
+                include_manifest=not args.no_manifest,
+                actor=args.actor,
+            )
+        )
+    elif action == "postflight":
+        report = service.postflight(args.request_id, actor=args.actor)
+        _print_yaml(report)
+        return 0 if report["check_run"]["status"] == "PASSED" else 1
+    elif action in {"validate", "verify"}:
+        report = service.verify(
+            args.request_id,
+            mode=getattr(args, "mode", "full"),
+            actor=args.actor,
+        )
+        _print_yaml(report)
+        return 0 if report["check_run"]["status"] == "PASSED" else 1
+    elif action == "scope-change":
+        _print_yaml(
+            service.request_scope_change(
+                args.request_id,
+                add_layers=args.add_layer or (),
+                add_paths=args.add_path or (),
+                requested_risk=args.risk,
+                reason=args.reason,
+                actor=args.actor,
+            )
+        )
+    elif action == "scope-activate":
+        _print_yaml(service.activate_scope_revision(args.request_id, args.revision_id, actor=args.actor))
+    elif action == "experiment-run":
+        report = service.run_experiment(
+            args.request_id,
+            profile=args.profile,
+            values=_parse_values(args.value or []),
+            actor=args.actor,
+        )
+        _print_yaml(report)
+        return 0 if report["status"] == "COMPLETED" else 1
+    elif action == "reopen":
+        _print_yaml(service.reopen(args.request_id, reason=args.reason, actor=args.actor))
+    elif action == "close":
+        _print_yaml(service.close(args.request_id, outcome=args.outcome, actor=args.actor))
+    elif action == "promotion-prepare":
+        _print_yaml(service.prepare_promotion(args.request_id, actor=args.actor))
+    elif action == "promotion-open-pr":
+        _print_yaml(
+            service.open_pull_request(
+                args.promotion_id,
+                title=args.title,
+                body=args.body,
+                base=args.base,
+                push=not args.no_push,
+            )
+        )
+    elif action == "promotion-observe-merge":
+        _print_yaml(service.observe_merge(args.promotion_id, repository=args.repository))
+    elif action == "promotion-canary":
+        report = service.run_canary(args.promotion_id)
+        _print_yaml(report)
+        return 0 if report["promotion"]["status"] == "ACTIVE" else 1
+    elif action == "promotion-rollback":
+        _print_yaml(service.rollback(args.promotion_id, reason=args.reason, actor=args.actor))
+    elif action == "promotion-revert-pr":
+        _print_yaml(
+            service.open_revert_pull_request(
+                args.promotion_id,
+                title=args.title,
+                body=args.body,
+                base=args.base,
+                push=not args.no_push,
+            )
+        )
+    elif action == "finalize":
+        report = service.finalize(args.request_id, actor=args.actor)
+        _print_yaml(report)
+        return 0
+    elif action == "status":
+        _print_yaml(service.status(args.request_id))
+    elif action == "audit":
+        report = service.audit(args.request_id)
+        _print_yaml(report)
+        return 0 if report["allowed"] else 1
+    elif action == "export-bundle":
+        print(service.export_bundle(args.request_id, output_root=Path(args.output_root) if args.output_root else None))
+    elif action == "revoke":
+        _print_yaml(service.revoke(args.request_id, actor=args.actor, reason=args.reason))
+    elif action == "baseline":
+        if args.baseline_action == "record":
+            report = service.capture_baseline(
+                args.name,
+                profile=args.profile,
+                values=_parse_values(args.value or []),
+                notes=args.notes or "",
+            )
+            _print_yaml(report)
+        elif args.baseline_action == "compare":
+            report = service.compare_experiment_baseline(args.request_id, args.name)
+            _print_yaml(report)
+            return 0 if report["ok"] else 1
+        elif args.baseline_action == "show":
+            _print_yaml(read_baseline(root, args.name))
+    return 0
+
+
+def command_writer_view(args: argparse.Namespace) -> int:
+    root = Path(args.control_root).resolve()
+    service = OperatorGovernanceService(
+        root,
+        trusted_ref=args.trusted_ref,
+        trusted_file=Path(args.trusted_file) if args.trusted_file else None,
+        bootstrap_policy=args.bootstrap_policy,
+    )
+    view = service.writer_view(args.request_id)
+    action = args.writer_view_action
+    if action == "task":
+        payload = {"request_id": view["request_id"], "phase": view["phase"], "task": view["task"]}
+    elif action == "context":
+        payload = {"request_id": view["request_id"], "evidence": view["evidence"]}
+    elif action == "scope":
+        payload = {"request_id": view["request_id"], "scope": view["scope"]}
+    elif action == "feedback":
+        payload = {"request_id": view["request_id"], "feedback": view["feedback"]}
+    elif action == "check-result":
+        payload = {"request_id": view["request_id"], "latest_check": view["latest_check"]}
+    else:
+        raise RuntimeError(f"unsupported writer view action: {action}")
+    _print_yaml(payload)
     return 0
 
 
@@ -417,7 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
     erun.add_argument("--case")
     erun.add_argument("--out", required=True)
     erun.add_argument("--run-id", default="run")
-    erun.add_argument("--model-mode", default="codex", choices=["codex", "fake"])
+    erun.add_argument("--model-mode", default="codex", choices=["codex"])
     erun.add_argument("--test-command")
     erun.add_argument("--codex-timeout-seconds", type=int)
     erun.add_argument("--writer-timeout-seconds", type=int)
@@ -444,9 +720,272 @@ def build_parser() -> argparse.ArgumentParser:
     codex = sub.add_parser("codex")
     codex_sub = codex.add_subparsers(dest="codex_action", required=True)
     probe = codex_sub.add_parser("probe-role")
-    probe.add_argument("--role", required=True, choices=["writer", "evaluator", "controller", "memory_maintainer", "eval_judge"])
+    probe.add_argument(
+        "--role",
+        required=True,
+        choices=[
+            "writer",
+            "evaluator",
+            "controller",
+            "memory_maintainer",
+            "eval_judge",
+            "operator_supervisor",
+            "operator_writer",
+            "operator_verifier",
+        ],
+    )
     probe.add_argument("--repo")
+    probe.add_argument("--execute", action="store_true", help="Run a real read-only Codex SDK compatibility probe")
     probe.set_defaults(func=command_codex)
+
+    operator = sub.add_parser("operator")
+    operator_sub = operator.add_subparsers(dest="operator_action", required=True)
+
+    def governance_options(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--trusted-ref", default="origin/main")
+        command.add_argument("--trusted-file")
+        command.add_argument("--bootstrap-policy", action="store_true")
+        command.add_argument("--allowed-signers")
+
+    triage = operator_sub.add_parser("triage")
+    governance_options(triage)
+    triage.add_argument("--triage-id")
+    triage.add_argument("--summary", required=True)
+    triage.add_argument("--suspected-layer", action="append", choices=VALID_LAYERS, required=True)
+    triage.add_argument("--confidence", choices=VALID_CONFIDENCE, default="low")
+    triage.add_argument("--evidence", action="append", required=True)
+    triage.add_argument("--next-action", action="append")
+    triage.add_argument("--creator")
+    triage.set_defaults(func=command_operator)
+
+    request = operator_sub.add_parser("request")
+    governance_options(request)
+    request.add_argument("--request-id")
+    request.add_argument("--triage-id", required=True)
+    request.add_argument("--summary", required=True)
+    request.add_argument("--primary-layer", choices=VALID_LAYERS, required=True)
+    request.add_argument("--secondary-layer", action="append", choices=VALID_LAYERS)
+    request.add_argument("--planned-path", action="append", required=True)
+    request.add_argument("--risk", choices=VALID_RISKS, default="low")
+    request.add_argument("--validation-profile", action="append")
+    request.add_argument("--performance-baseline")
+    request.add_argument("--creator")
+    request.add_argument("--branch")
+    request.add_argument("--expires-at")
+    request.set_defaults(func=command_operator)
+
+    review = operator_sub.add_parser("review")
+    governance_options(review)
+    review.add_argument("request_id")
+    review.add_argument("--reviewer", required=True)
+    review.add_argument("--decision", choices=VALID_APPROVAL_DECISIONS, required=True)
+    review.add_argument("--reason", required=True)
+    review.add_argument("--allowed-layer", action="append", choices=VALID_LAYERS)
+    review.add_argument("--allowed-path", action="append")
+    review.add_argument("--expires-at")
+    review.add_argument("--scope-revision-id")
+    review.set_defaults(func=command_operator)
+
+    payload = operator_sub.add_parser("approval-payload")
+    governance_options(payload)
+    payload.add_argument("request_id")
+    payload.add_argument("--out", required=True)
+    payload.add_argument("--approver", required=True)
+    payload.add_argument("--stage", choices=["scope", "merge"], required=True)
+    payload.add_argument("--reason", required=True)
+    payload.add_argument("--allowed-layer", action="append", choices=VALID_LAYERS)
+    payload.add_argument("--allowed-path", action="append")
+    payload.add_argument("--expires-at")
+    payload.add_argument("--scope-revision-id")
+    payload.set_defaults(func=command_operator)
+
+    signed = operator_sub.add_parser("approve-signed")
+    governance_options(signed)
+    signed.add_argument("request_id")
+    signed.add_argument("--payload", required=True)
+    signed.add_argument("--signature", required=True)
+    signed.add_argument("--scope-revision-id")
+    signed.set_defaults(func=command_operator)
+
+    github = operator_sub.add_parser("approve-github")
+    governance_options(github)
+    github.add_argument("request_id")
+    github.add_argument("--repository", required=True)
+    github.add_argument("--pull-request", required=True, type=int)
+    github.add_argument("--review-id", required=True, type=int)
+    github.add_argument("--reason", required=True)
+    github.add_argument("--stage", choices=["scope", "merge"], default="merge")
+    github.set_defaults(func=command_operator)
+
+    guide = operator_sub.add_parser("guide")
+    governance_options(guide)
+    guide.set_defaults(func=command_operator)
+
+    for name in ("preflight", "start", "workspace-create", "postflight", "finalize", "status", "audit", "advance", "supervise"):
+        command = operator_sub.add_parser(name)
+        governance_options(command)
+        command.add_argument("--request-id", required=True)
+        command.add_argument("--actor")
+        command.set_defaults(func=command_operator)
+
+    for name in ("writer-start", "writer-retry"):
+        command = operator_sub.add_parser(name)
+        governance_options(command)
+        command.add_argument("--request-id", required=True)
+        command.add_argument("--actor")
+        command.set_defaults(func=command_operator)
+
+    writer_cancel = operator_sub.add_parser("writer-cancel")
+    governance_options(writer_cancel)
+    writer_cancel.add_argument("--request-id", required=True)
+    writer_cancel.add_argument("--reason", required=True)
+    writer_cancel.add_argument("--actor")
+    writer_cancel.set_defaults(func=command_operator)
+
+    candidate_commit = operator_sub.add_parser("candidate-commit")
+    governance_options(candidate_commit)
+    candidate_commit.add_argument("--request-id", required=True)
+    candidate_commit.add_argument("--message", required=True)
+    candidate_commit.add_argument("--no-manifest", action="store_true")
+    candidate_commit.add_argument("--actor")
+    candidate_commit.set_defaults(func=command_operator)
+
+    export_bundle = operator_sub.add_parser("export-bundle")
+    governance_options(export_bundle)
+    export_bundle.add_argument("--request-id", required=True)
+    export_bundle.add_argument("--output-root")
+    export_bundle.set_defaults(func=command_operator)
+
+    validate = operator_sub.add_parser("validate")
+    governance_options(validate)
+    validate.add_argument("--request-id", required=True)
+    validate.add_argument("--actor")
+    validate.set_defaults(func=command_operator)
+
+    verify = operator_sub.add_parser("verify")
+    governance_options(verify)
+    verify.add_argument("--request-id", required=True)
+    verify.add_argument("--mode", choices=["fast", "full"], default="full")
+    verify.add_argument("--actor")
+    verify.set_defaults(func=command_operator)
+
+    scope_change = operator_sub.add_parser("scope-change")
+    governance_options(scope_change)
+    scope_change.add_argument("--request-id", required=True)
+    scope_change.add_argument("--add-layer", action="append", choices=VALID_LAYERS)
+    scope_change.add_argument("--add-path", action="append")
+    scope_change.add_argument("--risk", choices=VALID_RISKS, default="low")
+    scope_change.add_argument("--reason", required=True)
+    scope_change.add_argument("--actor")
+    scope_change.set_defaults(func=command_operator)
+
+    scope_activate = operator_sub.add_parser("scope-activate")
+    governance_options(scope_activate)
+    scope_activate.add_argument("--request-id", required=True)
+    scope_activate.add_argument("--revision-id", required=True)
+    scope_activate.add_argument("--actor")
+    scope_activate.set_defaults(func=command_operator)
+
+    experiment_run = operator_sub.add_parser("experiment-run")
+    governance_options(experiment_run)
+    experiment_run.add_argument("--request-id", required=True)
+    experiment_run.add_argument("--profile")
+    experiment_run.add_argument("--value", action="append", help="Experiment input as key=value")
+    experiment_run.add_argument("--actor")
+    experiment_run.set_defaults(func=command_operator)
+
+    reopen = operator_sub.add_parser("reopen")
+    governance_options(reopen)
+    reopen.add_argument("--request-id", required=True)
+    reopen.add_argument("--reason", required=True)
+    reopen.add_argument("--actor")
+    reopen.set_defaults(func=command_operator)
+
+    close = operator_sub.add_parser("close")
+    governance_options(close)
+    close.add_argument("--request-id", required=True)
+    close.add_argument("--outcome", required=True, choices=["merged", "abandoned", "rejected", "superseded", "rolled_back"])
+    close.add_argument("--actor")
+    close.set_defaults(func=command_operator)
+
+    promotion_prepare = operator_sub.add_parser("promotion-prepare")
+    governance_options(promotion_prepare)
+    promotion_prepare.add_argument("--request-id", required=True)
+    promotion_prepare.add_argument("--actor")
+    promotion_prepare.set_defaults(func=command_operator)
+
+    promotion_pr = operator_sub.add_parser("promotion-open-pr")
+    governance_options(promotion_pr)
+    promotion_pr.add_argument("--promotion-id", required=True)
+    promotion_pr.add_argument("--title", required=True)
+    promotion_pr.add_argument("--body", required=True)
+    promotion_pr.add_argument("--base", default="main")
+    promotion_pr.add_argument("--no-push", action="store_true")
+    promotion_pr.set_defaults(func=command_operator)
+
+    promotion_merge = operator_sub.add_parser("promotion-observe-merge")
+    governance_options(promotion_merge)
+    promotion_merge.add_argument("--promotion-id", required=True)
+    promotion_merge.add_argument("--repository", required=True)
+    promotion_merge.set_defaults(func=command_operator)
+
+    promotion_canary = operator_sub.add_parser("promotion-canary")
+    governance_options(promotion_canary)
+    promotion_canary.add_argument("--promotion-id", required=True)
+    promotion_canary.set_defaults(func=command_operator)
+
+    promotion_rollback = operator_sub.add_parser("promotion-rollback")
+    governance_options(promotion_rollback)
+    promotion_rollback.add_argument("--promotion-id", required=True)
+    promotion_rollback.add_argument("--reason", required=True)
+    promotion_rollback.add_argument("--actor")
+    promotion_rollback.set_defaults(func=command_operator)
+
+    promotion_revert = operator_sub.add_parser("promotion-revert-pr")
+    governance_options(promotion_revert)
+    promotion_revert.add_argument("--promotion-id", required=True)
+    promotion_revert.add_argument("--title", required=True)
+    promotion_revert.add_argument("--body", required=True)
+    promotion_revert.add_argument("--base", default="main")
+    promotion_revert.add_argument("--no-push", action="store_true")
+    promotion_revert.set_defaults(func=command_operator)
+
+    revoke = operator_sub.add_parser("revoke")
+    governance_options(revoke)
+    revoke.add_argument("--request-id", required=True)
+    revoke.add_argument("--reason", required=True)
+    revoke.add_argument("--actor")
+    revoke.set_defaults(func=command_operator)
+
+    baseline = operator_sub.add_parser("baseline")
+    baseline_sub = baseline.add_subparsers(dest="baseline_action", required=True)
+    baseline_record = baseline_sub.add_parser("record")
+    governance_options(baseline_record)
+    baseline_record.add_argument("--name", required=True)
+    baseline_record.add_argument("--profile")
+    baseline_record.add_argument("--value", action="append", help="Experiment input as key=value")
+    baseline_record.add_argument("--notes")
+    baseline_record.set_defaults(func=command_operator)
+    baseline_compare = baseline_sub.add_parser("compare")
+    governance_options(baseline_compare)
+    baseline_compare.add_argument("--name", required=True)
+    baseline_compare.add_argument("--request-id", required=True)
+    baseline_compare.set_defaults(func=command_operator)
+    baseline_show = baseline_sub.add_parser("show")
+    governance_options(baseline_show)
+    baseline_show.add_argument("--name", required=True)
+    baseline_show.set_defaults(func=command_operator)
+
+    writer_view = sub.add_parser("writer")
+    writer_view_sub = writer_view.add_subparsers(dest="writer_view_action", required=True)
+    for name in ("task", "context", "scope", "feedback", "check-result"):
+        command = writer_view_sub.add_parser(name)
+        command.add_argument("--request-id", required=True)
+        command.add_argument("--control-root", default=".")
+        command.add_argument("--trusted-ref", default="origin/main")
+        command.add_argument("--trusted-file")
+        command.add_argument("--bootstrap-policy", action="store_true")
+        command.set_defaults(func=command_writer_view)
     return parser
 
 

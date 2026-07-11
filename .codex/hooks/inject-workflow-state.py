@@ -70,6 +70,29 @@ If you have not already loaded Trellis context this session, read the `trellis-s
 </trellis-bootstrap>"""
 
 
+def _autobugfix_constitution_context(root: Path) -> str | None:
+    path = root / "src/autobugfix/operator/constitution.yaml"
+    if not path.is_file():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    try:
+        start = lines.index("operator_prompt_context: |") + 1
+    except ValueError:
+        return None
+    body: list[str] = []
+    for line in lines[start:]:
+        if line and not line.startswith("  "):
+            break
+        body.append(line[2:] if line.startswith("  ") else "")
+    text = "\n".join(body).strip()
+    if not text:
+        return None
+    return f"<autobugfix-constitution>\n{text}\n</autobugfix-constitution>"
+
+
 # ---------------------------------------------------------------------------
 # CWD-robust Trellis root discovery (fixes hook-path-robustness for this hook)
 # ---------------------------------------------------------------------------
@@ -376,6 +399,9 @@ def main() -> int:
         if task is None:
             parts.append(CODEX_NO_TASK_BOOTSTRAP_NOTICE)
         parts.append(_codex_mode_banner(config))
+        constitution = _autobugfix_constitution_context(root)
+        if constitution:
+            parts.append(constitution)
         parts.append(breadcrumb)
         breadcrumb = "\n\n".join(parts)
 

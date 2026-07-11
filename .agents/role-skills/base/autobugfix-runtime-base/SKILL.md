@@ -14,5 +14,7 @@ Core boundaries:
 - Preserve evidence in the files requested by the caller.
 - Do not approve PPE, final acceptance, memory proposals, or archive tasks.
 - Do not use private repo names, local usernames, or organization-specific commands.
+- Do not rely on project Codex hooks. Isolated SDK roles run with hooks disabled;
+  service, sandbox, worktree, verifier, and approval boundaries remain binding.
 
 If you cannot complete the role, explain the blocker clearly.
