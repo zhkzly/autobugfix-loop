@@ -10,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from autobugfix.operator.models import digest_payload
 from autobugfix.operator.service import OperatorGovernanceService
 
 
@@ -50,6 +51,57 @@ def acceptance_commands() -> list[dict[str, object]]:
     ]
 
 
+def register_guard_metric(
+    service: OperatorGovernanceService,
+    study_id: str,
+    *,
+    kind: str,
+    metrics: dict[str, object],
+    success_contract_passed: bool | None = None,
+):
+    study = service.store.read_study(study_id)
+    if kind == "BASELINE":
+        payload: dict[str, object] = {
+            "schema": "autobugfix-study-baseline-v1",
+            "study_id": study.study_id,
+            "line_id": study.line_id,
+            "subject_sha": study.base_subject_sha,
+            "manifest_digest": study.manifest_digest,
+            "success_contract_digest": digest_payload(study.success_contract),
+            "metrics": metrics,
+        }
+    else:
+        line = service.store.read_experiment_line(study.line_id)
+        grant = service.store.read_budget_grants(study.study_id)[-1]
+        payload = {
+            "schema": "autobugfix-study-metric-v1",
+            "study_id": study.study_id,
+            "line_id": line.line_id,
+            "subject_sha": line.head_sha,
+            "wave": grant.wave,
+            "manifest_digest": study.manifest_digest,
+            "success_contract_digest": digest_payload(study.success_contract),
+            "budget_grant_id": grant.grant_id,
+            "budget_digest": grant.grant_digest,
+            "success_contract_passed": success_contract_passed is True,
+            "metrics": metrics,
+        }
+    receipt = {**payload, "receipt_digest": digest_payload(payload)}
+    source = (
+        service.store.artifact_root
+        / "acceptance-guard-inputs"
+        / study.study_id
+        / f"{kind.lower()}.yaml"
+    )
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(yaml.safe_dump(receipt, sort_keys=False), encoding="utf-8")
+    return service.register_guard_metric_receipt(
+        study.study_id,
+        receipt_path=source,
+        kind=kind,
+    )
+
+
 def build_repo(source_root: Path, root: Path) -> Path:
     if root.exists():
         shutil.rmtree(root)
@@ -78,6 +130,20 @@ def build_repo(source_root: Path, root: Path) -> Path:
     write(
         root / "evidence/operator.yaml",
         "failure: normalize_case_id emits underscores but dataset paths require hyphens\n",
+    )
+    write(
+        root / "evidence/study-manifest.yaml",
+        yaml.safe_dump(
+            {
+                "schema": "autobugfix-operator-acceptance-v1",
+                "cases": [
+                    "whitespace-normalization",
+                    "underscore-normalization",
+                    "mixed-case-normalization",
+                ],
+            },
+            sort_keys=False,
+        ),
     )
     for relative in (
         "src/autobugfix/config.py",
@@ -154,6 +220,8 @@ def main() -> int:
     parser.add_argument("--root", default="/tmp/autobugfix-real-operator-e2e")
     parser.add_argument("--model", default="gpt-5.4-mini")
     args = parser.parse_args()
+    if args.model != "gpt-5.4-mini":
+        raise RuntimeError("governed Operator acceptance requires gpt-5.4-mini")
     source_root = Path.cwd().resolve()
     root = Path(args.root).resolve()
     policy_path = build_repo(source_root, root)
@@ -179,6 +247,52 @@ def main() -> int:
         raise RuntimeError("Operator baseline did not preserve the expected failing state")
     run(["git", "add", ".autobugfix-baselines/operator-acceptance-base.yaml"], root)
     run(["git", "commit", "-m", "Record trusted Operator acceptance baseline"], root)
+    h0_sha = run(["git", "rev-parse", "main"], root).stdout.strip()
+    study = service.create_study(
+        study_id="operator-acceptance-study",
+        cohort_id="operator-acceptance-h0",
+        purpose="Exercise the governed Operator integration line with real Codex roles",
+        manifest_path=root / "evidence/study-manifest.yaml",
+        success_contract={
+            "all_acceptance_commands_pass": True,
+            "main_checkout_unchanged": True,
+        },
+        base_ref=h0_sha,
+        primary_model=args.model,
+        target_checkpoint_name="H_bug",
+    )
+    h0_metric = register_guard_metric(
+        service,
+        study.study_id,
+        kind="BASELINE",
+        metrics={"pass_rate": 0.0, "cases_passed": 0, "cases_total": 3},
+    )
+    service.initialize_experiment_line(
+        study.study_id,
+        metric_receipt_id=h0_metric.metric_id,
+    )
+    budget_request = service.create_budget_request(
+        study.study_id,
+        wave=3,
+        case_ids=(
+            "whitespace-normalization",
+            "underscore-normalization",
+            "mixed-case-normalization",
+        ),
+        reason="Run the bounded real Operator acceptance wave",
+        requester="acceptance-operator",
+        model=args.model,
+        max_calls=6,
+        max_writer_attempts=2,
+        max_operator_revisions=3,
+        wall_time_seconds=900,
+        case_concurrency=1,
+    )
+    grant = service.approve_budget_grant(
+        budget_request.budget_request_id,
+        approver="acceptance-human",
+        confirm_request_digest=budget_request.budget_request_digest,
+    )
     triage = service.create_triage(
         triage_id="operator-real-triage",
         summary="Eval case IDs violate the dataset path contract",
@@ -195,6 +309,8 @@ def main() -> int:
         planned_paths=("src/autobugfix/eval/runner.py", "tests/test_eval.py"),
         validation_profiles=("eval",),
         performance_baseline="operator-acceptance-base",
+        experiment_line_id=study.line_id,
+        budget_grant_id=grant.grant_id,
         creator="acceptance-operator",
     )
     service.start(request.request_id)
@@ -222,7 +338,6 @@ def main() -> int:
     audit = service.audit(request.request_id)
     if not audit["allowed"]:
         raise RuntimeError(f"Operator audit failed: {audit['violations']}")
-    promotion = service.prepare_promotion(request.request_id)
     workspace = Path(service.store.read_workspace(request.request_id)["path"])
     diff = run(["git", "diff", request.base_sha, "HEAD", "--", "src/autobugfix/eval/runner.py"], workspace).stdout
     if not diff.strip():
@@ -241,13 +356,35 @@ def main() -> int:
     ]
     if not raw_artifacts:
         raise RuntimeError("Operator Writer raw SDK log was not retained")
+    integration = service.integrate_candidate(
+        request.request_id,
+        grant_id=grant.grant_id,
+        actor="acceptance-guard",
+    )
+    metric = register_guard_metric(
+        service,
+        study.study_id,
+        kind="CANDIDATE",
+        metrics={"pass_rate": 1.0, "cases_passed": 3, "cases_total": 3},
+        success_contract_passed=True,
+    )
+    checkpoint = service.create_checkpoint(
+        study.line_id,
+        metric_receipt_id=metric.metric_id,
+    )
+    if run(["git", "rev-parse", "main"], root).stdout.strip() != h0_sha:
+        raise RuntimeError("Operator acceptance changed the protected main branch")
+    if run(["git", "status", "--porcelain"], root).stdout.strip():
+        raise RuntimeError("Operator acceptance left the main checkout dirty")
     print(
         json.dumps(
             {
                 "request_id": request.request_id,
                 "phase": service.projection(request.request_id).state,
                 "writer_run_id": writer["run_id"],
-                "promotion_id": promotion["promotion"]["promotion_id"],
+                "integration_id": integration["integration"]["integration_id"],
+                "checkpoint_id": checkpoint["checkpoint"]["checkpoint_id"],
+                "budget_grant_id": grant.grant_id,
                 "model": args.model,
                 "workspace": str(workspace),
             },

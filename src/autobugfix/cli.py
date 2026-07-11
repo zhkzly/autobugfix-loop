@@ -62,6 +62,14 @@ def _parse_values(values: list[str]) -> dict[str, str]:
     return parsed
 
 
+def _read_yaml_mapping(path: Path | str, field: str) -> dict[str, object]:
+    source = Path(path)
+    data = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{field} must contain a YAML mapping: {source}")
+    return data
+
+
 def _installed_version(distribution: str) -> str:
     try:
         return importlib.metadata.version(distribution)
@@ -346,7 +354,102 @@ def command_operator(args: argparse.Namespace) -> int:
         allowed_signers=Path(args.allowed_signers) if args.allowed_signers else None,
     )
     action = args.operator_action
-    if action == "triage":
+    if action == "study":
+        if args.study_action == "create":
+            study = service.create_study(
+                study_id=args.study_id,
+                purpose=args.purpose,
+                manifest_path=args.manifest,
+                success_contract=_read_yaml_mapping(
+                    args.success_contract,
+                    "success contract",
+                ),
+                base_ref=args.base_ref,
+                harness_ref=args.harness_ref,
+                line_id=args.line_id,
+                cohort_id=args.cohort_id,
+                primary_model=args.model,
+                target_checkpoint_name=args.target_checkpoint,
+                memory_root=args.memory_root,
+            )
+            _print_yaml(service.study_status(study.study_id)["study"])
+        elif args.study_action == "show":
+            _print_yaml(service.study_status(args.study_id))
+        elif args.study_action == "list":
+            _print_yaml({"studies": service.list_studies()})
+    elif action == "line":
+        if args.line_action == "init":
+            _print_yaml(
+                service.initialize_experiment_line(
+                    args.study_id,
+                    metric_receipt_id=args.metric_receipt_id,
+                )
+            )
+        elif args.line_action == "show":
+            _print_yaml(service.experiment_line_status(args.line_id))
+        elif args.line_action == "list":
+            _print_yaml(
+                {"lines": service.list_experiment_lines(study_id=args.study_id)}
+            )
+        elif args.line_action == "rollback":
+            _print_yaml(
+                service.rollback_experiment_line(
+                    args.line_id,
+                    args.checkpoint_id,
+                    reason=args.reason,
+                    push_remote=args.push_remote,
+                    actor=args.actor,
+                )
+            )
+    elif action == "checkpoint":
+        if args.checkpoint_action == "create":
+            _print_yaml(
+                service.create_checkpoint(
+                    args.line_id,
+                    metric_receipt_id=args.metric_receipt_id,
+                    checkpoint_name=args.name,
+                )
+            )
+        elif args.checkpoint_action == "show":
+            _print_yaml(service.experiment_line_status(args.line_id))
+    elif action == "budget":
+        if args.budget_action == "request":
+            request = service.create_budget_request(
+                args.study_id,
+                wave=args.wave,
+                case_ids=args.case,
+                reason=args.reason,
+                requester=args.requester,
+                model=args.model,
+                max_calls=args.max_calls,
+                max_writer_attempts=args.max_writer_attempts,
+                max_operator_revisions=args.max_operator_revisions,
+                wall_time_seconds=args.wall_time_seconds,
+                case_concurrency=args.case_concurrency,
+            )
+            _print_yaml(request.to_dict())
+        elif args.budget_action == "approve":
+            if not sys.stdin.isatty():
+                raise RuntimeError(
+                    "budget approval requires an interactive human terminal"
+                )
+            expected = f"APPROVE {args.confirm_request_digest}"
+            entered = input(
+                "Type the exact budget approval phrase "
+                f"'{expected}' to authorize model spend: "
+            )
+            if entered.strip() != expected:
+                raise RuntimeError("budget approval confirmation did not match")
+            grant = service.approve_budget_grant(
+                args.budget_request_id,
+                approver=args.approver,
+                confirm_request_digest=args.confirm_request_digest,
+                approval_kind=args.approval_kind,
+            )
+            _print_yaml(grant.to_dict())
+        elif args.budget_action == "show":
+            _print_yaml(service.budget_status(args.study_id))
+    elif action == "triage":
         triage = service.create_triage(
             triage_id=args.triage_id,
             summary=args.summary,
@@ -370,6 +473,8 @@ def command_operator(args: argparse.Namespace) -> int:
             performance_baseline=args.performance_baseline,
             creator=args.creator,
             branch=args.branch,
+            experiment_line_id=args.experiment_line,
+            budget_grant_id=args.budget_grant,
             expires_at=args.expires_at,
         )
         _print_yaml(request.to_dict())
@@ -478,6 +583,15 @@ def command_operator(args: argparse.Namespace) -> int:
         )
         _print_yaml(report)
         return 0 if report["status"] == "COMPLETED" else 1
+    elif action == "integrate":
+        _print_yaml(
+            service.integrate_candidate(
+                args.request_id,
+                grant_id=args.grant_id,
+                push_remote=args.push_remote,
+                actor=args.actor,
+            )
+        )
     elif action == "reopen":
         _print_yaml(service.reopen(args.request_id, reason=args.reason, actor=args.actor))
     elif action == "close":
@@ -747,6 +861,103 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--bootstrap-policy", action="store_true")
         command.add_argument("--allowed-signers")
 
+    study = operator_sub.add_parser("study")
+    study_sub = study.add_subparsers(dest="study_action", required=True)
+    study_create = study_sub.add_parser("create")
+    governance_options(study_create)
+    study_create.add_argument("--study-id", required=True)
+    study_create.add_argument("--purpose", required=True)
+    study_create.add_argument("--manifest", required=True)
+    study_create.add_argument("--success-contract", required=True)
+    study_create.add_argument("--base-ref")
+    study_create.add_argument("--harness-ref")
+    study_create.add_argument("--line-id")
+    study_create.add_argument("--cohort-id")
+    study_create.add_argument("--model", default="gpt-5.4-mini")
+    study_create.add_argument(
+        "--target-checkpoint",
+        choices=["H_bug", "H_general"],
+        default="H_bug",
+    )
+    study_create.add_argument("--memory-root")
+    study_create.set_defaults(func=command_operator)
+    study_show = study_sub.add_parser("show")
+    governance_options(study_show)
+    study_show.add_argument("--study-id", required=True)
+    study_show.set_defaults(func=command_operator)
+    study_list = study_sub.add_parser("list")
+    governance_options(study_list)
+    study_list.set_defaults(func=command_operator)
+
+    line = operator_sub.add_parser("line")
+    line_sub = line.add_subparsers(dest="line_action", required=True)
+    line_init = line_sub.add_parser("init")
+    governance_options(line_init)
+    line_init.add_argument("--study-id", required=True)
+    line_init.add_argument("--metric-receipt-id", required=True)
+    line_init.set_defaults(func=command_operator)
+    line_show = line_sub.add_parser("show")
+    governance_options(line_show)
+    line_show.add_argument("--line-id", required=True)
+    line_show.set_defaults(func=command_operator)
+    line_list = line_sub.add_parser("list")
+    governance_options(line_list)
+    line_list.add_argument("--study-id")
+    line_list.set_defaults(func=command_operator)
+    line_rollback = line_sub.add_parser("rollback")
+    governance_options(line_rollback)
+    line_rollback.add_argument("--line-id", required=True)
+    line_rollback.add_argument("--checkpoint-id", required=True)
+    line_rollback.add_argument("--reason", required=True)
+    line_rollback.add_argument("--push-remote", action="store_true")
+    line_rollback.add_argument("--actor")
+    line_rollback.set_defaults(func=command_operator)
+
+    checkpoint = operator_sub.add_parser("checkpoint")
+    checkpoint_sub = checkpoint.add_subparsers(dest="checkpoint_action", required=True)
+    checkpoint_create = checkpoint_sub.add_parser("create")
+    governance_options(checkpoint_create)
+    checkpoint_create.add_argument("--line-id", required=True)
+    checkpoint_create.add_argument("--metric-receipt-id", required=True)
+    checkpoint_create.add_argument("--name", choices=["H_bug", "H_general"])
+    checkpoint_create.set_defaults(func=command_operator)
+    checkpoint_show = checkpoint_sub.add_parser("show")
+    governance_options(checkpoint_show)
+    checkpoint_show.add_argument("--line-id", required=True)
+    checkpoint_show.set_defaults(func=command_operator)
+
+    budget = operator_sub.add_parser("budget")
+    budget_sub = budget.add_subparsers(dest="budget_action", required=True)
+    budget_request = budget_sub.add_parser("request")
+    governance_options(budget_request)
+    budget_request.add_argument("--study-id", required=True)
+    budget_request.add_argument("--wave", type=int, choices=[3, 8, 16], required=True)
+    budget_request.add_argument("--case", action="append", required=True)
+    budget_request.add_argument("--reason", required=True)
+    budget_request.add_argument("--requester")
+    budget_request.add_argument("--model")
+    budget_request.add_argument("--max-calls", type=int)
+    budget_request.add_argument("--max-writer-attempts", type=int)
+    budget_request.add_argument("--max-operator-revisions", type=int)
+    budget_request.add_argument("--wall-time-seconds", type=int)
+    budget_request.add_argument("--case-concurrency", type=int)
+    budget_request.set_defaults(func=command_operator)
+    budget_approve = budget_sub.add_parser("approve")
+    governance_options(budget_approve)
+    budget_approve.add_argument("--budget-request-id", required=True)
+    budget_approve.add_argument("--approver", required=True)
+    budget_approve.add_argument("--confirm-request-digest", required=True)
+    budget_approve.add_argument(
+        "--approval-kind",
+        choices=["interactive"],
+        default="interactive",
+    )
+    budget_approve.set_defaults(func=command_operator)
+    budget_show = budget_sub.add_parser("show")
+    governance_options(budget_show)
+    budget_show.add_argument("--study-id", required=True)
+    budget_show.set_defaults(func=command_operator)
+
     triage = operator_sub.add_parser("triage")
     governance_options(triage)
     triage.add_argument("--triage-id")
@@ -771,6 +982,8 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--performance-baseline")
     request.add_argument("--creator")
     request.add_argument("--branch")
+    request.add_argument("--experiment-line")
+    request.add_argument("--budget-grant")
     request.add_argument("--expires-at")
     request.set_defaults(func=command_operator)
 
@@ -893,6 +1106,14 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_run.add_argument("--value", action="append", help="Experiment input as key=value")
     experiment_run.add_argument("--actor")
     experiment_run.set_defaults(func=command_operator)
+
+    integrate = operator_sub.add_parser("integrate")
+    governance_options(integrate)
+    integrate.add_argument("--request-id", required=True)
+    integrate.add_argument("--grant-id", required=True)
+    integrate.add_argument("--push-remote", action="store_true")
+    integrate.add_argument("--actor")
+    integrate.set_defaults(func=command_operator)
 
     reopen = operator_sub.add_parser("reopen")
     governance_options(reopen)

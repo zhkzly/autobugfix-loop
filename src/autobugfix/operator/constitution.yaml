@@ -1,4 +1,4 @@
-version: 3
+version: 4
 
 operator_prompt_context: |
   Autobugfix is a local, repo-agnostic loop-engineering and harness-engineering control system.
@@ -11,6 +11,8 @@ operator_prompt_context: |
   and state owner, and name the real validation command before every new Operator task.
   Project Codex hooks belong only to the trusted operator_host session. SDK roles run with
   hooks disabled and rely on their service, sandbox, worktree, and verifier boundaries.
+  H_bug and H_general are independent successors of one frozen H0. Neither experiment may
+  inherit the other experiment's code, memory, skills, artifacts, or case-level feedback.
 
 project:
   id: autobugfix
@@ -25,6 +27,8 @@ project:
     - deterministic_checks_precede_semantic_judgment
     - every_run_preserves_observable_evidence
     - main_is_the_only_trust_root
+    - experiments_share_h0_but_not_treatments
+    - model_spend_requires_explicit_budget_authority
 
 loops:
   execution:
@@ -57,20 +61,55 @@ operator_roles:
     purpose: Diagnose failures and request legal transitions.
     sandbox: read-only
     capabilities:
-      allow: [operator_read, transition_request, writer_control]
-      deny: [candidate_write, state_write, approve, merge]
+      allow:
+        - operator_read
+        - study_projection_read
+        - experiment_line_projection_read
+        - budget_projection_read
+        - transition_request
+        - writer_control
+      deny:
+        - candidate_write
+        - state_write
+        - budget_approve
+        - integration_commit
+        - checkpoint_create
+        - release_activate
+        - approve
+        - merge
   operator_writer:
     purpose: Modify only the assigned candidate worktree using trusted feedback.
     sandbox: workspace-write
     capabilities:
       allow: [writer_read_view, candidate_write]
-      deny: [operator_mutation, state_write, approve, verify, promote, merge]
+      deny:
+        - operator_mutation
+        - state_write
+        - budget_mutation
+        - experiment_line_mutation
+        - integration_mutation
+        - checkpoint_mutation
+        - release_activation
+        - approve
+        - verify
+        - promote
+        - merge
   operator_verifier:
     purpose: Perform patch-bound read-only semantic review after deterministic checks.
     sandbox: read-only
     capabilities:
       allow: [verification_read_view, semantic_verdict]
-      deny: [candidate_write, state_write, deterministic_override, approve, merge]
+      deny:
+        - candidate_write
+        - state_write
+        - budget_mutation
+        - experiment_line_mutation
+        - integration_mutation
+        - checkpoint_mutation
+        - release_activation
+        - deterministic_override
+        - approve
+        - merge
 
 hook_assignments:
   operator_host:
@@ -122,6 +161,78 @@ transition_contract:
       to: CLOSED
       checks: [terminal_outcome]
   invariant: Operators request actions; only the trusted service appends transition events.
+
+experiment_governance:
+  state_owner: OperatorGovernanceService
+  authority_store: external_sqlite
+  candidate_state_authority: forbidden
+  request_phases_unchanged: [REQUESTED, ACTIVE, VERIFIED, CLOSED]
+  studies:
+    common_baseline: H0_per_cohort
+    independent_successors: [H_bug, H_general]
+    frozen_inputs:
+      - base_subject_sha
+      - harness_sha
+      - policy_digest
+      - role_config_digest
+      - base_config_digest
+      - base_model_digest
+      - base_skills_digest
+      - benchmark_manifest_snapshot
+      - memory_snapshot
+      - success_contract
+    cohort_mismatch: reject
+    snapshot_storage: trusted_read_only_checkpoint_root
+    operator_projection: digests_without_snapshot_paths
+    forbidden_inheritance:
+      - H_bug_to_H_general
+      - H_general_to_H_bug
+    checkpoint_lineage_owner: trusted_guard
+  sealed_holdout:
+    manifest_owner: external_guard
+    operator_store_case_ids: forbidden
+    operator_store_case_level_results: forbidden
+    operator_role_filesystem: absent
+    allowed_release: aggregate_metric_receipt_only
+  lines:
+    update: compare_and_swap
+    expected_inputs: [head_sha, generation]
+    force_push: forbidden
+    integration_worktree: trusted_host_only
+    candidate_direct_update: forbidden
+  budgets:
+    waves: [3, 8, 16]
+    allowed_primary_models: [gpt-5.4-mini]
+    max_case_concurrency: 1
+    model_fallback: forbidden
+    expansion_owner: human_operator
+    transfer_between_studies: forbidden
+    reserve_before_sdk_call: required
+    indeterminate_call_counts_as_consumed: true
+  checkpoints:
+    immutable: true
+    required_digests:
+      - subject
+      - harness
+      - policy
+      - config
+      - model
+      - skills
+      - memory
+      - manifest
+      - budget
+      - metrics
+  metrics:
+    registration_owner: trusted_benchmark_guard
+    generic_operator_import: forbidden
+    storage: content_addressed_artifact_plus_digest_protected_record
+    transition_input: registered_metric_id_only
+    candidate_path_authority: forbidden
+    sealed_case_level_payload: forbidden
+  rollback:
+    reset: forbidden
+    force_push: forbidden
+    history_preserving_commit: required
 
 operator_runtime_minimums:
   require_process_sandbox: true
@@ -310,7 +421,7 @@ validation_profiles:
     timeout_seconds: 180
     commands:
       - name: operator-tests
-        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_operator_policy.py]
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_operator_policy.py, tests/test_operator_experiment_store.py, tests/test_operator_budget.py, tests/test_operator_integration.py, tests/test_operator_checkpoint.py]
   execution:
     timeout_seconds: 240
     commands:

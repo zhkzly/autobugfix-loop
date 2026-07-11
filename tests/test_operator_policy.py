@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,36 @@ PROJECT_ROOT = Path(__file__).parents[1]
 
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=True)
+
+
+def register_baseline_metric(
+    service: OperatorGovernanceService,
+    root: Path,
+    study_id: str,
+):
+    study = service.store.read_study(study_id)
+    payload = {
+        "schema": "autobugfix-study-baseline-v1",
+        "study_id": study.study_id,
+        "line_id": study.line_id,
+        "subject_sha": study.base_subject_sha,
+        "manifest_digest": study.manifest_digest,
+        "success_contract_digest": digest_payload(study.success_contract),
+        "metrics": {"pass_rate": 0.0},
+    }
+    path = root / f"{study_id}-h0-metric.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {**payload, "receipt_digest": digest_payload(payload)},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return service.register_guard_metric_receipt(
+        study_id,
+        receipt_path=path,
+        kind="BASELINE",
+    )
 
 
 class OperatorBackend:
@@ -176,6 +207,7 @@ def write_test_policy(root: Path, tmp_path: Path, *, canary_passes: bool = True)
             }
         ],
     }
+    policy["validation_profiles"]["full"] = policy["validation_profiles"]["eval"]
     policy["validation_profiles"]["canary"] = {
         "timeout_seconds": 30,
         "commands": [
@@ -435,6 +467,285 @@ def test_machine_constitution_projects_explicit_hook_role_assignments(tmp_path: 
     assert assignments["isolated_sdk_roles"]["hooks_enabled"] is False
     assert "writer" in assignments["isolated_sdk_roles"]["roles"]
     assert "operator_writer" in assignments["isolated_sdk_roles"]["roles"]
+    context = service.governance_context()
+    assert context["schema"] == "autobugfix-machine-constitution-v4"
+    experiment = context["experiment_governance"]
+    assert experiment["studies"]["common_baseline"] == "H0_per_cohort"
+    assert experiment["studies"]["independent_successors"] == ["H_bug", "H_general"]
+    assert experiment["budgets"]["waves"] == [3, 8, 16]
+    assert experiment["budgets"]["allowed_primary_models"] == ["gpt-5.4-mini"]
+    assert experiment["budgets"]["model_fallback"] == "forbidden"
+    assert experiment["metrics"]["registration_owner"] == "trusted_benchmark_guard"
+    assert experiment["metrics"]["transition_input"] == "registered_metric_id_only"
+
+
+def test_independent_experiment_lines_share_h0_and_bind_requests(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    manifest = root / "experiment-manifest.yaml"
+    manifest.write_text("cases: [case-1, case-2, case-3]\n", encoding="utf-8")
+    h0 = run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+
+    bug_study = service.create_study(
+        study_id="bugfix",
+        cohort_id="independent-h0-study",
+        purpose="Improve the bugfix-specialized harness",
+        manifest_path=manifest,
+        success_contract={"visible_net_gain": ">0", "holdout_regressions": 0},
+        base_ref=h0,
+    )
+    general_study = service.create_study(
+        study_id="general",
+        cohort_id="independent-h0-study",
+        purpose="Independently evolve the H0 bugfix harness toward general issue resolution",
+        manifest_path=manifest,
+        success_contract={"visible_net_gain": ">0", "holdout_rescues": ">=1"},
+        base_ref=h0,
+        target_checkpoint_name="H_general",
+    )
+    bug_metric = register_baseline_metric(service, root, "bugfix")
+    general_metric = register_baseline_metric(service, root, "general")
+    bug = service.initialize_experiment_line(
+        "bugfix",
+        metric_receipt_id=bug_metric.metric_id,
+    )
+    general = service.initialize_experiment_line(
+        "general",
+        metric_receipt_id=general_metric.metric_id,
+    )
+
+    assert bug_study.base_subject_sha == general_study.base_subject_sha == h0
+    assert bug_study.memory_digest == general_study.memory_digest
+    assert bug_study.memory_snapshot_path != general_study.memory_snapshot_path
+    assert not (Path(bug_study.memory_snapshot_path).stat().st_mode & 0o200)
+    assert not (Path(general_study.memory_snapshot_path).stat().st_mode & 0o200)
+    assert bug_study.manifest_digest == general_study.manifest_digest
+    assert bug_study.manifest_snapshot_path != general_study.manifest_snapshot_path
+    assert not (Path(bug_study.manifest_snapshot_path).stat().st_mode & 0o200)
+    assert not (Path(general_study.manifest_snapshot_path).stat().st_mode & 0o200)
+    assert bug["checkpoint"]["name"] == general["checkpoint"]["name"] == "H0"
+    assert bug["line"]["branch"] == "experiment/bugfix-main"
+    assert general["line"]["branch"] == "experiment/general-main"
+    assert run(["git", "rev-parse", "experiment/bugfix-main"], root).stdout.strip() == h0
+    assert run(["git", "rev-parse", "experiment/general-main"], root).stdout.strip() == h0
+    assert run(["git", "rev-parse", "HEAD"], root).stdout.strip() == h0
+    assert run(["git", "branch", "--show-current"], root).stdout.strip() == "main"
+    budget_request = service.create_budget_request(
+        "bugfix",
+        wave=3,
+        case_ids=("case-1", "case-2", "case-3"),
+        reason="Authorize the first bugfix optimization wave",
+    )
+    budget_grant = service.approve_budget_grant(
+        budget_request.budget_request_id,
+        approver="human",
+        confirm_request_digest=budget_request.budget_request_digest,
+    )
+
+    triage = service.create_triage(
+        triage_id="triage-line-bound",
+        summary="Visible benchmark evidence points to Eval orchestration",
+        suspected_layers=("eval",),
+        evidence=("evidence/report.yaml",),
+        creator="operator",
+        confidence="high",
+    )
+    request = service.create_request(
+        request_id="line-bound",
+        triage_id=triage.triage_id,
+        summary="Repair Eval orchestration on the bugfix experiment line",
+        primary_layer="eval",
+        planned_paths=("src/autobugfix/eval/runner.py",),
+        validation_profiles=("eval",),
+        experiment_line_id="bugfix",
+        budget_grant_id=budget_grant.grant_id,
+        creator="operator",
+    )
+    assert request.base_sha == h0
+    assert request.experiment_line_id == "bugfix"
+    assert request.experiment_line_generation == 0
+    assert service.preflight(request.request_id)["allowed"]
+
+    tree = run(["git", "rev-parse", f"{h0}^{{tree}}"], root).stdout.strip()
+    advanced_sha = run(
+        ["git", "commit-tree", tree, "-p", h0, "-m", "competing integration"],
+        root,
+    ).stdout.strip()
+    run(["git", "update-ref", "refs/heads/experiment/bugfix-main", advanced_sha, h0], root)
+    line = service.store.read_experiment_line("bugfix")
+    service.store.compare_and_swap_experiment_line(
+        replace(line, head_sha=advanced_sha, generation=1),
+        expected_head_sha=h0,
+        expected_generation=0,
+    )
+    stale = service.preflight(request.request_id)
+    assert not stale["allowed"]
+    assert "operator request experiment line advanced after request creation" in stale["violations"]
+    assert run(["git", "rev-parse", "experiment/general-main"], root).stdout.strip() == h0
+
+
+def test_experiment_study_and_line_cli_use_service_projection(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    root = make_operator_repo(tmp_path)
+    write_control_config(root)
+    policy = write_test_policy(root, tmp_path)
+    manifest = root / "manifest.yaml"
+    contract = root / "success.yaml"
+    manifest.write_text("cases: [case-1, case-2, case-3]\n", encoding="utf-8")
+    contract.write_text("visible_net_gain: '>0'\nholdout_regressions: 0\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+
+    assert main(
+        [
+            "operator",
+            "study",
+            "create",
+            "--trusted-file",
+            str(policy),
+            "--study-id",
+            "cli-study",
+            "--purpose",
+            "Exercise the governed CLI",
+            "--manifest",
+            str(manifest),
+            "--success-contract",
+            str(contract),
+            "--base-ref",
+            "main",
+        ]
+    ) == 0
+    created = yaml.safe_load(capsys.readouterr().out)
+    assert created["study_id"] == "cli-study"
+    assert created["primary_model"] == "gpt-5.4-mini"
+    assert "memory_snapshot_path" not in created
+    assert "manifest_snapshot_path" not in created
+    guard_service = OperatorGovernanceService(
+        root,
+        trusted_ref=None,
+        trusted_file=policy,
+        backend=OperatorBackend(),
+    )
+    metric = register_baseline_metric(guard_service, root, "cli-study")
+
+    assert main(
+        [
+            "operator",
+            "line",
+            "init",
+            "--trusted-file",
+            str(policy),
+            "--study-id",
+            "cli-study",
+            "--metric-receipt-id",
+            metric.metric_id,
+        ]
+    ) == 0
+    initialized = yaml.safe_load(capsys.readouterr().out)
+    assert initialized["line"]["branch"] == "experiment/cli-study-main"
+
+    assert main(
+        [
+            "operator",
+            "line",
+            "show",
+            "--trusted-file",
+            str(policy),
+            "--line-id",
+            "cli-study",
+        ]
+    ) == 0
+    projection = yaml.safe_load(capsys.readouterr().out)
+    assert projection["line"]["generation"] == 0
+    assert projection["checkpoints"][0]["name"] == "H0"
+    assert "memory_snapshot_path" not in projection["study"]
+    assert "manifest_snapshot_path" not in projection["study"]
+    assert "artifact_path" not in projection["metrics"][0]
+
+    assert main(
+        [
+            "operator",
+            "budget",
+            "request",
+            "--trusted-file",
+            str(policy),
+            "--study-id",
+            "cli-study",
+            "--wave",
+            "3",
+            "--case",
+            "case-1",
+            "--case",
+            "case-2",
+            "--case",
+            "case-3",
+            "--reason",
+            "Approve the bounded CLI smoke wave",
+        ]
+    ) == 0
+    budget_request = yaml.safe_load(capsys.readouterr().out)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _: f"APPROVE {budget_request['record_digest']}",
+    )
+    assert main(
+        [
+            "operator",
+            "budget",
+            "approve",
+            "--trusted-file",
+            str(policy),
+            "--budget-request-id",
+            budget_request["budget_request_id"],
+            "--approver",
+            "human",
+            "--confirm-request-digest",
+            budget_request["record_digest"],
+        ]
+    ) == 0
+    grant = yaml.safe_load(capsys.readouterr().out)
+    assert grant["wave"] == 3
+    assert grant["model"] == "gpt-5.4-mini"
+
+
+def test_experiment_cohort_rejects_a_different_h0_commit(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    manifest = root / "manifest.yaml"
+    manifest.write_text("cases: [case-1, case-2, case-3]\n", encoding="utf-8")
+    service.create_study(
+        study_id="cohort-bugfix",
+        cohort_id="shared-h0",
+        purpose="Freeze the bugfix treatment baseline",
+        manifest_path=manifest,
+        success_contract={"visible_net_gain": ">0"},
+        base_ref="main",
+        target_checkpoint_name="H_bug",
+    )
+    h0 = run(["git", "rev-parse", "main"], root).stdout.strip()
+    tree = run(["git", "rev-parse", f"{h0}^{{tree}}"], root).stdout.strip()
+    different_h0 = run(
+        ["git", "commit-tree", tree, "-p", h0, "-m", "different H0 identity"],
+        root,
+    ).stdout.strip()
+
+    with pytest.raises(OperatorGovernanceError, match="base_subject_sha"):
+        service.create_study(
+            study_id="cohort-general",
+            cohort_id="shared-h0",
+            purpose="Must not silently use another H0",
+            manifest_path=manifest,
+            success_contract={"visible_net_gain": ">0"},
+            base_ref=different_h0,
+            target_checkpoint_name="H_general",
+        )
+
+    assert [item.study_id for item in service.store.read_studies()] == [
+        "cohort-bugfix"
+    ]
 
 
 def test_project_config_cannot_weaken_operator_role_or_process_sandbox(tmp_path: Path):

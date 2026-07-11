@@ -4,6 +4,7 @@ import getpass
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -46,15 +47,28 @@ from autobugfix.operator.metrics import (
     read_baseline,
     record_baseline,
 )
+from autobugfix.operator.metering import (
+    CallbackCodexBackend,
+    MeteredCodexBackend,
+    StudyCallContext,
+)
 from autobugfix.operator.models import (
+    BudgetGrantRecord,
+    BudgetRequestRecord,
+    CheckpointRecord,
     CheckRun,
+    ExperimentLineRecord,
     FeedbackPacket,
     GateSnapshot,
+    IntegrationRecord,
     OperatorApproval,
     OperatorRequest,
     OperatorTriage,
     PromotionRecord,
     ScopeRevision,
+    StudyMetricRecord,
+    StudyRecord,
+    UsageEntryRecord,
     WriterRun,
     digest_payload,
     is_expired,
@@ -67,7 +81,7 @@ from autobugfix.operator.policy import (
 )
 from autobugfix.operator.projection import project_request
 from autobugfix.operator.prompts import semantic_verifier_prompt, supervisor_prompt, writer_prompt
-from autobugfix.operator.store import OperatorStore, OperatorStoreError
+from autobugfix.operator.store import OperatorStore, OperatorStoreError, safe_id
 from autobugfix.operator.trusted import TrustedPolicy, load_trusted_policy
 from autobugfix.operator.validator import run_command_specs, run_validation_profiles
 from autobugfix.operator.workspace import create_operator_workspace, recover_operator_workspace
@@ -80,6 +94,51 @@ class OperatorGovernanceError(RuntimeError):
 
 def _default_expiry(hours: int = 24) -> str:
     return (datetime.now(UTC) + timedelta(hours=hours)).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _path_digest(path: Path) -> str:
+    resolved = path.expanduser().resolve()
+    digest = hashlib.sha256()
+    if not resolved.exists():
+        digest.update(b"missing")
+        return digest.hexdigest()
+    if resolved.is_file():
+        digest.update(b"file\0")
+        digest.update(resolved.read_bytes())
+        return digest.hexdigest()
+    digest.update(b"directory\0")
+    for item in sorted(resolved.rglob("*"), key=lambda candidate: candidate.relative_to(resolved).as_posix()):
+        relative = item.relative_to(resolved).as_posix()
+        if item.is_symlink():
+            digest.update(f"symlink\0{relative}\0{os.readlink(item)}\0".encode("utf-8"))
+        elif item.is_file():
+            digest.update(f"file\0{relative}\0".encode("utf-8"))
+            digest.update(item.read_bytes())
+            digest.update(b"\0")
+        elif item.is_dir():
+            digest.update(f"directory\0{relative}\0".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _worktree_content_digest(path: Path) -> str:
+    resolved = path.expanduser().resolve()
+    digest = hashlib.sha256(b"worktree-content\0")
+    for item in sorted(
+        resolved.rglob("*"),
+        key=lambda candidate: candidate.relative_to(resolved).as_posix(),
+    ):
+        relative = item.relative_to(resolved).as_posix()
+        if relative == ".git" or relative.startswith(".git/"):
+            continue
+        if item.is_symlink():
+            digest.update(f"symlink\0{relative}\0{os.readlink(item)}\0".encode("utf-8"))
+        elif item.is_file():
+            digest.update(f"file\0{relative}\0".encode("utf-8"))
+            digest.update(item.read_bytes())
+            digest.update(b"\0")
+        elif item.is_dir():
+            digest.update(f"directory\0{relative}\0".encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _leased_request(method):
@@ -144,7 +203,7 @@ class OperatorGovernanceService:
     def governance_context(self) -> dict[str, Any]:
         policy = self.policy()
         return {
-            "schema": "autobugfix-machine-constitution-v3",
+            "schema": f"autobugfix-machine-constitution-v{int(policy.data['version'])}",
             "trusted": policy.trusted,
             "source": policy.source,
             "digest": digest_payload(policy.data),
@@ -154,7 +213,1826 @@ class OperatorGovernanceService:
             "operator_roles": policy.data.get("operator_roles") or {},
             "hook_assignments": policy.data.get("hook_assignments") or {},
             "transition_contract": policy.data.get("transition_contract") or {},
+            "experiment_governance": policy.data.get("experiment_governance") or {},
         }
+
+    def _experiment_role_snapshots(self) -> dict[str, dict[str, Any]]:
+        role_names = (
+            "writer",
+            "evaluator",
+            "eval_judge",
+            "operator_supervisor",
+            "operator_writer",
+            "operator_verifier",
+        )
+        return {
+            name: resolve_role(self.config, name).to_dict(self.project_root)
+            for name in role_names
+        }
+
+    def _experiment_config_digests(
+        self,
+        primary_model: str,
+        *,
+        subject_root: Path | None = None,
+    ) -> dict[str, str]:
+        roles = self._experiment_role_snapshots()
+        source_root = subject_root or self.project_root
+        skill_files = {
+            skill
+            for role in roles.values()
+            for skill in role.get("skill_paths") or []
+        }
+        skill_digests: dict[str, str] = {}
+        for value in sorted(str(item) for item in skill_files):
+            path = Path(value)
+            if not path.is_absolute():
+                path = source_root / path
+            skill_digests[value] = _path_digest(path)
+        config_snapshot = {
+            "roles": roles,
+            "config_implementation_digest": _path_digest(
+                source_root / "src/autobugfix/config.py"
+            ),
+            "experiment_lines": {
+                "branch_template": self.config.operator.experiment_lines.branch_template,
+                "remote": self.config.operator.experiment_lines.remote,
+                "update_timeout_seconds": self.config.operator.experiment_lines.update_timeout_seconds,
+            },
+            "budgets": {
+                "allowed_waves": list(self.config.operator.budgets.allowed_waves),
+                "allowed_primary_models": list(
+                    self.config.operator.budgets.allowed_primary_models
+                ),
+                "max_calls_by_wave": self.config.operator.budgets.max_calls_by_wave,
+                "default_case_concurrency": self.config.operator.budgets.default_case_concurrency,
+                "max_case_concurrency": self.config.operator.budgets.max_case_concurrency,
+                "allow_model_fallback": self.config.operator.budgets.allow_model_fallback,
+            },
+        }
+        return {
+            "role_config_digest": digest_payload({"roles": roles}),
+            "config_digest": digest_payload(config_snapshot),
+            "model_digest": digest_payload({"primary_model": primary_model}),
+            "skills_digest": digest_payload({"skills": skill_digests}),
+        }
+
+    def _experiment_digests_at_subject(
+        self,
+        *,
+        study_id: str,
+        subject_sha: str,
+        primary_model: str,
+    ) -> dict[str, str]:
+        worktree = (
+            self.config.operator.experiment_lines.root
+            / ".study-digests"
+            / f"{study_id}-{self.store.next_id('digest')}"
+        ).resolve()
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            run_git(
+                self.project_root,
+                ["worktree", "add", "--detach", str(worktree), subject_sha],
+            )
+            return self._experiment_config_digests(
+                primary_model,
+                subject_root=worktree,
+            )
+        finally:
+            if worktree.exists():
+                run_git(
+                    self.project_root,
+                    ["worktree", "remove", "--force", str(worktree)],
+                    check=False,
+                )
+            if worktree.exists():
+                shutil.rmtree(worktree)
+                run_git(self.project_root, ["worktree", "prune"], check=False)
+
+    @staticmethod
+    def _remove_release_tree(path: Path) -> None:
+        if not path.exists() and not path.is_symlink():
+            return
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+            return
+        for item in sorted(path.rglob("*"), key=lambda value: len(value.parts), reverse=True):
+            if item.is_symlink():
+                continue
+            item.chmod(0o700 if item.is_dir() else 0o600)
+        path.chmod(0o700)
+        shutil.rmtree(path)
+
+    def _materialize_checkpoint_release(
+        self,
+        *,
+        study_id: str,
+        checkpoint_name: str,
+        subject_sha: str,
+    ) -> Path:
+        release = (
+            self.config.operator.experiment_lines.checkpoint_root
+            / study_id
+            / checkpoint_name
+        ).resolve()
+        if release.exists() or release.is_symlink():
+            raise OperatorGovernanceError(f"checkpoint release already exists: {release}")
+        staging = (
+            self.config.operator.experiment_lines.root
+            / ".checkpoint-staging"
+            / study_id
+            / f"{checkpoint_name}-{self.store.next_id('materialize')}"
+        ).resolve()
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            run_git(
+                self.project_root,
+                ["worktree", "add", "--detach", str(staging), subject_sha],
+            )
+            release.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(staging, release, ignore=shutil.ignore_patterns(".git"))
+        except Exception:
+            self._remove_release_tree(release)
+            raise
+        finally:
+            if staging.exists():
+                run_git(
+                    self.project_root,
+                    ["worktree", "remove", "--force", str(staging)],
+                    check=False,
+                )
+        for item in sorted(release.rglob("*"), key=lambda value: len(value.parts), reverse=True):
+            if not item.is_symlink():
+                item.chmod(0o555 if item.is_dir() else 0o444)
+        release.chmod(0o555)
+        return release
+
+    def _materialize_study_memory_snapshot(
+        self,
+        *,
+        study_id: str,
+        source: Path,
+    ) -> Path:
+        snapshot = (
+            self.config.operator.experiment_lines.checkpoint_root
+            / study_id
+            / "memory-H0"
+        ).resolve()
+        if snapshot.exists() or snapshot.is_symlink():
+            raise OperatorGovernanceError(
+                f"study memory snapshot already exists: {snapshot}"
+            )
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        if source.exists():
+            if not source.is_dir():
+                raise OperatorGovernanceError(
+                    f"study memory root must be a directory: {source}"
+                )
+            shutil.copytree(source, snapshot)
+        else:
+            snapshot.mkdir()
+        for item in sorted(
+            snapshot.rglob("*"),
+            key=lambda value: len(value.parts),
+            reverse=True,
+        ):
+            if not item.is_symlink():
+                item.chmod(0o555 if item.is_dir() else 0o444)
+        snapshot.chmod(0o555)
+        return snapshot
+
+    def _materialize_study_manifest_snapshot(
+        self,
+        *,
+        study_id: str,
+        source: Path,
+    ) -> Path:
+        suffix = source.suffix if source.suffix else ".data"
+        snapshot = (
+            self.config.operator.experiment_lines.checkpoint_root
+            / study_id
+            / f"manifest-H0{suffix}"
+        ).resolve()
+        if snapshot.exists() or snapshot.is_symlink():
+            raise OperatorGovernanceError(
+                f"study manifest snapshot already exists: {snapshot}"
+            )
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        temporary = snapshot.with_name(f".{snapshot.name}.{self.store.next_id('manifest')}.tmp")
+        temporary.write_bytes(source.read_bytes())
+        temporary.replace(snapshot)
+        snapshot.chmod(0o444)
+        return snapshot
+
+    def _activate_experiment_release(self, study_id: str, release: Path) -> Path:
+        active = (
+            self.config.operator.experiment_lines.active_release_root.resolve() / study_id
+        )
+        active.parent.mkdir(parents=True, exist_ok=True)
+        if active.exists() and not active.is_symlink():
+            raise OperatorGovernanceError(
+                f"active experiment release is not a symlink: {active}"
+            )
+        temporary = active.with_name(f".{active.name}.{self.store.next_id('activate')}.tmp")
+        relative_target = os.path.relpath(release, active.parent)
+        temporary.symlink_to(relative_target)
+        temporary.replace(active)
+        return active
+
+    def _validated_study_memory_snapshot(self, study: StudyRecord) -> Path:
+        if not study.memory_snapshot_path:
+            raise OperatorGovernanceError(
+                "study predates required frozen Memory snapshot authority"
+            )
+        snapshot = Path(study.memory_snapshot_path).resolve()
+        expected_root = (
+            self.config.operator.experiment_lines.checkpoint_root
+            / study.study_id
+        ).resolve()
+        try:
+            snapshot.relative_to(expected_root)
+        except ValueError as exc:
+            raise OperatorGovernanceError(
+                "study Memory snapshot escaped the trusted checkpoint root"
+            ) from exc
+        if not snapshot.is_dir():
+            raise OperatorGovernanceError("study Memory snapshot is missing")
+        if _path_digest(snapshot) != study.memory_digest:
+            raise OperatorGovernanceError("study Memory snapshot digest mismatch")
+        return snapshot
+
+    def _validated_study_manifest_snapshot(self, study: StudyRecord) -> Path:
+        if not study.manifest_snapshot_path:
+            raise OperatorGovernanceError(
+                "study predates required frozen benchmark manifest authority"
+            )
+        snapshot = Path(study.manifest_snapshot_path).resolve()
+        expected_root = (
+            self.config.operator.experiment_lines.checkpoint_root
+            / study.study_id
+        ).resolve()
+        try:
+            snapshot.relative_to(expected_root)
+        except ValueError as exc:
+            raise OperatorGovernanceError(
+                "study manifest snapshot escaped the trusted checkpoint root"
+            ) from exc
+        if not snapshot.is_file():
+            raise OperatorGovernanceError("study manifest snapshot is missing")
+        if _path_digest(snapshot) != study.manifest_digest:
+            raise OperatorGovernanceError("study manifest snapshot digest mismatch")
+        return snapshot
+
+    @staticmethod
+    def _study_projection(study: StudyRecord) -> dict[str, Any]:
+        data = study.to_dict()
+        data.pop("memory_snapshot_path", None)
+        data.pop("manifest_snapshot_path", None)
+        return data
+
+    @staticmethod
+    def _metric_projection(metric: StudyMetricRecord) -> dict[str, Any]:
+        data = metric.to_dict()
+        data.pop("artifact_path", None)
+        return data
+
+    @staticmethod
+    def _load_study_metric_receipt(content: bytes) -> dict[str, Any]:
+        try:
+            data = yaml.safe_load(content.decode("utf-8")) or {}
+        except (UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise OperatorGovernanceError("study metric receipt is not valid YAML") from exc
+        if not isinstance(data, dict):
+            raise OperatorGovernanceError("study metric receipt must be a mapping")
+        stored = data.get("receipt_digest")
+        payload = {key: value for key, value in data.items() if key != "receipt_digest"}
+        if not stored or stored != digest_payload(payload):
+            raise OperatorGovernanceError("study metric receipt digest mismatch")
+        metrics = data.get("metrics")
+        if not isinstance(metrics, Mapping) or not metrics:
+            raise OperatorGovernanceError(
+                "study metric receipt requires non-empty aggregate metrics"
+            )
+        if any(
+            not str(key).strip()
+            or isinstance(value, (dict, list, tuple, set))
+            or not isinstance(value, (bool, int, float, type(None)))
+            for key, value in metrics.items()
+        ):
+            raise OperatorGovernanceError(
+                "study metric receipt metrics must be aggregate scalar values"
+            )
+        return data
+
+    @staticmethod
+    def _baseline_metric_receipt(
+        data: Mapping[str, Any],
+        *,
+        study: StudyRecord,
+    ) -> None:
+        allowed = {
+            "schema",
+            "study_id",
+            "line_id",
+            "subject_sha",
+            "manifest_digest",
+            "success_contract_digest",
+            "metrics",
+            "receipt_digest",
+            "guard_run_id",
+            "evidence_digest",
+        }
+        if unexpected := set(data) - allowed:
+            raise OperatorGovernanceError(
+                "H0 metric receipt contains non-aggregate fields: "
+                + ", ".join(sorted(str(item) for item in unexpected))
+            )
+        expected = {
+            "schema": "autobugfix-study-baseline-v1",
+            "study_id": study.study_id,
+            "line_id": study.line_id,
+            "subject_sha": study.base_subject_sha,
+            "manifest_digest": study.manifest_digest,
+            "success_contract_digest": digest_payload(study.success_contract),
+        }
+        for key, value in expected.items():
+            if data.get(key) != value:
+                raise OperatorGovernanceError(
+                    f"H0 metric receipt {key} does not match trusted study"
+                )
+
+    @staticmethod
+    def _study_metric_receipt(
+        data: Mapping[str, Any],
+        *,
+        study: StudyRecord,
+        line: ExperimentLineRecord,
+        grant: BudgetGrantRecord,
+    ) -> dict[str, Any]:
+        allowed = {
+            "schema",
+            "study_id",
+            "line_id",
+            "subject_sha",
+            "wave",
+            "manifest_digest",
+            "success_contract_digest",
+            "budget_grant_id",
+            "budget_digest",
+            "success_contract_passed",
+            "metrics",
+            "receipt_digest",
+            "guard_run_id",
+            "evidence_digest",
+        }
+        if unexpected := set(data) - allowed:
+            raise OperatorGovernanceError(
+                "study metric receipt contains non-aggregate fields: "
+                + ", ".join(sorted(str(item) for item in unexpected))
+            )
+        expected = {
+            "schema": "autobugfix-study-metric-v1",
+            "study_id": study.study_id,
+            "line_id": line.line_id,
+            "subject_sha": line.head_sha,
+            "wave": grant.wave,
+            "manifest_digest": study.manifest_digest,
+            "success_contract_digest": digest_payload(study.success_contract),
+            "budget_grant_id": grant.grant_id,
+            "budget_digest": grant.grant_digest,
+        }
+        for key, value in expected.items():
+            if data.get(key) != value:
+                raise OperatorGovernanceError(
+                    f"study metric receipt {key} does not match trusted state"
+                )
+        if data.get("success_contract_passed") is not True:
+            raise OperatorGovernanceError("study metric receipt did not pass the success contract")
+        return dict(data)
+
+    def register_guard_metric_receipt(
+        self,
+        study_id: str,
+        *,
+        receipt_path: Path | str,
+        kind: str,
+    ) -> StudyMetricRecord:
+        """Register a benchmark-Guard receipt; this method is intentionally not a CLI action."""
+
+        if kind not in {"BASELINE", "CANDIDATE"}:
+            raise OperatorGovernanceError("study metric kind must be BASELINE or CANDIDATE")
+        study = self.store.read_study(study_id)
+        self._validated_study_memory_snapshot(study)
+        self._validated_study_manifest_snapshot(study)
+        source = Path(receipt_path)
+        if not source.is_absolute():
+            source = self.project_root / source
+        source = source.resolve()
+        if not source.is_file():
+            raise OperatorGovernanceError(f"study metric receipt does not exist: {source}")
+        content = source.read_bytes()
+        data = self._load_study_metric_receipt(content)
+        line_id = study.line_id
+        subject_sha = study.base_subject_sha
+        grant_id: str | None = None
+        budget_digest: str | None = None
+        wave: int | None = None
+        success_contract_passed: bool | None = None
+        if kind == "BASELINE":
+            if self.store.read_experiment_lines(study.study_id):
+                raise OperatorGovernanceError("H0 metric must be registered before line initialization")
+            self._baseline_metric_receipt(data, study=study)
+        else:
+            line = self.store.read_experiment_line(study.line_id)
+            integrations = self.store.read_integrations(line.line_id)
+            if (
+                not integrations
+                or integrations[-1].kind != "CANDIDATE"
+                or integrations[-1].result_head_sha != line.head_sha
+            ):
+                raise OperatorGovernanceError(
+                    "candidate metric requires the current candidate integration"
+                )
+            grants = self.store.read_budget_grants(study.study_id)
+            if not grants:
+                raise OperatorGovernanceError("candidate metric requires a study budget grant")
+            grant = grants[-1]
+            self._study_metric_receipt(data, study=study, line=line, grant=grant)
+            line_id = line.line_id
+            subject_sha = line.head_sha
+            grant_id = grant.grant_id
+            budget_digest = grant.grant_digest
+            wave = grant.wave
+            success_contract_passed = True
+        artifact_path, artifact_sha = self.store.write_study_metric_artifact(
+            content,
+            filename=source.name,
+        )
+        metric = StudyMetricRecord(
+            metric_id=self.store.next_id("study-metric"),
+            study_id=study.study_id,
+            line_id=line_id,
+            kind=kind,
+            subject_sha=subject_sha,
+            manifest_digest=study.manifest_digest,
+            success_contract_digest=digest_payload(study.success_contract),
+            producer="benchmark_guard",
+            artifact_path=str(artifact_path),
+            artifact_sha256=artifact_sha,
+            receipt_digest=str(data["receipt_digest"]),
+            budget_grant_id=grant_id,
+            budget_digest=budget_digest,
+            wave=wave,
+            success_contract_passed=success_contract_passed,
+        )
+        self.store.write_study_metric(metric)
+        return metric
+
+    def _registered_metric_receipt(
+        self,
+        metric_id: str,
+    ) -> tuple[StudyMetricRecord, dict[str, Any]]:
+        metric = self.store.read_study_metric(metric_id)
+        data = self._load_study_metric_receipt(Path(metric.artifact_path).read_bytes())
+        if data.get("receipt_digest") != metric.receipt_digest:
+            raise OperatorGovernanceError(
+                "registered study metric record disagrees with its artifact"
+            )
+        return metric, data
+
+    def create_study(
+        self,
+        *,
+        study_id: str,
+        purpose: str,
+        manifest_path: Path | str,
+        success_contract: Mapping[str, Any],
+        base_ref: str | None = None,
+        harness_ref: str | None = None,
+        line_id: str | None = None,
+        cohort_id: str | None = None,
+        primary_model: str = "gpt-5.4-mini",
+        target_checkpoint_name: str = "H_bug",
+        memory_root: Path | str | None = None,
+    ) -> StudyRecord:
+        policy = self.policy()
+        if not policy.trusted:
+            raise OperatorGovernanceError("a study requires a trusted machine constitution")
+        experiment_governance = policy.data.get("experiment_governance") or {}
+        if not experiment_governance:
+            raise OperatorGovernanceError("trusted machine constitution lacks experiment governance")
+        trusted_models = {
+            str(item)
+            for item in (experiment_governance.get("budgets") or {}).get(
+                "allowed_primary_models", ()
+            )
+        }
+        if primary_model not in self.config.operator.budgets.allowed_primary_models:
+            raise OperatorGovernanceError(
+                f"study model is outside configured allowlist: {primary_model}"
+            )
+        if trusted_models and primary_model not in trusted_models:
+            raise OperatorGovernanceError(
+                f"study model is outside trusted constitution allowlist: {primary_model}"
+            )
+        manifest = Path(manifest_path)
+        if not manifest.is_absolute():
+            manifest = self.project_root / manifest
+        manifest = manifest.resolve()
+        if not manifest.is_file():
+            raise OperatorGovernanceError(f"study manifest does not exist: {manifest}")
+        resolved_base_ref = base_ref or self.trusted_ref or "HEAD"
+        base_sha = rev_parse(self.project_root, resolved_base_ref)
+        harness_sha = rev_parse(self.project_root, harness_ref or resolved_base_ref)
+        if harness_sha != base_sha:
+            raise OperatorGovernanceError(
+                "experiment line H0 and harness ref must resolve to the same commit"
+            )
+        identifier = safe_id(str(study_id))
+        designated_line = safe_id(str(line_id or identifier))
+        cohort = safe_id(str(cohort_id or identifier))
+        digests = self._experiment_digests_at_subject(
+            study_id=identifier,
+            subject_sha=base_sha,
+            primary_model=primary_model,
+        )
+        memory = Path(memory_root) if memory_root is not None else (
+            self.project_root / ".autobugfix-memory/active"
+        )
+        if not memory.is_absolute():
+            memory = self.project_root / memory
+        memory = memory.resolve()
+        memory_snapshot: Path | None = None
+        manifest_snapshot: Path | None = None
+        try:
+            memory_snapshot = self._materialize_study_memory_snapshot(
+                study_id=identifier,
+                source=memory,
+            )
+            manifest_snapshot = self._materialize_study_manifest_snapshot(
+                study_id=identifier,
+                source=manifest,
+            )
+            memory_digest = _path_digest(memory_snapshot)
+            cohort_fields = {
+                "base_subject_sha": base_sha,
+                "harness_sha": harness_sha,
+                "policy_digest": digest_payload(policy.data),
+                "primary_model": primary_model,
+                "role_config_digest": digests["role_config_digest"],
+                "base_config_digest": digests["config_digest"],
+                "base_model_digest": digests["model_digest"],
+                "base_skills_digest": digests["skills_digest"],
+                "memory_digest": memory_digest,
+            }
+            for existing in self.store.read_studies():
+                if existing.cohort_id != cohort:
+                    continue
+                if existing.target_checkpoint_name == target_checkpoint_name:
+                    raise OperatorGovernanceError(
+                        "experiment cohort already has a study for "
+                        f"{target_checkpoint_name}"
+                    )
+                for field, value in cohort_fields.items():
+                    if getattr(existing, field) != value:
+                        raise OperatorGovernanceError(
+                            f"experiment cohort frozen H0 mismatch: {field}"
+                        )
+            study = StudyRecord(
+                study_id=identifier,
+                purpose=purpose,
+                base_checkpoint_id=f"{identifier}-H0",
+                base_subject_sha=base_sha,
+                harness_sha=harness_sha,
+                policy_digest=digest_payload(policy.data),
+                line_id=designated_line,
+                primary_model=primary_model,
+                target_checkpoint_name=target_checkpoint_name,
+                manifest_digest=_path_digest(manifest_snapshot),
+                role_config_digest=digests["role_config_digest"],
+                memory_digest=memory_digest,
+                success_contract=dict(success_contract),
+                cohort_id=cohort,
+                base_config_digest=digests["config_digest"],
+                base_model_digest=digests["model_digest"],
+                base_skills_digest=digests["skills_digest"],
+                memory_snapshot_path=str(memory_snapshot),
+                manifest_snapshot_path=str(manifest_snapshot),
+            )
+            self.store.write_study(study)
+        except Exception:
+            if manifest_snapshot is not None:
+                self._remove_release_tree(manifest_snapshot)
+            if memory_snapshot is not None:
+                self._remove_release_tree(memory_snapshot)
+            raise
+        return study
+
+    def initialize_experiment_line(
+        self,
+        study_id: str,
+        *,
+        metric_receipt_id: str,
+    ) -> dict[str, Any]:
+        study = self.store.read_study(study_id)
+        self._validated_study_memory_snapshot(study)
+        self._validated_study_manifest_snapshot(study)
+        policy = self.policy()
+        if study.policy_digest != digest_payload(policy.data):
+            raise OperatorGovernanceError("study machine constitution changed before line initialization")
+        metric_record, metric_receipt = self._registered_metric_receipt(metric_receipt_id)
+        if (
+            metric_record.kind != "BASELINE"
+            or metric_record.study_id != study.study_id
+            or metric_record.line_id != study.line_id
+            or metric_record.subject_sha != study.base_subject_sha
+            or metric_record.manifest_digest != study.manifest_digest
+            or metric_record.success_contract_digest != digest_payload(study.success_contract)
+            or metric_record.producer != "benchmark_guard"
+        ):
+            raise OperatorGovernanceError("H0 metric authority does not match the trusted study")
+        self._baseline_metric_receipt(metric_receipt, study=study)
+        branch = self.config.operator.experiment_lines.branch_template.format(
+            study_id=study.study_id
+        )
+        check_ref = run_git(self.project_root, ["check-ref-format", "--branch", branch], check=False)
+        if check_ref.returncode != 0:
+            raise OperatorGovernanceError(f"invalid experiment line branch: {branch}")
+        protected = {str(item) for item in policy.data.get("protected_branches") or []}
+        if branch in protected:
+            raise OperatorGovernanceError(f"experiment line branch is protected: {branch}")
+        reference = f"refs/heads/{branch}"
+        if run_git(
+            self.project_root,
+            ["show-ref", "--verify", "--quiet", reference],
+            check=False,
+        ).returncode == 0:
+            raise OperatorGovernanceError(f"experiment line branch already exists: {branch}")
+        if rev_parse(self.project_root, study.base_subject_sha) != study.base_subject_sha:
+            raise OperatorGovernanceError("study H0 SHA is not canonical")
+        control_head = rev_parse(self.project_root, "HEAD")
+        tree_sha = rev_parse(self.project_root, f"{study.base_subject_sha}^{{tree}}")
+        if not all(
+            (
+                study.cohort_id,
+                study.base_config_digest,
+                study.base_model_digest,
+                study.base_skills_digest,
+            )
+        ):
+            raise OperatorGovernanceError("study lacks frozen H0 cohort digests")
+        line = ExperimentLineRecord(
+            line_id=study.line_id,
+            study_id=study.study_id,
+            branch=branch,
+            base_sha=study.base_subject_sha,
+            head_sha=study.base_subject_sha,
+            generation=0,
+            active_checkpoint_id=study.base_checkpoint_id,
+            status="OPEN",
+            remote=self.config.operator.experiment_lines.remote,
+        )
+        release = self._materialize_checkpoint_release(
+            study_id=study.study_id,
+            checkpoint_name="H0",
+            subject_sha=study.base_subject_sha,
+        )
+        active: Path | None = None
+        reference_created = False
+        try:
+            digests = self._experiment_config_digests(
+                study.primary_model,
+                subject_root=release,
+            )
+            expected_digests = {
+                "role_config_digest": study.role_config_digest,
+                "config_digest": study.base_config_digest,
+                "model_digest": study.base_model_digest,
+                "skills_digest": study.base_skills_digest,
+            }
+            for field, expected in expected_digests.items():
+                if digests[field] != expected:
+                    raise OperatorGovernanceError(
+                        f"frozen H0 {field} changed before line initialization"
+                    )
+            checkpoint = CheckpointRecord(
+                checkpoint_id=study.base_checkpoint_id,
+                study_id=study.study_id,
+                line_id=study.line_id,
+                name="H0",
+                subject_sha=study.base_subject_sha,
+                tree_sha=tree_sha,
+                harness_sha=study.harness_sha,
+                policy_digest=study.policy_digest,
+                config_digest=digests["config_digest"],
+                model_digest=digests["model_digest"],
+                skills_digest=digests["skills_digest"],
+                memory_digest=study.memory_digest,
+                manifest_digest=study.manifest_digest,
+                budget_digest=digest_payload(
+                    {"study_id": study.study_id, "state": "UNGRANTED"}
+                ),
+                metric_digest=metric_record.receipt_digest,
+                release_path=str(release),
+            )
+            run_git(
+                self.project_root,
+                ["update-ref", reference, study.base_subject_sha, "0" * 40],
+            )
+            reference_created = True
+            active = self._activate_experiment_release(study.study_id, release)
+            self.store.initialize_experiment_line(line, checkpoint)
+        except Exception:
+            if reference_created:
+                run_git(
+                    self.project_root,
+                    ["update-ref", "-d", reference, study.base_subject_sha],
+                    check=False,
+                )
+            if active is not None and active.is_symlink() and active.resolve() == release:
+                active.unlink()
+            self._remove_release_tree(release)
+            raise
+        if rev_parse(self.project_root, "HEAD") != control_head:
+            raise OperatorGovernanceError("experiment line initialization changed the control checkout")
+        return {
+            "study": self._study_projection(study),
+            "line": line.to_dict(),
+            "checkpoint": checkpoint.to_dict(),
+        }
+
+    def list_studies(self) -> list[dict[str, Any]]:
+        return [self._study_projection(study) for study in self.store.read_studies()]
+
+    def study_status(self, study_id: str) -> dict[str, Any]:
+        study = self.store.read_study(study_id)
+        lines = self.store.read_experiment_lines(study.study_id)
+        checkpoints = self.store.read_checkpoints(study.study_id) if lines else []
+        grants = self.store.read_budget_grants(study.study_id)
+        return {
+            "study": self._study_projection(study),
+            "lines": [line.to_dict() for line in lines],
+            "checkpoints": [checkpoint.to_dict() for checkpoint in checkpoints],
+            "metrics": [
+                self._metric_projection(metric)
+                for metric in self.store.read_study_metrics(study.study_id)
+            ],
+            "budget_grants": [grant.to_dict() for grant in grants],
+        }
+
+    def list_experiment_lines(self, study_id: str | None = None) -> list[dict[str, Any]]:
+        return [
+            line.to_dict()
+            for line in self.store.read_experiment_lines(study_id)
+        ]
+
+    def experiment_line_status(self, line_id: str) -> dict[str, Any]:
+        line = self.store.read_experiment_line(line_id)
+        return {
+            "line": line.to_dict(),
+            "study": self._study_projection(self.store.read_study(line.study_id)),
+            "checkpoints": [
+                checkpoint.to_dict()
+                for checkpoint in self.store.read_checkpoints(line.study_id)
+            ],
+            "integrations": [
+                integration.to_dict()
+                for integration in self.store.read_integrations(line.line_id)
+            ],
+            "metrics": [
+                self._metric_projection(metric)
+                for metric in self.store.read_study_metrics(line.study_id)
+            ],
+        }
+
+    def create_budget_request(
+        self,
+        study_id: str,
+        *,
+        wave: int,
+        case_ids: Iterable[str],
+        reason: str,
+        requester: str | None = None,
+        model: str | None = None,
+        max_calls: int | None = None,
+        max_writer_attempts: int | None = None,
+        max_operator_revisions: int | None = None,
+        wall_time_seconds: int | None = None,
+        case_concurrency: int | None = None,
+    ) -> BudgetRequestRecord:
+        study = self.store.read_study(study_id)
+        line = self.store.read_experiment_line(study.line_id)
+        if line.status != "OPEN":
+            raise OperatorGovernanceError("budget cannot be requested for a closed experiment line")
+        if study.policy_digest != digest_payload(self.policy().data):
+            raise OperatorGovernanceError("study machine constitution is stale")
+        grants = self.store.read_budget_grants(study.study_id)
+        expected_wave = 3 if not grants else {3: 8, 8: 16}.get(grants[-1].wave)
+        if expected_wave is None:
+            raise OperatorGovernanceError("study already has its final wave-16 budget")
+        if wave != expected_wave:
+            raise OperatorGovernanceError(
+                f"budget wave must advance to {expected_wave}, got {wave}"
+            )
+        selected_cases = tuple(dict.fromkeys(str(item) for item in case_ids))
+        if grants and not set(grants[-1].case_ids).issubset(selected_cases):
+            raise OperatorGovernanceError("expanded budget must retain every previously granted case")
+        selected_model = model or study.primary_model
+        if selected_model != study.primary_model:
+            raise OperatorGovernanceError("budget model must match the frozen study model")
+        budget = self.config.operator.budgets
+        if selected_model not in budget.allowed_primary_models:
+            raise OperatorGovernanceError("budget model is outside configured allowlist")
+        requested_calls = max_calls if max_calls is not None else budget.max_calls_by_wave[wave]
+        requested_attempts = (
+            max_writer_attempts
+            if max_writer_attempts is not None
+            else budget.default_max_writer_attempts
+        )
+        requested_revisions = (
+            max_operator_revisions
+            if max_operator_revisions is not None
+            else budget.default_max_operator_revisions
+        )
+        requested_wall_time = (
+            wall_time_seconds
+            if wall_time_seconds is not None
+            else budget.default_wall_time_seconds
+        )
+        requested_concurrency = (
+            case_concurrency
+            if case_concurrency is not None
+            else budget.default_case_concurrency
+        )
+        ceilings = (
+            (requested_calls, budget.max_calls_by_wave[wave], "max_calls"),
+            (requested_attempts, budget.default_max_writer_attempts, "max_writer_attempts"),
+            (
+                requested_revisions,
+                budget.default_max_operator_revisions,
+                "max_operator_revisions",
+            ),
+            (requested_wall_time, budget.default_wall_time_seconds, "wall_time_seconds"),
+            (requested_concurrency, budget.max_case_concurrency, "case_concurrency"),
+        )
+        for value, ceiling, field in ceilings:
+            if value < 1 or value > ceiling:
+                raise OperatorGovernanceError(
+                    f"budget {field} must be between 1 and configured ceiling {ceiling}"
+                )
+        request = BudgetRequestRecord(
+            budget_request_id=self.store.next_id("budget-request"),
+            study_id=study.study_id,
+            wave=wave,
+            case_ids=selected_cases,
+            model=selected_model,
+            max_calls=requested_calls,
+            max_writer_attempts=requested_attempts,
+            max_operator_revisions=requested_revisions,
+            wall_time_seconds=requested_wall_time,
+            case_concurrency=requested_concurrency,
+            reason=reason,
+            requester=self._actor(requester),
+            previous_grant_id=grants[-1].grant_id if grants else None,
+        )
+        self.store.write_budget_request(request)
+        return request
+
+    def approve_budget_grant(
+        self,
+        budget_request_id: str,
+        *,
+        approver: str,
+        confirm_request_digest: str,
+        approval_kind: str = "interactive",
+    ) -> BudgetGrantRecord:
+        request = self.store.read_budget_request(budget_request_id)
+        if confirm_request_digest != request.budget_request_digest:
+            raise OperatorGovernanceError("budget approval does not confirm the request digest")
+        if approval_kind != "interactive":
+            raise OperatorGovernanceError(
+                "budget grants currently accept only digest-bound interactive human attestation"
+            )
+        study = self.store.read_study(request.study_id)
+        if study.policy_digest != digest_payload(self.policy().data):
+            raise OperatorGovernanceError("study machine constitution is stale")
+        requests = [
+            item
+            for item in self.store.read_budget_requests(study.study_id)
+            if item.wave == request.wave
+        ]
+        if not requests or requests[-1].budget_request_id != request.budget_request_id:
+            raise OperatorGovernanceError("budget request was superseded by a newer request")
+        grants = self.store.read_budget_grants(study.study_id)
+        expected_wave = 3 if not grants else {3: 8, 8: 16}.get(grants[-1].wave)
+        if request.wave != expected_wave:
+            raise OperatorGovernanceError("budget request is stale for the current study wave")
+        if request.previous_grant_id != (grants[-1].grant_id if grants else None):
+            raise OperatorGovernanceError("budget request previous grant binding is stale")
+        if grants and not set(grants[-1].case_ids).issubset(request.case_ids):
+            raise OperatorGovernanceError("budget request dropped a previously granted case")
+        expires_at = (
+            datetime.now(UTC) + timedelta(seconds=request.wall_time_seconds)
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        grant = BudgetGrantRecord(
+            grant_id=self.store.next_id("budget-grant"),
+            budget_request_id=request.budget_request_id,
+            budget_request_digest=request.budget_request_digest,
+            study_id=request.study_id,
+            wave=request.wave,
+            case_ids=request.case_ids,
+            model=request.model,
+            max_calls=request.max_calls,
+            max_writer_attempts=request.max_writer_attempts,
+            max_operator_revisions=request.max_operator_revisions,
+            wall_time_seconds=request.wall_time_seconds,
+            case_concurrency=request.case_concurrency,
+            approved_by=approver,
+            approval_kind=approval_kind,
+            previous_grant_id=request.previous_grant_id,
+            expires_at=expires_at,
+        )
+        self.store.write_budget_grant(grant)
+        return grant
+
+    def reserve_usage(
+        self,
+        grant_id: str,
+        *,
+        call_key: str,
+        execution_id: str,
+        role: str,
+        model: str,
+        case_id: str | None = None,
+        attempt: int = 0,
+        revision: int = 0,
+    ) -> UsageEntryRecord:
+        grant = self.store.read_budget_grant(grant_id)
+        entry = UsageEntryRecord(
+            usage_id=self.store.next_id("usage"),
+            grant_id=grant.grant_id,
+            study_id=grant.study_id,
+            call_key=call_key,
+            execution_id=execution_id,
+            case_id=case_id,
+            role=role,
+            model=model,
+            status="RESERVED",
+            attempt=attempt,
+            revision=revision,
+        )
+        return self.store.reserve_usage_entry(entry)
+
+    def _retain_usage_log(self, entry: UsageEntryRecord, source: Path | None, name: str) -> str | None:
+        if source is None or not source.is_file():
+            return None
+        raw = source.read_bytes()
+        sha = hashlib.sha256(raw).hexdigest()
+        target = (
+            self.store.artifact_root
+            / "studies"
+            / entry.study_id
+            / "usage"
+            / entry.usage_id
+            / f"{sha}-{name}"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(raw)
+        temporary.replace(target)
+        return str(target)
+
+    def finalize_usage(
+        self,
+        usage_id: str,
+        *,
+        status: str,
+        raw_log_path: Path | None = None,
+        stderr_log_path: Path | None = None,
+        result_id: str | None = None,
+        input_tokens: int | None = None,
+        cached_input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        duration_seconds: float | None = None,
+        error: str | None = None,
+    ) -> UsageEntryRecord:
+        if status not in {"COMPLETED", "INDETERMINATE"}:
+            raise OperatorGovernanceError("usage finalization status must be terminal")
+        current = self.store.read_usage_entry(usage_id)
+        updated = replace(
+            current,
+            status=status,
+            raw_log_path=self._retain_usage_log(current, raw_log_path, "raw.jsonl"),
+            stderr_log_path=self._retain_usage_log(current, stderr_log_path, "stderr.log"),
+            result_id=result_id,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            output_tokens=output_tokens,
+            duration_seconds=duration_seconds,
+            error=error,
+            finished_at=utc_now(),
+        )
+        return self.store.finalize_usage_entry(updated)
+
+    def budget_status(self, study_id: str) -> dict[str, Any]:
+        requests = self.store.read_budget_requests(study_id)
+        grants = self.store.read_budget_grants(study_id)
+        usage = [
+            entry
+            for grant in grants
+            for entry in self.store.read_usage_entries(grant.grant_id)
+        ]
+        return {
+            "study_id": study_id,
+            "requests": [request.to_dict() for request in requests],
+            "grants": [grant.to_dict() for grant in grants],
+            "usage": [entry.to_dict() for entry in usage],
+            "consumed_calls": len(usage),
+            "running_calls": sum(entry.status == "RESERVED" for entry in usage),
+        }
+
+    def metered_codex_backend(
+        self,
+        *,
+        grant_id: str,
+        call_key: str,
+        execution_id: str,
+        case_id: str | None = None,
+        attempt: int = 0,
+        revision: int = 0,
+        backend: CodexBackend | None = None,
+    ) -> MeteredCodexBackend:
+        return MeteredCodexBackend(
+            backend or self.backend,
+            self,
+            StudyCallContext(
+                grant_id=grant_id,
+                call_key=call_key,
+                execution_id=execution_id,
+                case_id=case_id,
+                attempt=attempt,
+                revision=revision,
+            ),
+        )
+
+    def create_checkpoint(
+        self,
+        line_id: str,
+        *,
+        metric_receipt_id: str,
+        checkpoint_name: str | None = None,
+    ) -> dict[str, Any]:
+        with self.store.experiment_line_lease(line_id):
+            line = self.store.read_experiment_line(line_id)
+            study = self.store.read_study(line.study_id)
+            self._validated_study_memory_snapshot(study)
+            self._validated_study_manifest_snapshot(study)
+            name = checkpoint_name or study.target_checkpoint_name
+            if name != study.target_checkpoint_name:
+                raise OperatorGovernanceError(
+                    f"study target checkpoint is {study.target_checkpoint_name}, not {name}"
+                )
+            if line.status != "OPEN":
+                raise OperatorGovernanceError("checkpoint requires an open experiment line")
+            if study.policy_digest != digest_payload(self.policy().data):
+                raise OperatorGovernanceError("study machine constitution is stale")
+            checkpoints = self.store.read_checkpoints(study.study_id)
+            if any(item.name == name for item in checkpoints):
+                raise OperatorGovernanceError(f"checkpoint already exists: {name}")
+            h0 = next((item for item in checkpoints if item.name == "H0"), None)
+            if h0 is None or h0.subject_sha != study.base_subject_sha:
+                raise OperatorGovernanceError("study has no valid H0 parent checkpoint")
+            integrations = self.store.read_integrations(line.line_id)
+            if (
+                not integrations
+                or integrations[-1].kind != "CANDIDATE"
+                or integrations[-1].result_head_sha != line.head_sha
+            ):
+                raise OperatorGovernanceError(
+                    "checkpoint requires the current line head to come from a candidate integration"
+                )
+            grants = self.store.read_budget_grants(study.study_id)
+            if not grants:
+                raise OperatorGovernanceError("checkpoint requires a completed budget wave")
+            grant = grants[-1]
+            usage = [
+                entry
+                for item in grants
+                for entry in self.store.read_usage_entries(item.grant_id)
+            ]
+            if not usage or any(entry.status == "RESERVED" for entry in usage):
+                raise OperatorGovernanceError(
+                    "checkpoint requires terminal host-observed study usage"
+                )
+            metric_record, metric_receipt = self._registered_metric_receipt(
+                metric_receipt_id
+            )
+            if (
+                metric_record.kind != "CANDIDATE"
+                or metric_record.study_id != study.study_id
+                or metric_record.line_id != line.line_id
+                or metric_record.subject_sha != line.head_sha
+                or metric_record.manifest_digest != study.manifest_digest
+                or metric_record.success_contract_digest
+                != digest_payload(study.success_contract)
+                or metric_record.budget_grant_id != grant.grant_id
+                or metric_record.budget_digest != grant.grant_digest
+                or metric_record.wave != grant.wave
+                or metric_record.success_contract_passed is not True
+                or metric_record.producer != "benchmark_guard"
+            ):
+                raise OperatorGovernanceError(
+                    "study metric authority does not match the current line and grant"
+                )
+            self._study_metric_receipt(
+                metric_receipt,
+                study=study,
+                line=line,
+                grant=grant,
+            )
+            release = self._materialize_checkpoint_release(
+                study_id=study.study_id,
+                checkpoint_name=name,
+                subject_sha=line.head_sha,
+            )
+            active = (
+                self.config.operator.experiment_lines.active_release_root.resolve()
+                / study.study_id
+            )
+            previous_release = active.resolve() if active.is_symlink() else None
+            release_activated = False
+            try:
+                digests = self._experiment_config_digests(
+                    study.primary_model,
+                    subject_root=release,
+                )
+                checkpoint = CheckpointRecord(
+                    checkpoint_id=f"{study.study_id}-{name}",
+                    study_id=study.study_id,
+                    line_id=line.line_id,
+                    name=name,
+                    subject_sha=line.head_sha,
+                    tree_sha=rev_parse(self.project_root, f"{line.head_sha}^{{tree}}"),
+                    harness_sha=study.harness_sha,
+                    policy_digest=study.policy_digest,
+                    config_digest=digests["config_digest"],
+                    model_digest=digests["model_digest"],
+                    skills_digest=digests["skills_digest"],
+                    memory_digest=study.memory_digest,
+                    manifest_digest=study.manifest_digest,
+                    budget_digest=grant.grant_digest,
+                    metric_digest=metric_record.receipt_digest,
+                    release_path=str(release),
+                    parent_checkpoint_id=h0.checkpoint_id,
+                    parent_subject_sha=h0.subject_sha,
+                )
+                updated_line = replace(
+                    line,
+                    generation=line.generation + 1,
+                    active_checkpoint_id=checkpoint.checkpoint_id,
+                )
+                self._activate_experiment_release(study.study_id, release)
+                release_activated = True
+                self.store.write_checkpoint_and_activate(
+                    updated_line,
+                    checkpoint,
+                    expected_head_sha=line.head_sha,
+                    expected_generation=line.generation,
+                )
+            except Exception:
+                if release_activated:
+                    if previous_release is not None:
+                        self._activate_experiment_release(study.study_id, previous_release)
+                    elif active.is_symlink():
+                        active.unlink()
+                self._remove_release_tree(release)
+                raise
+            return {
+                "checkpoint": checkpoint.to_dict(),
+                "line": updated_line.to_dict(),
+                "active_release": str(active),
+            }
+
+    def rollback_experiment_line(
+        self,
+        line_id: str,
+        checkpoint_id: str,
+        *,
+        reason: str,
+        push_remote: bool = False,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        if not reason.strip():
+            raise OperatorGovernanceError("rollback reason is required")
+        with self.store.experiment_line_lease(line_id):
+            line = self.store.read_experiment_line(line_id)
+            checkpoint = self.store.read_checkpoint(checkpoint_id)
+            if checkpoint.line_id != line.line_id or checkpoint.study_id != line.study_id:
+                raise OperatorGovernanceError("rollback checkpoint belongs to another line")
+            if line.status != "OPEN":
+                raise OperatorGovernanceError("rollback requires an open experiment line")
+            current_tree = rev_parse(self.project_root, f"{line.head_sha}^{{tree}}")
+            if current_tree == checkpoint.tree_sha:
+                raise OperatorGovernanceError("experiment line already has the checkpoint tree")
+            release = Path(checkpoint.release_path).resolve()
+            expected_release_root = (
+                self.config.operator.experiment_lines.checkpoint_root
+                / line.study_id
+            ).resolve()
+            try:
+                release.relative_to(expected_release_root)
+            except ValueError as exc:
+                raise OperatorGovernanceError(
+                    "rollback checkpoint release escaped the trusted checkpoint root"
+                ) from exc
+            if not release.is_dir():
+                raise OperatorGovernanceError("rollback checkpoint release is missing")
+            study = self.store.read_study(line.study_id)
+            policy = self.policy()
+            if study.policy_digest != digest_payload(policy.data):
+                raise OperatorGovernanceError("study machine constitution is stale")
+            integrations = self.store.read_integrations(line.line_id)
+            request_id = next(
+                (
+                    item.request_id
+                    for item in reversed(integrations)
+                    if item.request_id is not None
+                ),
+                None,
+            )
+            if request_id is None:
+                raise OperatorGovernanceError("rollback has no request-bound integration evidence")
+            grants = self.store.read_budget_grants(study.study_id)
+            if not grants:
+                raise OperatorGovernanceError("rollback has no study budget evidence")
+            grant = grants[-1]
+            if any(
+                entry.status == "RESERVED"
+                for item in grants
+                for entry in self.store.read_usage_entries(item.grant_id)
+            ):
+                raise OperatorGovernanceError("rollback cannot run with active study calls")
+            rollback_id = self.store.next_id("rollback")
+            worktree = (
+                self.config.operator.experiment_lines.root
+                / line.line_id
+                / rollback_id
+            ).resolve()
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+            artifact_ids: list[str] = []
+            try:
+                run_git(
+                    self.project_root,
+                    ["worktree", "add", "--detach", str(worktree), line.head_sha],
+                )
+                run_git(
+                    worktree,
+                    [
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "restore",
+                        f"--source={checkpoint.subject_sha}",
+                        "--staged",
+                        "--worktree",
+                        "--",
+                        ".",
+                    ],
+                )
+                restored_tree = run_git(worktree, ["write-tree"]).stdout.strip()
+                if restored_tree != checkpoint.tree_sha:
+                    raise OperatorGovernanceError(
+                        "rollback staging tree does not match checkpoint tree"
+                    )
+                if _worktree_content_digest(worktree) != _worktree_content_digest(release):
+                    raise OperatorGovernanceError(
+                        "rollback checkpoint release content does not match its Git tree"
+                    )
+                if run_git(worktree, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
+                    raise OperatorGovernanceError("rollback produced no tree change")
+                commit_message = (
+                    f"Restore experiment line to {checkpoint.name}\n\n"
+                    f"Autobugfix-Rollback: {rollback_id}\n"
+                    f"Autobugfix-Checkpoint: {checkpoint.checkpoint_id}\n"
+                    f"Reason: {reason}"
+                )
+                run_git(
+                    worktree,
+                    [
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "-c",
+                        "user.name=Autobugfix Guard",
+                        "-c",
+                        "user.email=autobugfix-guard@localhost",
+                        "commit",
+                        "-m",
+                        commit_message,
+                    ],
+                )
+                result_head = rev_parse(worktree, "HEAD")
+                result_tree = rev_parse(worktree, "HEAD^{tree}")
+                if result_tree != checkpoint.tree_sha:
+                    raise OperatorGovernanceError(
+                        "rollback commit tree does not match checkpoint tree"
+                    )
+                profile = (policy.data.get("validation_profiles") or {}).get("full")
+                if not isinstance(profile, dict) or not profile.get("commands"):
+                    raise OperatorGovernanceError("trusted full validation profile is missing")
+                results = run_command_specs(
+                    worktree,
+                    self.store.artifact_root
+                    / request_id
+                    / "rollbacks"
+                    / rollback_id,
+                    list(profile["commands"]),
+                    values={
+                        "base_sha": line.head_sha,
+                        "head_sha": result_head,
+                        "request_id": request_id,
+                        "candidate_root": str(worktree),
+                    },
+                    default_timeout_seconds=int(profile.get("timeout_seconds", 300)),
+                    name_prefix="rollback-full",
+                    process_sandbox=self.config.operator.verification.process_sandbox,
+                    require_process_sandbox=self.config.operator.verification.require_process_sandbox,
+                    network_access=self.config.operator.verification.network_access,
+                    hidden_roots=(self.store.root, self.store.artifact_root),
+                    read_only_binds=self._runtime_binds(worktree),
+                )
+                for item in results:
+                    for stream in ("stdout_path", "stderr_path"):
+                        reference = self.store.register_artifact_file(
+                            request_id,
+                            producer="rollback_guard",
+                            trust_class="authoritative",
+                            kind="rollback-check-log",
+                            path=Path(item[stream]),
+                        )
+                        artifact_ids.append(reference.artifact_id)
+                failed = [item for item in results if not item["passed"]]
+                if failed:
+                    raise OperatorGovernanceError(
+                        "trusted rollback validation failed: "
+                        + ", ".join(str(item["name"]) for item in failed)
+                    )
+                snapshot = collect_candidate_snapshot(worktree, line.head_sha)
+                updated_line = replace(
+                    line,
+                    head_sha=result_head,
+                    generation=line.generation + 1,
+                    active_checkpoint_id=checkpoint.checkpoint_id,
+                )
+                integration = IntegrationRecord(
+                    integration_id=rollback_id,
+                    study_id=study.study_id,
+                    line_id=line.line_id,
+                    kind="ROLLBACK",
+                    expected_head_sha=line.head_sha,
+                    expected_generation=line.generation,
+                    candidate_head_sha=checkpoint.subject_sha,
+                    result_head_sha=result_head,
+                    result_tree_sha=result_tree,
+                    patch_digest=snapshot.patch_digest,
+                    policy_digest=digest_payload(policy.data),
+                    actor=self._actor(actor),
+                    request_id=request_id,
+                    check_run_id=integrations[-1].check_run_id,
+                    budget_grant_id=grant.grant_id,
+                    budget_digest=grant.grant_digest,
+                    artifact_ids=tuple(artifact_ids),
+                )
+                active = (
+                    self.config.operator.experiment_lines.active_release_root.resolve()
+                    / study.study_id
+                )
+                previous_release = active.resolve() if active.is_symlink() else None
+                self._activate_experiment_release(study.study_id, release)
+                reference = f"refs/heads/{line.branch}"
+                reference_updated = False
+                try:
+                    run_git(
+                        self.project_root,
+                        ["update-ref", reference, result_head, line.head_sha],
+                    )
+                    reference_updated = True
+                    self.store.advance_experiment_line(updated_line, integration)
+                except Exception:
+                    if reference_updated:
+                        run_git(
+                            self.project_root,
+                            ["update-ref", reference, line.head_sha, result_head],
+                            check=False,
+                        )
+                    if previous_release is not None:
+                        self._activate_experiment_release(study.study_id, previous_release)
+                    elif active.is_symlink():
+                        active.unlink()
+                    raise
+                remote_result: dict[str, Any] = {"requested": push_remote, "pushed": False}
+                if push_remote:
+                    if not line.remote:
+                        raise OperatorGovernanceError(
+                            "remote push requested but experiment line has no configured remote"
+                        )
+                    pushed = run_git(
+                        self.project_root,
+                        ["push", "--atomic", line.remote, f"{result_head}:{reference}"],
+                        check=False,
+                        timeout_seconds=(
+                            self.config.operator.experiment_lines.update_timeout_seconds
+                        ),
+                    )
+                    remote_result = {
+                        "requested": True,
+                        "pushed": pushed.returncode == 0,
+                        "remote": line.remote,
+                        "stderr": pushed.stderr.strip(),
+                    }
+                    if pushed.returncode != 0:
+                        reconciliation = replace(
+                            integration,
+                            integration_id=self.store.next_id("reconciliation"),
+                            kind="RECONCILIATION",
+                            expected_head_sha=result_head,
+                            expected_generation=updated_line.generation,
+                        )
+                        self.store.write_integration(reconciliation)
+                        raise OperatorGovernanceError(
+                            "local rollback succeeded but remote synchronization requires reconciliation"
+                        )
+                self.store.append_event(
+                    request_id,
+                    "experiment_line_rolled_back",
+                    self._actor(actor),
+                    {
+                        "rollback_id": rollback_id,
+                        "checkpoint_id": checkpoint.checkpoint_id,
+                        "line_generation": updated_line.generation,
+                        "reason": reason,
+                    },
+                )
+                return {
+                    "integration": integration.to_dict(),
+                    "line": updated_line.to_dict(),
+                    "checkpoint": checkpoint.to_dict(),
+                    "validation": results,
+                    "active_release": str(active),
+                    "remote": remote_result,
+                }
+            finally:
+                if worktree.exists():
+                    run_git(
+                        self.project_root,
+                        ["worktree", "remove", "--force", str(worktree)],
+                        check=False,
+                    )
+
+    @_leased_request
+    def integrate_candidate(
+        self,
+        request_id: str,
+        *,
+        grant_id: str,
+        push_remote: bool = False,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        projection = self.projection(request_id)
+        self.guard.require_phase(projection.state, "VERIFIED")
+        self.guard.require_no_active_run(
+            projection.active_writer_run_id,
+            projection.active_check_run_id,
+        )
+        request, scope_version = self._effective_request(request_id)
+        if not request.experiment_line_id:
+            raise OperatorGovernanceError("candidate integration requires a line-bound request")
+        workspace = Path(self.store.read_workspace(request_id)["path"])
+        if run_git(workspace, ["status", "--porcelain"]).stdout.strip():
+            raise OperatorGovernanceError("candidate integration requires a clean worktree")
+        snapshot = self._snapshot(request_id, request)
+        if snapshot.patch_digest != projection.patch_digest or snapshot.head_sha != projection.head_sha:
+            self.store.append_event(
+                request_id,
+                "request_reopened",
+                "trusted-guard",
+                {"reason": "patch_changed_before_integration"},
+            )
+            raise OperatorGovernanceError(
+                "candidate changed after verification; request returned to ACTIVE"
+            )
+        full_checks = [
+            check
+            for check in self.store.read_check_runs(request_id)
+            if check.mode == "full" and check.status == "PASSED"
+        ]
+        if not full_checks:
+            raise OperatorGovernanceError("candidate integration requires a passing full CheckRun")
+        check = full_checks[-1]
+        if check.head_sha != snapshot.head_sha or check.patch_digest != snapshot.patch_digest:
+            raise OperatorGovernanceError("latest full CheckRun is stale for candidate integration")
+        validation = self.store.read_validation(request_id, check.check_id)
+        if request.performance_baseline and not (validation.get("regression") or {}).get("ok"):
+            raise OperatorGovernanceError("candidate integration lacks a passing experiment receipt")
+        grant = self.store.read_budget_grant(grant_id)
+        if (
+            request.budget_grant_id != grant.grant_id
+            or request.budget_grant_digest != grant.grant_digest
+        ):
+            raise OperatorGovernanceError(
+                "candidate integration grant does not match the frozen request budget"
+            )
+        line = self.store.read_experiment_line(request.experiment_line_id)
+        study = self.store.read_study(line.study_id)
+        self._validated_study_memory_snapshot(study)
+        self._validated_study_manifest_snapshot(study)
+        grants = self.store.read_budget_grants(study.study_id)
+        if not grants or grants[-1].grant_id != grant.grant_id:
+            raise OperatorGovernanceError("candidate integration requires the current study budget grant")
+        if grant.study_id != study.study_id or grant.model != study.primary_model:
+            raise OperatorGovernanceError("candidate integration budget belongs to another study")
+        if is_expired(grant.expires_at):
+            raise OperatorGovernanceError("candidate integration budget grant has expired")
+        usage = [
+            entry
+            for item in grants
+            for entry in self.store.read_usage_entries(item.grant_id)
+        ]
+        if not usage:
+            raise OperatorGovernanceError("candidate integration requires host-observed study usage")
+        if any(entry.status == "RESERVED" for entry in usage):
+            raise OperatorGovernanceError("candidate integration has running study SDK calls")
+        if line.status != "OPEN":
+            raise OperatorGovernanceError("candidate integration line is closed")
+        if (
+            request.base_sha != line.head_sha
+            or request.experiment_line_generation != line.generation
+        ):
+            raise OperatorGovernanceError("candidate integration request is stale for the line")
+        line_reference = f"refs/heads/{line.branch}"
+        if rev_parse(self.project_root, line_reference) != line.head_sha:
+            raise OperatorGovernanceError("experiment line Git ref disagrees with authority store")
+        policy = self.policy()
+        if study.policy_digest != digest_payload(policy.data):
+            raise OperatorGovernanceError("study machine constitution is stale")
+        integration_id = self.store.next_id("integration")
+        integration_root = (
+            self.config.operator.experiment_lines.root
+            / line.line_id
+            / integration_id
+        ).resolve()
+        integration_root.parent.mkdir(parents=True, exist_ok=True)
+        artifact_ids: list[str] = []
+        result_head: str | None = None
+        result_tree: str | None = None
+        decision: PolicyDecision | None = None
+        results: list[dict[str, Any]] = []
+        with self.store.experiment_line_lease(line.line_id):
+            try:
+                current_line = self.store.read_experiment_line(line.line_id)
+                if (
+                    current_line.head_sha != line.head_sha
+                    or current_line.generation != line.generation
+                ):
+                    raise OperatorGovernanceError(
+                        "experiment line advanced before integration lease acquisition"
+                    )
+                run_git(
+                    self.project_root,
+                    ["worktree", "add", "--detach", str(integration_root), line.head_sha],
+                )
+                run_git(
+                    integration_root,
+                    [
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "merge",
+                        "--no-ff",
+                        "--no-commit",
+                        snapshot.head_sha,
+                    ],
+                )
+                commit_message = (
+                    f"Integrate Autobugfix candidate {request_id}\n\n"
+                    f"Autobugfix-Integration: {integration_id}\n"
+                    f"Autobugfix-Request: {request_id}"
+                )
+                run_git(
+                    integration_root,
+                    [
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "-c",
+                        "user.name=Autobugfix Guard",
+                        "-c",
+                        "user.email=autobugfix-guard@localhost",
+                        "commit",
+                        "-m",
+                        commit_message,
+                    ],
+                )
+                result_head = rev_parse(integration_root, "HEAD")
+                result_tree = rev_parse(integration_root, "HEAD^{tree}")
+                decision = evaluate_policy(
+                    workspace,
+                    request,
+                    self.store.read_approvals(request_id),
+                    constitution=policy.data,
+                    trusted_policy_source=policy.source,
+                    trusted_policy=policy.trusted,
+                    phase="merge",
+                    allowed_signers=self.allowed_signers,
+                    scope_version=scope_version,
+                )
+                decision.required_profiles = list(check.profile_names)
+                if not decision.allowed:
+                    raise OperatorGovernanceError(
+                        f"trusted integration policy rejected candidate: {decision.violations}"
+                    )
+                merge_snapshot = collect_candidate_snapshot(
+                    integration_root,
+                    request.base_sha,
+                    [
+                        str(item)
+                        for item in policy.data.get("governance_metadata_paths") or []
+                    ],
+                )
+                if (
+                    decision.patch_digest != snapshot.patch_digest
+                    or merge_snapshot.patch_digest != snapshot.patch_digest
+                    or merge_snapshot.changed_files != snapshot.changed_files
+                ):
+                    raise OperatorGovernanceError(
+                        "integration merge changed the verified candidate patch"
+                    )
+                results = run_validation_profiles(
+                    integration_root,
+                    self.project_root,
+                    request_id,
+                    integration_id,
+                    decision,
+                    policy.data,
+                    log_root_override=(
+                        self.store.artifact_root
+                        / request_id
+                        / "integrations"
+                        / integration_id
+                    ),
+                    process_sandbox=self.config.operator.verification.process_sandbox,
+                    require_process_sandbox=self.config.operator.verification.require_process_sandbox,
+                    network_access=self.config.operator.verification.network_access,
+                    hidden_roots=(self.store.root, self.store.artifact_root),
+                    read_only_binds=self._runtime_binds(integration_root),
+                )
+                failed = [item for item in results if not item["passed"]]
+                for item in results:
+                    for stream in ("stdout_path", "stderr_path"):
+                        reference = self.store.register_artifact_file(
+                            request_id,
+                            producer="integration_guard",
+                            trust_class="authoritative",
+                            kind="integration-check-log",
+                            path=Path(item[stream]),
+                            check_run_id=check.check_id,
+                            patch_digest=snapshot.patch_digest,
+                        )
+                        artifact_ids.append(reference.artifact_id)
+                if failed:
+                    raise OperatorGovernanceError(
+                        "trusted integration validation failed: "
+                        + ", ".join(str(item["name"]) for item in failed)
+                    )
+                if run_git(integration_root, ["status", "--porcelain"]).stdout.strip():
+                    raise OperatorGovernanceError("integration validation changed the merge worktree")
+                if rev_parse(integration_root, "HEAD") != result_head:
+                    raise OperatorGovernanceError("integration HEAD changed during validation")
+                updated_line = replace(
+                    line,
+                    head_sha=result_head,
+                    generation=line.generation + 1,
+                )
+                integration = IntegrationRecord(
+                    integration_id=integration_id,
+                    study_id=study.study_id,
+                    line_id=line.line_id,
+                    kind="CANDIDATE",
+                    expected_head_sha=line.head_sha,
+                    expected_generation=line.generation,
+                    candidate_head_sha=snapshot.head_sha,
+                    result_head_sha=result_head,
+                    result_tree_sha=result_tree,
+                    patch_digest=snapshot.patch_digest,
+                    policy_digest=digest_payload(policy.data),
+                    actor=self._actor(actor),
+                    request_id=request_id,
+                    check_run_id=check.check_id,
+                    budget_grant_id=grant.grant_id,
+                    budget_digest=grant.grant_digest,
+                    artifact_ids=tuple(artifact_ids),
+                )
+                observed_candidate = self._snapshot(request_id, request)
+                if (
+                    observed_candidate.head_sha != snapshot.head_sha
+                    or observed_candidate.patch_digest != snapshot.patch_digest
+                ):
+                    raise OperatorGovernanceError(
+                        "candidate changed while trusted integration was running"
+                    )
+                run_git(
+                    self.project_root,
+                    ["update-ref", line_reference, result_head, line.head_sha],
+                )
+                try:
+                    self.store.advance_experiment_line(updated_line, integration)
+                except Exception:
+                    reverted = run_git(
+                        self.project_root,
+                        ["update-ref", line_reference, line.head_sha, result_head],
+                        check=False,
+                    )
+                    if reverted.returncode != 0:
+                        reconciliation = replace(
+                            integration,
+                            integration_id=self.store.next_id("reconciliation"),
+                            kind="RECONCILIATION",
+                        )
+                        self.store.write_integration(reconciliation)
+                    raise
+                remote_result: dict[str, Any] = {"requested": push_remote, "pushed": False}
+                if push_remote:
+                    if not line.remote:
+                        raise OperatorGovernanceError(
+                            "remote push requested but experiment line has no configured remote"
+                        )
+                    pushed = run_git(
+                        self.project_root,
+                        ["push", "--atomic", line.remote, f"{result_head}:{line_reference}"],
+                        check=False,
+                        timeout_seconds=(
+                            self.config.operator.experiment_lines.update_timeout_seconds
+                        ),
+                    )
+                    remote_result = {
+                        "requested": True,
+                        "pushed": pushed.returncode == 0,
+                        "remote": line.remote,
+                        "stderr": pushed.stderr.strip(),
+                    }
+                    if pushed.returncode != 0:
+                        reconciliation = replace(
+                            integration,
+                            integration_id=self.store.next_id("reconciliation"),
+                            kind="RECONCILIATION",
+                            expected_head_sha=result_head,
+                            expected_generation=updated_line.generation,
+                        )
+                        self.store.write_integration(reconciliation)
+                        raise OperatorGovernanceError(
+                            "local integration succeeded but remote synchronization requires reconciliation"
+                        )
+                receipt = None
+                try:
+                    receipt = self.store.write_artifact(
+                        request_id,
+                        producer="integration_guard",
+                        trust_class="authoritative",
+                        kind="integration-receipt",
+                        content=yaml.safe_dump(integration.to_dict(), sort_keys=False),
+                        filename="integration-receipt.yaml",
+                        check_run_id=check.check_id,
+                        patch_digest=snapshot.patch_digest,
+                    )
+                except Exception as exc:
+                    self.store.append_event(
+                        request_id,
+                        "integration_receipt_artifact_failed",
+                        "trusted-guard",
+                        {"integration_id": integration.integration_id, "error": str(exc)},
+                    )
+                self.store.append_event(
+                    request_id,
+                    "request_closed",
+                    self._actor(actor),
+                    {
+                        "outcome": "integrated",
+                        "integration_id": integration.integration_id,
+                        "line_id": line.line_id,
+                        "line_generation": updated_line.generation,
+                    },
+                )
+                return {
+                    "integration": integration.to_dict(),
+                    "line": updated_line.to_dict(),
+                    "receipt": receipt.to_dict() if receipt else None,
+                    "validation": results,
+                    "remote": remote_result,
+                }
+            finally:
+                if integration_root.exists():
+                    run_git(
+                        self.project_root,
+                        ["worktree", "remove", "--force", str(integration_root)],
+                        check=False,
+                    )
 
     def _actor(self, actor: str | None) -> str:
         return actor or getpass.getuser()
@@ -234,14 +2112,53 @@ class OperatorGovernanceService:
         creator: str | None = None,
         request_id: str | None = None,
         branch: str | None = None,
+        experiment_line_id: str | None = None,
+        budget_grant_id: str | None = None,
+        base_ref: str | None = None,
         expires_at: str | None = None,
     ) -> OperatorRequest:
+        if experiment_line_id and base_ref:
+            raise OperatorGovernanceError("experiment_line_id and base_ref are mutually exclusive")
         triage = self.store.read_triage(triage_id)
         policy = self.policy()
         actor = self._actor(creator)
         identifier = request_id or self.store.next_id("request")
         branch_name = branch or self.config.operator.worktrees.branch_template.format(request_id=identifier)
         profiles = tuple(dict.fromkeys(validation_profiles or self.config.operator.verification.fast_profiles))
+        line_generation: int | None = None
+        budget_grant_digest: str | None = None
+        if experiment_line_id:
+            if not budget_grant_id:
+                raise OperatorGovernanceError(
+                    "experiment line binding requires a budget grant"
+                )
+            line = self.store.read_experiment_line(experiment_line_id)
+            if line.status != "OPEN":
+                raise OperatorGovernanceError(f"experiment line is not open: {experiment_line_id}")
+            study = self.store.read_study(line.study_id)
+            self._validated_study_memory_snapshot(study)
+            self._validated_study_manifest_snapshot(study)
+            if study.policy_digest != digest_payload(policy.data):
+                raise OperatorGovernanceError("experiment line machine constitution is stale")
+            git_head = rev_parse(self.project_root, f"refs/heads/{line.branch}")
+            if git_head != line.head_sha:
+                raise OperatorGovernanceError("experiment line Git ref disagrees with authority store")
+            base_sha = line.head_sha
+            line_generation = line.generation
+            if budget_grant_id:
+                grant = self.store.read_budget_grant(budget_grant_id)
+                grants = self.store.read_budget_grants(study.study_id)
+                if grant.study_id != study.study_id:
+                    raise OperatorGovernanceError("budget grant belongs to another study")
+                if not grants or grants[-1].grant_id != grant.grant_id:
+                    raise OperatorGovernanceError("budget grant is not current for the study")
+                if is_expired(grant.expires_at):
+                    raise OperatorGovernanceError("budget grant has expired")
+                budget_grant_digest = grant.grant_digest
+        elif budget_grant_id:
+            raise OperatorGovernanceError("budget grant binding requires experiment_line_id")
+        else:
+            base_sha = rev_parse(self.project_root, base_ref or "HEAD")
         request = OperatorRequest(
             request_id=identifier,
             summary=summary,
@@ -255,9 +2172,13 @@ class OperatorGovernanceService:
             validation_profiles=profiles,
             performance_baseline=performance_baseline,
             branch=branch_name,
-            base_sha=rev_parse(self.project_root, "HEAD"),
+            base_sha=base_sha,
             creator=actor,
             constitution_digest=digest_payload(policy.data),
+            experiment_line_id=experiment_line_id,
+            experiment_line_generation=line_generation,
+            budget_grant_id=budget_grant_id,
+            budget_grant_digest=budget_grant_digest,
             expires_at=expires_at or _default_expiry(),
         )
         self.store.write_request(request)
@@ -269,6 +2190,10 @@ class OperatorGovernanceService:
                 "request_digest": request.request_digest,
                 "base_sha": request.base_sha,
                 "constitution_digest": request.constitution_digest,
+                "experiment_line_id": request.experiment_line_id,
+                "experiment_line_generation": request.experiment_line_generation,
+                "budget_grant_id": request.budget_grant_id,
+                "budget_grant_digest": request.budget_grant_digest,
             },
         )
         return request
@@ -461,11 +2386,72 @@ class OperatorGovernanceService:
             violations.append("operator request base SHA is not canonical")
         if request.branch in {str(item) for item in policy.data.get("protected_branches") or []}:
             violations.append(f"operator request branch is protected: {request.branch}")
+        if request.experiment_line_id:
+            line: ExperimentLineRecord | None = None
+            try:
+                line = self.store.read_experiment_line(request.experiment_line_id)
+            except OperatorStoreError as exc:
+                violations.append(str(exc))
+            else:
+                if line.status != "OPEN":
+                    violations.append("operator request experiment line is closed")
+                if (
+                    line.head_sha != request.base_sha
+                    or line.generation != request.experiment_line_generation
+                ):
+                    violations.append("operator request experiment line advanced after request creation")
+                else:
+                    try:
+                        line_head = rev_parse(self.project_root, f"refs/heads/{line.branch}")
+                    except GitError as exc:
+                        violations.append(str(exc))
+                    else:
+                        if line_head != line.head_sha:
+                            violations.append("experiment line Git ref disagrees with authority store")
+            if not request.budget_grant_id:
+                violations.append("line-bound operator request requires a frozen budget grant")
+            elif line is not None:
+                try:
+                    grant = self.store.read_budget_grant(request.budget_grant_id)
+                    study = self.store.read_study(line.study_id)
+                    self._validated_study_memory_snapshot(study)
+                    self._validated_study_manifest_snapshot(study)
+                    grants = self.store.read_budget_grants(study.study_id)
+                except (OperatorStoreError, OperatorGovernanceError) as exc:
+                    violations.append(str(exc))
+                else:
+                    if grant.grant_digest != request.budget_grant_digest:
+                        violations.append("operator request budget grant digest is stale")
+                    if grant.study_id != study.study_id:
+                        violations.append("operator request budget belongs to another study")
+                    if not grants or grants[-1].grant_id != grant.grant_id:
+                        violations.append("operator request budget grant is superseded")
+                    if is_expired(grant.expires_at):
+                        violations.append("operator request budget grant has expired")
         minimums = policy.data.get("operator_runtime_minimums") or {}
         if bool(minimums.get("require_process_sandbox", True)) and not self.config.operator.verification.require_process_sandbox:
             violations.append("project config cannot disable the authoritative process sandbox")
         if not bool(minimums.get("verification_network_access", False)) and self.config.operator.verification.network_access:
             violations.append("project config cannot enable network for authoritative verification")
+        experiment_governance = policy.data.get("experiment_governance") or {}
+        budget_minimums = experiment_governance.get("budgets") or {}
+        configured_budget = self.config.operator.budgets
+        required_waves = tuple(int(item) for item in budget_minimums.get("waves") or ())
+        if required_waves and configured_budget.allowed_waves != required_waves:
+            violations.append("project config cannot change trusted experiment budget waves")
+        allowed_models = {str(item) for item in budget_minimums.get("allowed_primary_models") or []}
+        if allowed_models and not set(configured_budget.allowed_primary_models).issubset(allowed_models):
+            violations.append("project config enables a model outside the trusted experiment allowlist")
+        maximum_concurrency = budget_minimums.get("max_case_concurrency")
+        if maximum_concurrency is not None and (
+            configured_budget.max_case_concurrency > int(maximum_concurrency)
+            or configured_budget.default_case_concurrency > int(maximum_concurrency)
+        ):
+            violations.append("project config exceeds trusted experiment case concurrency")
+        if str(budget_minimums.get("model_fallback", "forbidden")) == "forbidden" and (
+            configured_budget.allow_model_fallback
+        ):
+            violations.append("project config cannot enable experiment model fallback")
         baseline_layers = {
             str(item) for item in policy.data.get("baseline_required_layers") or []
         }
@@ -542,6 +2528,9 @@ class OperatorGovernanceService:
         for name, trusted_root in (
             ("state", self.store.root),
             ("artifact", self.store.artifact_root),
+            ("integration", self.config.operator.experiment_lines.root),
+            ("checkpoint", self.config.operator.experiment_lines.checkpoint_root),
+            ("active experiment release", self.config.operator.experiment_lines.active_release_root),
         ):
             try:
                 trusted_root.resolve().relative_to(candidate_root)
@@ -893,6 +2882,44 @@ class OperatorGovernanceService:
             values.append(item)
         return values
 
+    def _run_operator_role_backend(
+        self,
+        request_id: str,
+        codex_request: CodexRequest,
+        *,
+        call_key: str,
+        revision: int,
+        backend: CodexBackend,
+    ) -> CodexResult:
+        request, _ = self._effective_request(request_id)
+        if not request.experiment_line_id:
+            return backend.run(codex_request)
+        if not request.budget_grant_id:
+            raise OperatorGovernanceError(
+                "line-bound Operator role call requires a frozen budget grant"
+            )
+        line = self.store.read_experiment_line(request.experiment_line_id)
+        study = self.store.read_study(line.study_id)
+        explicit_request = replace(codex_request, model=study.primary_model)
+        metered = self.metered_codex_backend(
+            grant_id=request.budget_grant_id,
+            call_key=call_key,
+            execution_id=request_id,
+            revision=revision,
+            backend=backend,
+        )
+        return metered.run(explicit_request)
+
+    def _next_operator_role_revision(self, request_id: str, role: str) -> int:
+        request, _ = self._effective_request(request_id)
+        if not request.budget_grant_id:
+            return 1
+        usage = self.store.read_usage_entries(request.budget_grant_id)
+        return 1 + sum(
+            entry.execution_id == request_id and entry.role == role
+            for entry in usage
+        )
+
     def writer_view(self, request_id: str) -> dict[str, Any]:
         request, scope_version = self._effective_request(request_id)
         projection = self.projection(request_id)
@@ -999,7 +3026,16 @@ class OperatorGovernanceService:
             stderr_log,
             resolved_role=role,
         )
-        result = self.backend.run(codex_request)
+        result = self._run_operator_role_backend(
+            request_id,
+            codex_request,
+            call_key=f"{request_id}:supervisor:{diagnosis_id}",
+            revision=self._next_operator_role_revision(
+                request_id,
+                "operator_supervisor",
+            ),
+            backend=self.backend,
+        )
         artifact = self.store.write_artifact(
             request_id,
             producer="operator_supervisor",
@@ -1191,7 +3227,18 @@ class OperatorGovernanceService:
                 resolved_role=role,
             )
         try:
-            result = self._run_writer_backend(request_id, run_id, codex_request)
+            result = self._run_operator_role_backend(
+                request_id,
+                codex_request,
+                call_key=f"{request_id}:writer:{run_id}",
+                revision=self._next_operator_role_revision(
+                    request_id,
+                    "operator_writer",
+                ),
+                backend=CallbackCodexBackend(
+                    lambda request: self._run_writer_backend(request_id, run_id, request)
+                ),
+            )
             with self.store.request_lease(request_id):
                 current = self.store.read_writer_run(run_id)
                 if current.status == "CANCELLED":
@@ -1409,7 +3456,16 @@ class OperatorGovernanceService:
             stderr_log,
             resolved_role=role,
         )
-        result = self.backend.run(codex_request)
+        result = self._run_operator_role_backend(
+            request_id,
+            codex_request,
+            call_key=f"{request_id}:verifier:{check_id}",
+            revision=self._next_operator_role_revision(
+                request_id,
+                "operator_verifier",
+            ),
+            backend=self.backend,
+        )
         decision = parse_evaluator_decision(result.text)
         reference = self.store.write_artifact(
             request_id,

@@ -23,6 +23,18 @@ records. Ask for one transition, never an arbitrary target state. A failed
 check keeps the request ACTIVE and publishes feedback. Scope expansion is a
 new version and must be approved for that exact version.
 
+For governed benchmark studies, read only service projections. `H_bug` and
+`H_general` must be independent successors in one frozen `H0` cohort; never
+recommend copying code, skills, Memory, artifacts, or case-level feedback from
+one treatment into the other. A study line advances only through trusted
+integration and generation compare-and-swap. Budget expansion is exactly
+`3 -> 8 -> 16` and requires a digest-bound interactive human grant before any
+SDK call. Stop on exhausted, expired, wrong-model, or pending budget authority;
+never request a model fallback. All sealed Holdout manifests, identities, gold
+data, and case-level failures are external Guard-only state and must not enter
+Operator storage. The Supervisor may request a transition but cannot approve a
+grant, integrate, register metrics, create a checkpoint, or activate a release.
+
 The project Operator hook belongs to the external `operator_host`; this SDK
 Supervisor does not load it and is constrained by its read-only role. Hooks are
 accident prevention, not authority. Promotion requires a clean

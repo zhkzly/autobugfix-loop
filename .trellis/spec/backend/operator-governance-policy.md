@@ -1,4 +1,4 @@
-# Operator Governance Policy V3
+# Operator Governance Policy V4
 
 > Executable and normative contract for constraining Operator self-improvement
 > without turning the Operator into a trusted state owner.
@@ -35,12 +35,16 @@ authority.
 - Promotion: `candidate-commit`, `promotion-prepare`, `promotion-open-pr`,
   `promotion-observe-merge`, `promotion-canary`, `promotion-rollback`, and
   `promotion-revert-pr`.
+- Study control: `study create|show|list`, `line init|show|list|rollback`,
+  `budget request|approve|show`, `integrate`, and
+  `checkpoint create|show`.
 - Python owners: `OperatorGovernanceService`, `OperatorStore`,
   `TransitionGuard`, `evaluate_policy`, `validate_bundle`, and
   `project_request`.
 - DB authority tables: requests, events, writer_runs, check_runs, gates,
   feedback, scope_revisions, approvals, experiments, promotions, artifacts,
-  and request_leases.
+  request_leases, studies, experiment_lines, integrations, checkpoints,
+  budget_requests, budget_grants, usage_entries, and experiment_line_leases.
 
 ### 3. Contracts
 
@@ -66,6 +70,10 @@ target state.
 - Raw logs and large evidence live under the configured artifact root.
 - Candidate code lives in a real Git worktree under `operator.worktrees.root`.
 - State/artifact roots must be outside the candidate worktree.
+- Study lines are real non-main Git refs. Their SQLite head/generation and Git
+  ref advance together through expected-head/generation compare-and-swap.
+- Checkpoint releases are read-only materializations outside candidate
+  worktrees; active-release links are service-owned projections.
 - WriterView excludes control-store paths and exposes only task, evidence,
   effective scope, filtered checks, and feedback.
 - Authoritative commands run in a separate detached verification worktree.
@@ -75,11 +83,13 @@ target state.
 
 #### Roles
 
-- `operator_supervisor`: read-only; diagnoses and requests typed actions.
+- `operator_supervisor`: read-only; diagnoses and requests typed actions. It
+  may read Study/Line/Budget projections but cannot approve a grant, integrate,
+  create a checkpoint, or activate a release.
 - `operator_writer`: workspace-write only in one candidate; cannot approve,
-  verify, promote, merge, or write control state.
+  verify, promote, merge, read sealed cases, or write control/line/budget state.
 - `operator_verifier`: read-only semantic review after deterministic checks;
-  cannot override a failed check.
+  cannot override a failed check or declare integration/checkpoint success.
 
 The service checks effective backend, sandbox, approval mode, and required
 skill against the trusted machine constitution before launching a role.
@@ -122,6 +132,60 @@ Project config may choose model/timeouts but may not weaken permission minima.
 15. `promotion-rollback`: atomically restore last-known-good and write a
     revert intent; `promotion-revert-pr` creates the non-force Git revert PR.
 
+#### Governed Study Protocol
+
+This protocol wraps, rather than replaces, the four-phase Request aggregate:
+
+1. `study create` freezes `H0`, harness/policy/config/role/skill/Memory/model
+   and benchmark-manifest digests, the target checkpoint, and a success
+   contract. Visible Optimization manifest and Memory content are copied into
+   independent read-only H0 snapshots; ordinary Operator projections expose
+   digests, not snapshot paths. Sealed Holdout manifests, gold data, and
+   case-level results remain external Guard state and never enter Operator
+   roots; only aggregate final metrics may be registered.
+   `H_bug` and `H_general` studies in one cohort must match every frozen H0
+   digest; a different base commit, skill set, config, model, policy, or Memory
+   snapshot is rejected before line creation.
+2. `line init` creates one real experiment ref at `H0`, records generation 0,
+   materializes the read-only `H0` release, and leaves the control checkout
+   unchanged. It accepts only a baseline `StudyMetricRecord` previously
+   registered by the trusted benchmark Guard.
+3. `budget request` proposes exactly wave 3, 8, or 16 for named case IDs. A
+   human confirms the canonical request digest through `budget approve`.
+4. Each line-bound Request freezes line head/generation and grant ID/digest.
+   Supervisor, Writer, and semantic Verifier calls reserve usage atomically
+   before invoking the Python Codex SDK and finalize it afterward. Exceptions
+   count as consumed `INDETERMINATE` calls; there is no model fallback.
+5. `integrate` accepts only a current clean VERIFIED candidate and current
+   grant, reruns policy and trusted profiles in a separate worktree, compares
+   the real patch, then advances Git and SQLite with compare-and-swap.
+6. `checkpoint create` accepts only the Study's declared `H_bug` or
+   `H_general` target after a current candidate integration, terminal usage,
+   and a Guard-owned `StudyMetricRecord` satisfying the frozen success
+   contract. Guard registration copies the receipt into content-addressed
+   artifact storage; line/checkpoint transitions accept the record ID, verify
+   the artifact hash, and reject arbitrary candidate paths.
+7. `line rollback` creates a new commit whose tree equals a prior checkpoint,
+   reruns the trusted full profile, and advances history normally. Reset and
+   force-push are forbidden.
+
+Budget waves are exactly `3 -> 8 -> 16`, the model is `gpt-5.4-mini`, case
+concurrency is one, and grants never transfer between studies. Expired,
+exhausted, stale-line, wrong-model, replayed-call, or concurrent-call attempts
+fail before the SDK call.
+
+The experiment protocol has two independent treatments sharing only `H0`:
+
+- Defects4J: 10 visible Optimization cases plus 6 sealed unseen-repository
+  Holdout cases may produce `H_bug`.
+- General-agent study: 10 SWE-bench Verified Optimization cases plus 6
+  SWE-bench-Live sealed unseen-repository Holdout cases may produce
+  `H_general`.
+
+`H_general` must not inherit `H_bug` code, skills, Memory, artifacts, results,
+or case-level feedback, and the reverse is also forbidden. This is an
+experiment protocol, not a redefinition of the four loop purposes.
+
 `operator advance` performs one legal scheduler step at a time. It may
 auto-retry deterministic failures within budget, but stops on scope,
 authority, semantic, or retry-budget blocks.
@@ -144,6 +208,8 @@ authority, semantic, or retry-budget blocks.
 - Requested risk may raise but never lower computed risk.
 - A changed patch, HEAD, scope version, policy digest, or approval binding
   makes previous verification/promotion authority stale.
+- A changed line head/generation, grant digest, manifest digest, or Study
+  configuration makes integration/checkpoint authority stale.
 
 #### Manifest And Remote Admission
 
@@ -186,6 +252,14 @@ state, Git worktrees, deterministic verification, and external admission.
 - Patch/head changes after VERIFIED -> request reopens before promotion.
 - Canary fails -> active pointer stays/restores last-known-good and rollback
   evidence is preserved.
+- Invalid wave/case set/model, exhausted grant, duplicate call key, or active
+  concurrent call -> usage reservation fails before Codex SDK invocation.
+- Integration validation fails or Git/SQLite CAS loses -> experiment line does
+  not advance; raw logs are retained.
+- Checkpoint receipt is forged, stale, failed, or bound to another grant/head
+  -> checkpoint and active release do not advance.
+- Rollback validation fails -> Git ref, SQLite line, and active release remain
+  unchanged.
 
 ### 5. Good / Base / Bad Cases
 
@@ -216,7 +290,10 @@ Assertions must cover four Request phases, event/record tamper detection,
 request leases, Writer cancellation/timeout/retry, scope-version authority,
 candidate constitution self-amendment, process/root isolation, advisory
 manifest revalidation, shadow experiment receipts, stale patch reopening, canary,
-last-known-good rollback, and retained raw SDK/check artifacts.
+last-known-good rollback, independent same-`H0` study lines, Git/SQLite CAS,
+budget reservation/finalization, no fallback, integration failure atomicity,
+immutable checkpoint lineage, history-preserving rollback, and retained raw
+SDK/check artifacts.
 
 Acceptance oracles assert observable behavior, changed-path scope, Git
 identity, and evidence completeness rather than requiring one exact source
@@ -243,4 +320,8 @@ evidence -> triage/request -> trusted start -> one WriterRun -> fast feedback
 -> versioned scope authority -> service commit -> shadow experiment/full check
 -> VERIFIED -> promotion receipt/PR -> trusted-base CI -> observed merge ->
 canary -> activate or rollback/revert PR
+
+frozen H0 -> Study/Line -> human budget grant -> line-bound Request -> metered
+roles -> trusted integrate -> Guard metric receipt -> H_bug or H_general
+checkpoint -> read-only release; regression -> validated rollback commit
 ```
