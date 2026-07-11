@@ -37,3 +37,36 @@ Rebuilt Operator as a trusted transition harness, assigned Codex hooks only to o
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Harden Operator and Eval benchmark foundations
+
+**Date**: 2026-07-11
+**Task**: Harden Operator and Eval benchmark foundations
+**Branch**: `agent/operator-governance-policy`
+
+### Summary
+
+Added deterministic Operator scope ownership, trusted baseline receipts and remote admission, versioned Eval adapters, tests-first scoring, observable harness failures, and real Operator/public-repository acceptance coverage.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `01b40b6` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
