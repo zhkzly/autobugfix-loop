@@ -41,6 +41,40 @@ trusted service owns state.
 13. Promote only a current VERIFIED patch. PR merge, canary activation, and
     rollback are separate trusted transitions.
 
+For a governed benchmark study, insert these service-owned steps around the
+same Request lifecycle:
+
+1. Create a Study from a named cohort and frozen `H0` commit. The service
+   freezes harness, policy, role/config/model/skill digests, a read-only Memory
+   snapshot, the visible Optimization manifest, and a machine-readable success
+   contract. Sealed Holdout manifests and case-level results stay outside all
+   Operator roots under the external Guard.
+2. Initialize exactly one experiment line for that Study from a registered H0
+   aggregate metric. The service creates the real Git ref and read-only `H0`
+   release without changing main.
+3. Request a budget wave and obtain a digest-bound interactive human grant.
+   Waves advance only `3 -> 8 -> 16`; `gpt-5.4-mini` is the only model and
+   fallback is forbidden.
+4. Bind each Request to current line generation/head and current grant.
+   Supervisor, Writer, and semantic Verifier reserve usage before the SDK call
+   and record a terminal outcome afterward.
+5. Integrate only a clean, committed, VERIFIED candidate through the trusted
+   service. It reruns policy and validation in a separate worktree, compares
+   the candidate patch, then advances Git ref and SQLite generation with CAS.
+6. Create `H_bug` or `H_general` only from an integrated line whose
+   content-addressed aggregate Guard metric satisfies the frozen success
+   contract. A checkpoint records immutable Git/config/skill/Memory/policy/
+   budget/metric digests and activates a read-only release.
+7. Roll back by creating a new history-preserving commit with the selected
+   checkpoint tree. Never reset or force-push the line.
+
+The two studies share one named H0 cohort but no treatment: Experiment 1 uses
+Defects4J with 10 visible Optimization cases and 6 sealed unseen-repository
+Holdout cases to produce `H_bug`; Experiment 2 uses 10 SWE-bench Verified
+Optimization cases and 6 SWE-bench-Live sealed unseen-repository Holdout cases
+to produce `H_general`. Experiment 2 must not inherit `H_bug` code, skills,
+Memory, artifacts, results, or case-level feedback.
+
 Request phases are only REQUESTED, ACTIVE, VERIFIED, and CLOSED. WriterRun,
 CheckRun, gates, scope revisions, experiments, and promotions are child
 records. Never invent or directly set any status.
@@ -52,6 +86,10 @@ records. Never invent or directly set any status.
 - Semantic failure: diagnose the requirement; deterministic checks still win.
 - Approval pending: stop and wait for external authority.
 - Patch changed after verification: reopen and verify again.
+- Budget pending/exhausted/expired or wrong model: stop before SDK call,
+  preserve usage evidence, and request next legal human grant when needed.
+- Stale experiment line or cohort mismatch: discard stale transition result,
+  reload service projection, and create request against current generation/head.
 - Canary failed: restore last-known-good, preserve evidence, and create a
   revert PR.
 

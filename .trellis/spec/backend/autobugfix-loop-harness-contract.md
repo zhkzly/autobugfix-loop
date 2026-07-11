@@ -105,6 +105,17 @@
     risk, runtime-role, transition, and verification minima.
   - Project Codex hooks guard the supervising main-agent Operator session only;
     isolated SDK role runtimes disable hooks and remain safe without them.
+  - Named studies use service-owned experiment lines, explicit Mini budget
+    waves, trusted integration, immutable checkpoints, and history-preserving
+    rollback. `H_bug` and `H_general` are independent successors of the same
+    frozen `H0`; neither may inherit the other's treatment or case feedback.
+  - Benchmark sources, Optimization/Holdout splits, and checkpoint names are
+    experiment protocols. They may evolve through governed research changes
+    without redefining the four loop purposes in this project constitution.
+  - A Study manifest contains visible Optimization inputs only. Sealed
+    Holdout case IDs, gold data, and case-level reports remain outside Operator
+    storage under the Eval/Guard authority plane; Operator receives aggregate
+    final metrics only.
 
 ### 4. Validation & Error Matrix
 
@@ -118,6 +129,9 @@
 - Memory collects an unaccepted/failed/active task -> invalid memory input.
 - Eval creates a second task state machine -> invalid eval loop behavior.
 - Operator changes main directly -> invalid operator loop behavior.
+- Operator or Writer edits line/budget/checkpoint authority directly, reuses a
+  grant across studies, or transfers treatment between `H_bug` and
+  `H_general` -> invalid operator experiment behavior.
 - New task starts without restating this baseline -> process violation.
 
 ### 5. Good/Base/Bad Cases

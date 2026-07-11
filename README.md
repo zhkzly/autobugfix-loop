@@ -126,6 +126,26 @@ operator:
     enabled: true
     trusted_ref: origin/main
     default_profile: real-e2e
+  experiment_lines:
+    root: .autobugfix/operator-line-worktrees
+    checkpoint_root: .autobugfix/operator-checkpoints
+    active_release_root: .autobugfix/operator-active-experiments
+    branch_template: experiment/{study_id}-main
+    remote: origin
+    update_timeout_seconds: 300
+  budgets:
+    allowed_waves: [3, 8, 16]
+    allowed_primary_models: [gpt-5.4-mini]
+    max_calls_by_wave:
+      3: 30
+      8: 80
+      16: 160
+    default_case_concurrency: 1
+    max_case_concurrency: 1
+    default_max_writer_attempts: 2
+    default_max_operator_revisions: 3
+    default_wall_time_seconds: 7200
+    allow_model_fallback: false
   promotion:
     release_root: .autobugfix/releases
     active_release_link: .autobugfix/active-release
@@ -188,11 +208,24 @@ uv run autobugfix eval run --dataset problem_prompts.jsonl --out .autobugfix-eva
 
 ## Operator Governance
 
-Governance V3 makes the Operator a bounded supervisor, not a state owner.
+Governance V4 makes the Operator a bounded supervisor, not a state owner.
 Request phases are only `REQUESTED`, `ACTIVE`, `VERIFIED`, and `CLOSED`;
 Writer attempts, checks, gates, scope revisions, experiments, and promotions
 are independent records in the control checkout's SQLite store. Candidate
 worktrees contain no authoritative state.
+
+The default directory name `.autobugfix/operator-v3` is retained so existing
+authority databases migrate in place; its SQLite `user_version` is 4 and the
+loaded machine constitution is V4. The directory name is not the active policy
+version.
+
+The control checkout is the authority plane: the service owns SQLite records,
+Git experiment refs, budget usage, deterministic check output, integration
+receipts, and checkpoint pointers. Candidate worktrees are data planes: Writer
+may change source and tests there, but files it creates cannot authorize scope,
+claim a check passed, consume or expand a budget, advance an experiment line,
+or activate a release. A Git hook is only an accident guard; service checks and
+trusted-base CI remain the merge authority.
 
 ```bash
 uv run autobugfix operator guide
@@ -234,6 +267,93 @@ uv run autobugfix operator verify --request-id op-eval-diff --mode full
 uv run autobugfix operator audit --request-id op-eval-diff
 uv run autobugfix operator promotion-prepare --request-id op-eval-diff
 ```
+
+Named experiment lines wrap that same Request lifecycle with frozen study,
+budget, integration, and checkpoint authority. The manifest, success contract,
+and metric receipts are produced by the trusted benchmark adapter/Guard; they
+are not candidate-authored score claims.
+
+Study creation copies the visible Optimization manifest and active Memory into
+separate read-only H0 snapshots under the trusted checkpoint root. Operator
+projections expose their digests but not snapshot paths. Sealed Holdout
+manifests, gold data, and case-level results must remain outside all Operator
+roots under an external Guard; only an aggregate metric receipt may enter the
+Operator store after final evaluation.
+
+```bash
+uv run autobugfix operator study create \
+  --study-id defects4j-bugfix \
+  --cohort-id autobugfix-h0-v1 \
+  --purpose "Improve the bugfix harness" \
+  --manifest .autobugfix/benchmark-manifests/defects4j-bugfix.yaml \
+  --success-contract .autobugfix/benchmark-manifests/bugfix-success.yaml \
+  --base-ref <frozen-h0-sha> \
+  --model gpt-5.4-mini \
+  --target-checkpoint H_bug
+
+uv run autobugfix operator line init \
+  --study-id defects4j-bugfix \
+  --metric-receipt-id <registered-h0-metric-id>
+
+uv run autobugfix operator budget request \
+  --study-id defects4j-bugfix --wave 3 \
+  --case <case-1> --case <case-2> --case <case-3> \
+  --reason "Run the first Optimization wave"
+
+uv run autobugfix operator budget approve \
+  --budget-request-id <budget-request-id> \
+  --approver <human-identity> \
+  --confirm-request-digest <displayed-request-digest>
+
+uv run autobugfix operator request \
+  --triage-id <triage-id> \
+  --summary "repair diagnosed harness layer" \
+  --primary-layer execution \
+  --planned-path src/autobugfix/runner.py \
+  --risk medium \
+  --validation-profile full \
+  --experiment-line defects4j-bugfix \
+  --budget-grant <grant-id>
+
+# Run start/Writer/check/commit/experiment/full-check as above.
+uv run autobugfix operator integrate \
+  --request-id <verified-request-id> --grant-id <grant-id>
+
+uv run autobugfix operator checkpoint create \
+  --line-id defects4j-bugfix --name H_bug \
+  --metric-receipt-id <registered-study-metric-id>
+
+uv run autobugfix operator line rollback \
+  --line-id defects4j-bugfix --checkpoint-id defects4j-bugfix-H0 \
+  --reason "validated regression against the frozen baseline"
+```
+
+`budget approve` refuses non-interactive stdin and asks the human to type
+`APPROVE <request-digest>` exactly. Supplying an `--approver` label from an
+agent or CI process is not sufficient authority.
+
+The trusted benchmark adapter registers H0 and candidate receipts through the
+Guard service API, which copies them into content-addressed storage and writes
+immutable `StudyMetricRecord` rows. There is intentionally no generic Operator
+CLI for importing a score claim. Line/checkpoint commands accept only those
+registered IDs and recheck the artifact hash and every frozen binding.
+
+Budget waves are exactly `3 -> 8 -> 16`, run at case concurrency one, and use
+only `gpt-5.4-mini`; quota, expiry, or model mismatch stops before the SDK call.
+Integration reruns trusted policy and validation in a separate worktree and
+advances the Git ref plus SQLite generation with compare-and-swap. Rollback
+creates a new commit whose tree equals the selected checkpoint; it never resets
+or force-pushes history.
+
+The planned studies use the same `--cohort-id` and therefore must match frozen
+H0 Git, harness, policy, role-config, config, model, skills, and Memory digests.
+They otherwise share only frozen `H0`. Experiment 1 uses 10 visible
+Defects4J Optimization cases and 6 sealed unseen-repository Holdout cases to
+produce `H_bug`. Experiment 2 independently uses 10 SWE-bench Verified
+Optimization cases and 6 SWE-bench-Live sealed unseen-repository Holdout cases
+to produce `H_general`. Experiment 2 must not inherit `H_bug` code, skills,
+Memory, artifacts, results, or case-level feedback. These are experiment
+protocols, not changes to the four-loop project constitution.
 
 `operator advance` performs one legal scheduler action at a time: start,
 Writer, fast check, candidate commit, matching experiment, full check, or stop

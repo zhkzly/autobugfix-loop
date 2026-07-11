@@ -8,13 +8,24 @@ class GitError(RuntimeError):
     pass
 
 
-def run_git(repo: Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+def run_git(
+    repo: Path,
+    args: list[str],
+    check: bool = True,
+    timeout_seconds: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(
+            f"git -C {repo} {' '.join(args)} timed out after {timeout_seconds} seconds"
+        ) from exc
     if check and result.returncode != 0:
         raise GitError(
             f"git -C {repo} {' '.join(args)} failed with {result.returncode}: {result.stderr.strip()}"

@@ -10,8 +10,10 @@ from autobugfix.models import (
     CodexConfig,
     EvalConfig,
     OperatorArtifactConfig,
+    OperatorBudgetConfig,
     OperatorConfig,
     OperatorExperimentConfig,
+    OperatorExperimentLineConfig,
     OperatorPromotionConfig,
     OperatorRetryConfig,
     OperatorStateConfig,
@@ -272,6 +274,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 },
             },
         },
+        "experiment_lines": {
+            "root": ".autobugfix/operator-line-worktrees",
+            "checkpoint_root": ".autobugfix/operator-checkpoints",
+            "active_release_root": ".autobugfix/operator-active-experiments",
+            "branch_template": "experiment/{study_id}-main",
+            "remote": "origin",
+            "update_timeout_seconds": 300,
+        },
+        "budgets": {
+            "allowed_waves": [3, 8, 16],
+            "allowed_primary_models": ["gpt-5.4-mini"],
+            "max_calls_by_wave": {3: 30, 8: 80, 16: 160},
+            "default_case_concurrency": 1,
+            "max_case_concurrency": 1,
+            "default_max_writer_attempts": 2,
+            "default_max_operator_revisions": 3,
+            "default_wall_time_seconds": 7200,
+            "allow_model_fallback": False,
+        },
         "promotion": {
             "release_root": ".autobugfix/releases",
             "active_release_link": ".autobugfix/active-release",
@@ -433,12 +454,35 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
     retry_raw = _as_mapping(operator_raw.get("retry"), "operator.retry")
     verification_raw = _as_mapping(operator_raw.get("verification"), "operator.verification")
     experiment_raw = _as_mapping(operator_raw.get("experiments"), "operator.experiments")
+    experiment_line_raw = _as_mapping(
+        operator_raw.get("experiment_lines"), "operator.experiment_lines"
+    )
+    budget_raw = _as_mapping(operator_raw.get("budgets"), "operator.budgets")
     promotion_raw = _as_mapping(operator_raw.get("promotion"), "operator.promotion")
 
     def _string_tuple(raw_value: Any, field: str) -> tuple[str, ...]:
         if not isinstance(raw_value, list):
             raise ConfigError(f"{field} must be a list")
         return tuple(str(item) for item in raw_value)
+
+    def _integer_tuple(raw_value: Any, field: str) -> tuple[int, ...]:
+        if not isinstance(raw_value, list):
+            raise ConfigError(f"{field} must be a list")
+        try:
+            return tuple(int(item) for item in raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"{field} must contain integers") from exc
+
+    max_calls_raw = _as_mapping(
+        budget_raw.get("max_calls_by_wave"), "operator.budgets.max_calls_by_wave"
+    )
+
+    try:
+        max_calls = {int(wave): int(limit) for wave, limit in max_calls_raw.items()}
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            "operator.budgets.max_calls_by_wave must map integer waves to integer limits"
+        ) from exc
 
     operator_config = OperatorConfig(
         state=OperatorStateConfig(
@@ -485,6 +529,46 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
                     experiment_raw.get("profiles"), "operator.experiments.profiles"
                 ).items()
             },
+        ),
+        experiment_lines=OperatorExperimentLineConfig(
+            root=_resolve(root, experiment_line_raw.get("root"))
+            or (root / ".autobugfix/operator-line-worktrees"),
+            checkpoint_root=_resolve(root, experiment_line_raw.get("checkpoint_root"))
+            or (root / ".autobugfix/operator-checkpoints"),
+            active_release_root=_resolve(root, experiment_line_raw.get("active_release_root"))
+            or (root / ".autobugfix/operator-active-experiments"),
+            branch_template=str(
+                experiment_line_raw.get("branch_template", "experiment/{study_id}-main")
+            ),
+            remote=(
+                str(experiment_line_raw["remote"])
+                if experiment_line_raw.get("remote") is not None
+                else None
+            ),
+            update_timeout_seconds=int(
+                experiment_line_raw.get("update_timeout_seconds", 300)
+            ),
+        ),
+        budgets=OperatorBudgetConfig(
+            allowed_waves=_integer_tuple(
+                budget_raw.get("allowed_waves", [3, 8, 16]),
+                "operator.budgets.allowed_waves",
+            ),
+            allowed_primary_models=_string_tuple(
+                budget_raw.get("allowed_primary_models", ["gpt-5.4-mini"]),
+                "operator.budgets.allowed_primary_models",
+            ),
+            max_calls_by_wave=max_calls,
+            default_case_concurrency=int(budget_raw.get("default_case_concurrency", 1)),
+            max_case_concurrency=int(budget_raw.get("max_case_concurrency", 1)),
+            default_max_writer_attempts=int(
+                budget_raw.get("default_max_writer_attempts", 2)
+            ),
+            default_max_operator_revisions=int(
+                budget_raw.get("default_max_operator_revisions", 3)
+            ),
+            default_wall_time_seconds=int(budget_raw.get("default_wall_time_seconds", 7200)),
+            allow_model_fallback=bool(budget_raw.get("allow_model_fallback", False)),
         ),
         promotion=OperatorPromotionConfig(
             release_root=_resolve(root, promotion_raw.get("release_root")) or (root / ".autobugfix/releases"),
@@ -534,15 +618,66 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
                     raise ConfigError(
                         f"operator.experiments.profiles.{name}.commands[{index}].argv must be a list"
                     )
+    if "{study_id}" not in operator_config.experiment_lines.branch_template:
+        raise ConfigError("operator.experiment_lines.branch_template must contain {study_id}")
+    try:
+        rendered_line_branch = operator_config.experiment_lines.branch_template.format(
+            study_id="study"
+        )
+    except (KeyError, ValueError) as exc:
+        raise ConfigError("operator.experiment_lines.branch_template is invalid") from exc
+    if rendered_line_branch in {"main", "master"}:
+        raise ConfigError("operator experiment line cannot target a protected branch")
+    if operator_config.experiment_lines.remote is not None and not operator_config.experiment_lines.remote.strip():
+        raise ConfigError("operator.experiment_lines.remote must be null or non-empty")
+    if operator_config.experiment_lines.update_timeout_seconds < 1:
+        raise ConfigError("operator.experiment_lines.update_timeout_seconds must be positive")
+    if operator_config.budgets.allowed_waves != (3, 8, 16):
+        raise ConfigError("operator.budgets.allowed_waves must be exactly [3, 8, 16]")
+    if operator_config.budgets.allowed_primary_models != ("gpt-5.4-mini",):
+        raise ConfigError(
+            "operator.budgets.allowed_primary_models must be exactly [gpt-5.4-mini]"
+        )
+    if set(operator_config.budgets.max_calls_by_wave) != {3, 8, 16} or any(
+        limit < 1 for limit in operator_config.budgets.max_calls_by_wave.values()
+    ):
+        raise ConfigError(
+            "operator.budgets.max_calls_by_wave must define positive limits for 3, 8, and 16"
+        )
+    if operator_config.budgets.default_case_concurrency != 1:
+        raise ConfigError("operator.budgets.default_case_concurrency must remain 1")
+    if operator_config.budgets.max_case_concurrency != 1:
+        raise ConfigError("operator.budgets.max_case_concurrency must remain 1")
+    for value, field in (
+        (operator_config.budgets.default_max_writer_attempts, "default_max_writer_attempts"),
+        (operator_config.budgets.default_max_operator_revisions, "default_max_operator_revisions"),
+        (operator_config.budgets.default_wall_time_seconds, "default_wall_time_seconds"),
+    ):
+        if value < 1:
+            raise ConfigError(f"operator.budgets.{field} must be positive")
+    if operator_config.budgets.allow_model_fallback:
+        raise ConfigError("operator.budgets.allow_model_fallback must remain false")
     if operator_config.promotion.require_canary and not operator_config.promotion.canary_profiles:
         raise ConfigError("operator.promotion.canary_profiles must not be empty when canary is required")
-    authority_roots = {
-        operator_config.state.root.resolve(),
-        operator_config.artifacts.root.resolve(),
-        operator_config.worktrees.root.resolve(),
+    runtime_roots = {
+        "state": operator_config.state.root.resolve(),
+        "artifacts": operator_config.artifacts.root.resolve(),
+        "candidate_worktrees": operator_config.worktrees.root.resolve(),
+        "integration_worktrees": operator_config.experiment_lines.root.resolve(),
+        "checkpoints": operator_config.experiment_lines.checkpoint_root.resolve(),
+        "active_releases": operator_config.experiment_lines.active_release_root.resolve(),
     }
-    if len(authority_roots) != 3:
-        raise ConfigError("operator state, artifact, and worktree roots must be distinct")
+    for left_name, left_root in runtime_roots.items():
+        for right_name, right_root in runtime_roots.items():
+            if left_name >= right_name:
+                continue
+            if left_root == right_root or left_root.is_relative_to(
+                right_root
+            ) or right_root.is_relative_to(left_root):
+                raise ConfigError(
+                    "operator runtime roots must not overlap: "
+                    f"{left_name}={left_root}, {right_name}={right_root}"
+                )
 
     repos: dict[str, RepoProfile] = {}
     for repo_id, repo_raw_any in _as_mapping(merged.get("repos"), "repos").items():

@@ -27,6 +27,16 @@ runs isolated checks. Consume feedback supplied to the next WriterRun. Never
 ask the Operator to copy logs manually and never invoke Operator mutation
 commands from the worktree.
 
+In a named study, the cohort, frozen `H0` lineage, visible Optimization
+manifest, Memory snapshot, budget grant, usage, checkpoint, integration
+receipt, and active release are not Writer state. Never read or edit authority SQLite,
+sealed Holdout data, gold patches, budget records, release roots, or
+experiment refs. `H_bug` work must not import any `H_general` treatment, and
+`H_general` work must not import `H_bug` treatment. The Writer CLI surface
+remains the read-only WriterView supplied by the service. A quota or model
+error is feedback to the Operator; do not switch from `gpt-5.4-mini` or launch
+an unmetered replacement call.
+
 The project Operator hook belongs to `operator_host` and is disabled in this
 SDK role. Do not treat the absence of a hook as permission to cross the
 candidate worktree or service boundary.

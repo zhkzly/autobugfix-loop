@@ -16,6 +16,27 @@ codex:
     bridge_auth: true
     skill_guard: true
     strict_skill_guard: true
+operator:
+  experiment_lines:
+    root: .autobugfix/operator-line-worktrees
+    checkpoint_root: .autobugfix/operator-checkpoints
+    active_release_root: .autobugfix/operator-active-experiments
+    branch_template: experiment/{study_id}-main
+    remote: origin
+    update_timeout_seconds: 300
+  budgets:
+    allowed_waves: [3, 8, 16]
+    allowed_primary_models: [gpt-5.4-mini]
+    max_calls_by_wave:
+      3: 30
+      8: 80
+      16: 160
+    default_case_concurrency: 1
+    max_case_concurrency: 1
+    default_max_writer_attempts: 2
+    default_max_operator_revisions: 3
+    default_wall_time_seconds: 7200
+    allow_model_fallback: false
 repos:
   target_repo:
     main_checkout: ../target-repo

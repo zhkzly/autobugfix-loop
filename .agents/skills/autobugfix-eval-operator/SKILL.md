@@ -11,8 +11,19 @@ execution evidence into reviewed LLM wiki content and skills. Eval measures the
 real execution loop in reproducible harnesses. Operator diagnoses and improves
 Autobugfix but does not own the other loops' state.
 
-The Operator is a bounded execution node. Use Governance v3 before modifying
+The Operator is a bounded execution node. Use Governance v4 before modifying
 code, tests, config, skills, validation, or baselines.
+
+Two studies are deliberately independent. Experiment 1 starts at frozen `H0`,
+uses Defects4J, exposes 10 Optimization cases, seals 6 unseen-repository
+Holdout cases externally, and may produce `H_bug`. Experiment 2 separately
+starts at the same named `H0` cohort, exposes 10 SWE-bench Verified
+Optimization cases, seals 6 unseen-repository SWE-bench-Live Holdout cases
+externally, and may produce `H_general`. Never initialize Experiment 2 from
+`H_bug` or transfer code, skills, Memory, artifacts, results, or case-level
+feedback. Both use only `gpt-5.4-mini`, human-granted `3 -> 8 -> 16` waves,
+concurrency one, and no fallback. Holdout manifests/gold/results remain outside
+Operator roots; only aggregate final metrics may be registered.
 
 ## Required Workflow
 
@@ -46,6 +57,10 @@ code, tests, config, skills, validation, or baselines.
 ## Commands
 
 ```text
+autobugfix operator study create ... --cohort-id <cohort> --target-checkpoint H_bug|H_general
+autobugfix operator line init --study-id <study> --metric-receipt-id <metric-id>
+autobugfix operator budget request --study-id <study> --wave 3|8|16 ...
+autobugfix operator budget approve --budget-request-id <id> --confirm-request-digest <digest> --approver <human>
 autobugfix operator triage ... --evidence <artifact>
 autobugfix operator baseline record --name <baseline> --profile <profile> [--value key=value]
 autobugfix operator request ... --triage-id <id> --planned-path <glob> --performance-baseline <baseline>
@@ -58,12 +73,19 @@ autobugfix operator workspace-create --request-id <id>
 autobugfix operator postflight --request-id <id>
 autobugfix operator experiment-run --request-id <id> --profile <profile> [--value key=value]
 autobugfix operator validate --request-id <id>
+autobugfix operator integrate --request-id <id> --grant-id <grant>
+autobugfix operator checkpoint create --line-id <line> --name H_bug|H_general --metric-receipt-id <metric-id>
+autobugfix operator line rollback --line-id <line> --checkpoint-id <checkpoint> --reason <reason>
 autobugfix operator finalize --request-id <id>
 autobugfix operator export-bundle --request-id <id>
 ```
 
+`budget approve` is a human terminal action. The CLI requires an interactive
+TTY and the exact phrase `APPROVE <request-digest>`; an agent must stop and
+present the pending request rather than supplying that phrase itself.
+
 Never use local `--bootstrap-policy` as merge authority. It exists only for the
-first Governance v3 installation and local feedback. Do not use Eval to approve
+first Governance v4 installation and local feedback. Do not use Eval to approve
 PPE, archive Execution tasks, or approve Memory proposals.
 
 ## Diagnosis Routing

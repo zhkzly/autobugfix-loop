@@ -1,0 +1,32 @@
+{
+  "id": "experiment-main-benchmarks",
+  "name": "experiment-main-benchmarks",
+  "title": "Build experiment integration line and benchmark program",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "kelong.ZX",
+  "assignee": "kelong.ZX",
+  "createdAt": "2026-07-11",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-11-experiment-integration-lines",
+    "07-11-defects4j-eval-adapter",
+    "07-11-swe-eval-adapters",
+    "07-11-bugfix-harness-experiment",
+    "07-11-general-agent-experiment"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
