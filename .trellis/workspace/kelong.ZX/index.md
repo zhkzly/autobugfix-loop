@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 2
+- **Total Sessions**: 3
 - **Last Active**: 2026-07-11
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~72 | Active |
+| `journal-1.md` | ~105 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 3 | 2026-07-11 | Governed experiment integration lines | `36c29b8` | `agent/experiment-integration-lines` |
 | 2 | 2026-07-11 | Harden Operator and Eval benchmark foundations | `01b40b6` | `agent/operator-governance-policy` |
 | 1 | 2026-07-11 | Operator governance V3 and real E2E | `9c45301` | `agent/operator-governance-policy` |
 <!-- @@@/auto:session-history -->

@@ -70,3 +70,36 @@ Added deterministic Operator scope ownership, trusted baseline receipts and remo
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Governed experiment integration lines
+
+**Date**: 2026-07-11
+**Task**: Governed experiment integration lines
+**Branch**: `agent/experiment-integration-lines`
+
+### Summary
+
+Implemented Governance V4 studies, independent H0 experiment lines, human-gated Mini budgets, metered SDK roles, trusted Git/SQLite CAS integration, immutable checkpoints, history-preserving rollback, role skills, tests, and real Operator E2E.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `36c29b8` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
