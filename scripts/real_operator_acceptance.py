@@ -13,6 +13,13 @@ import yaml
 from autobugfix.operator.service import OperatorGovernanceService
 
 
+NORMALIZATION_CONTRACT = (
+    "from autobugfix.eval.runner import normalize_case_id; "
+    "assert normalize_case_id('  A Bug  ') == 'a-bug'; "
+    "assert normalize_case_id('A_Bug') == 'a-bug'"
+)
+
+
 def run(
     argv: list[str],
     cwd: Path,
@@ -28,6 +35,19 @@ def run(
 def write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def acceptance_commands() -> list[dict[str, object]]:
+    return [
+        {
+            "name": "operator-acceptance-tests",
+            "argv": [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+        },
+        {
+            "name": "case-id-underscore-and-whitespace-contract",
+            "argv": [sys.executable, "-c", NORMALIZATION_CONTRACT],
+        },
+    ]
 
 
 def build_repo(source_root: Path, root: Path) -> Path:
@@ -73,12 +93,7 @@ def build_repo(source_root: Path, root: Path) -> Path:
     policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
     command = {
         "timeout_seconds": 120,
-        "commands": [
-            {
-                "name": "operator-acceptance-tests",
-                "argv": [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
-            }
-        ],
+        "commands": acceptance_commands(),
     }
     policy["validation_profiles"]["eval"] = command
     policy["validation_profiles"]["full"] = command
@@ -115,7 +130,18 @@ def write_config(source_root: Path, root: Path, model: str) -> None:
                         "require_process_sandbox": True,
                         "network_access": False,
                         "runtime_venv": str(source_root / ".venv"),
-                    }
+                    },
+                    "experiments": {
+                        "enabled": True,
+                        "trusted_ref": "main",
+                        "default_profile": "operator-acceptance",
+                        "profiles": {
+                            "operator-acceptance": {
+                                "timeout_seconds": 120,
+                                "commands": acceptance_commands(),
+                            }
+                        },
+                    },
                 },
             },
             sort_keys=False,
@@ -144,6 +170,15 @@ def main() -> int:
         raise RuntimeError("Operator acceptance repository unexpectedly passes before Writer")
 
     service = OperatorGovernanceService(root, trusted_ref=None, trusted_file=policy_path)
+    baseline = service.capture_baseline(
+        "operator-acceptance-base",
+        profile="operator-acceptance",
+        notes="Expected failing repository state before the Operator repair.",
+    )
+    if baseline["baseline"]["metrics"]["pass_rate"] != 0.0:
+        raise RuntimeError("Operator baseline did not preserve the expected failing state")
+    run(["git", "add", ".autobugfix-baselines/operator-acceptance-base.yaml"], root)
+    run(["git", "commit", "-m", "Record trusted Operator acceptance baseline"], root)
     triage = service.create_triage(
         triage_id="operator-real-triage",
         summary="Eval case IDs violate the dataset path contract",
@@ -159,6 +194,7 @@ def main() -> int:
         primary_layer="eval",
         planned_paths=("src/autobugfix/eval/runner.py", "tests/test_eval.py"),
         validation_profiles=("eval",),
+        performance_baseline="operator-acceptance-base",
         creator="acceptance-operator",
     )
     service.start(request.request_id)
@@ -168,8 +204,18 @@ def main() -> int:
         raise RuntimeError(f"Operator Writer did not complete: {writer}")
     fast = service.verify(request.request_id, mode="fast")
     if fast["check_run"]["status"] != "PASSED":
-        raise RuntimeError(f"Operator fast check failed: {fast['check_run']['failures']}")
+        retry = service.retry_writer(request.request_id)
+        if retry["status"] != "COMPLETED":
+            raise RuntimeError(f"Operator retry Writer did not complete: {retry}")
+        fast = service.verify(request.request_id, mode="fast")
+        if fast["check_run"]["status"] != "PASSED":
+            raise RuntimeError(
+                f"Operator fast check still failed after feedback retry: {fast['check_run']['failures']}"
+            )
     service.commit_candidate(request.request_id, message="Fix Eval case-id normalization")
+    experiment = service.run_experiment(request.request_id, profile="operator-acceptance")
+    if experiment["status"] != "COMPLETED" or not experiment["passed"]:
+        raise RuntimeError(f"Operator candidate experiment did not pass: {experiment}")
     full = service.verify(request.request_id, mode="full")
     if full["check_run"]["status"] != "PASSED":
         raise RuntimeError(f"Operator full check failed: {full['check_run']['failures']}")
@@ -185,9 +231,7 @@ def main() -> int:
         [
             sys.executable,
             "-c",
-            "from autobugfix.eval.runner import normalize_case_id; "
-            "assert normalize_case_id('  A Bug  ') == 'a-bug'; "
-            "assert normalize_case_id('A_Bug') == 'a-bug'",
+            NORMALIZATION_CONTRACT,
         ],
         workspace,
         env={**os.environ, "PYTHONPATH": str(workspace / "src")},

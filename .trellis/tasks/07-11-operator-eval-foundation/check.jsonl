@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/autobugfix-loop-harness-contract.md", "reason": "Review Execution, Memory, Eval, and Operator boundary preservation."}
+{"file": ".trellis/spec/backend/operator-governance-policy.md", "reason": "Review trusted state, admission, promotion, and rollback authority."}

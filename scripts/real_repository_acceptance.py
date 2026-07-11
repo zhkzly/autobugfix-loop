@@ -251,7 +251,10 @@ def build_eval_case(
     case = matching[0]
     case.update(
         {
-            "task_kind": "bugfix",
+            "task_type": "bugfix",
+            "benchmark": "autobugfix-real-acceptance",
+            "dataset_revision": UPSTREAM_COMMIT,
+            "split": "acceptance",
             "problem_statement": issue,
             "agent_prompt": issue,
             "expected_behavior": "base64_encode(b'a') returns b'YQ' and the configured pytest command passes",
@@ -294,16 +297,16 @@ def build_eval_case(
     case_dir = eval_root / run_id / str(case["raw_id"])
     report = yaml.safe_load((case_dir / "report.yaml").read_text(encoding="utf-8"))
     summary = yaml.safe_load((eval_root / run_id / "summary.yaml").read_text(encoding="utf-8"))
-    if report.get("decision") != "pass" or report.get("generated_equals_oracle") is not True:
-        raise RuntimeError(f"real repository Eval did not match the oracle: {report}")
-    if summary.get("failures"):
+    if report.get("decision") != "pass" or report.get("oracle_passed") is not True:
+        raise RuntimeError(f"real repository Eval did not pass its independent oracle: {report}")
+    if summary.get("failures") or summary.get("harness_errors"):
         raise RuntimeError(f"real repository Eval summary has failures: {summary}")
     if report.get("execution_state") != "waiting_human_ppe_approval":
         raise RuntimeError(f"Eval execution did not stop at the human gate: {report}")
     generated = (case_dir / "generated.diff").read_text(encoding="utf-8")
     oracle = (case_dir / "oracle.diff").read_text(encoding="utf-8")
-    if not generated or generated != oracle:
-        raise RuntimeError("Eval generated diff is empty or differs from the committed oracle")
+    if not generated or not oracle:
+        raise RuntimeError("Eval generated or diagnostic oracle diff is empty")
     eval_task_dir = case_dir / "control/.autobugfix/tasks" / str(report["task_id"])
     assert_execution_evidence(eval_task_dir)
     if (case_dir / "control/.autobugfix/archive").exists():

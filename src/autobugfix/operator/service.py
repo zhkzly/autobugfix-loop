@@ -37,7 +37,15 @@ from autobugfix.operator.guard import (
     effective_request,
     max_risk,
 )
-from autobugfix.operator.metrics import OperatorMetricsError, compare_baseline
+from autobugfix.operator.metrics import (
+    OperatorMetricsError,
+    baseline_for_request,
+    compare_baseline,
+    derive_metric_receipt,
+    portable_profile_values,
+    read_baseline,
+    record_baseline,
+)
 from autobugfix.operator.models import (
     CheckRun,
     FeedbackPacket,
@@ -51,7 +59,12 @@ from autobugfix.operator.models import (
     digest_payload,
     is_expired,
 )
-from autobugfix.operator.policy import PolicyDecision, collect_candidate_snapshot, evaluate_policy
+from autobugfix.operator.policy import (
+    PolicyDecision,
+    collect_candidate_snapshot,
+    evaluate_policy,
+    layers_for_file,
+)
 from autobugfix.operator.projection import project_request
 from autobugfix.operator.prompts import semantic_verifier_prompt, supervisor_prompt, writer_prompt
 from autobugfix.operator.store import OperatorStore, OperatorStoreError
@@ -453,6 +466,33 @@ class OperatorGovernanceService:
             violations.append("project config cannot disable the authoritative process sandbox")
         if not bool(minimums.get("verification_network_access", False)) and self.config.operator.verification.network_access:
             violations.append("project config cannot enable network for authoritative verification")
+        baseline_layers = {
+            str(item) for item in policy.data.get("baseline_required_layers") or []
+        }
+        if request.declared_layers & baseline_layers:
+            if not request.performance_baseline:
+                violations.append("behavior-affecting scope requires a trusted performance baseline")
+            else:
+                try:
+                    baseline = baseline_for_request(
+                        self.project_root,
+                        request.performance_baseline,
+                        request.base_sha,
+                    )
+                except OperatorMetricsError as exc:
+                    violations.append(str(exc))
+                else:
+                    configured = self.config.operator.experiments.profiles.get(
+                        str(baseline["profile"])
+                    )
+                    if configured is None:
+                        violations.append(
+                            f"missing trusted experiment profile: {baseline['profile']}"
+                        )
+                    elif digest_payload(configured) != baseline["profile_digest"]:
+                        violations.append(
+                            "configured experiment profile does not match committed baseline contract"
+                        )
         authority = check_scope_authority(
             request,
             self.store.read_approvals(request_id),
@@ -547,6 +587,149 @@ class OperatorGovernanceService:
     def create_workspace(self, request_id: str, *, actor: str | None = None) -> dict[str, Any]:
         return self.start(request_id, actor=actor)["workspace"]
 
+    def _experiment_profile(
+        self,
+        profile: str | None,
+        values: Mapping[str, str] | None,
+    ) -> tuple[str, Mapping[str, Any], dict[str, str]]:
+        profile_name = profile or self.config.operator.experiments.default_profile
+        try:
+            profile_data = self.config.operator.experiments.profiles[profile_name]
+        except KeyError as exc:
+            raise OperatorGovernanceError(
+                f"unknown Operator experiment profile: {profile_name}"
+            ) from exc
+        commands = profile_data.get("commands") or []
+        if not isinstance(commands, list) or not commands:
+            raise OperatorGovernanceError(f"experiment profile has no commands: {profile_name}")
+        try:
+            supplied = portable_profile_values(
+                {str(key): str(value) for key, value in (values or {}).items()}
+            )
+        except OperatorMetricsError as exc:
+            raise OperatorGovernanceError(str(exc)) from exc
+        missing = [
+            str(name)
+            for name in profile_data.get("required_values") or []
+            if str(name) not in supplied
+        ]
+        if missing:
+            raise OperatorGovernanceError(
+                f"experiment profile {profile_name} requires values: {', '.join(missing)}"
+            )
+        return profile_name, profile_data, supplied
+
+    def capture_baseline(
+        self,
+        name: str,
+        *,
+        profile: str | None = None,
+        values: Mapping[str, str] | None = None,
+        notes: str = "",
+    ) -> dict[str, Any]:
+        if not self.config.operator.experiments.enabled:
+            raise OperatorGovernanceError("Operator experiments are disabled")
+        profile_name, profile_data, supplied = self._experiment_profile(profile, values)
+        trusted_ref = self.config.operator.experiments.trusted_ref
+        base_sha = rev_parse(self.project_root, trusted_ref)
+        baseline_id = self.store.next_id("baseline")
+        workspace = (
+            self.config.operator.worktrees.root / ".baselines" / baseline_id / "candidate"
+        ).resolve()
+        shadow_root = (self.store.root / "baselines" / baseline_id / "shadow").resolve()
+        log_root = (self.store.artifact_root / "baselines" / baseline_id).resolve()
+        shadow_root.mkdir(parents=True, exist_ok=False)
+        results: list[dict[str, Any]] = []
+        try:
+            workspace.parent.mkdir(parents=True, exist_ok=True)
+            run_git(
+                self.project_root,
+                ["worktree", "add", "--detach", str(workspace), base_sha],
+                check=True,
+            )
+            snapshot = collect_candidate_snapshot(
+                workspace,
+                base_sha,
+                [str(item) for item in self.policy().data.get("governance_metadata_paths") or []],
+            )
+            command_values = {
+                "request_id": f"baseline-{name}",
+                "base_sha": base_sha,
+                "head_sha": snapshot.head_sha,
+                "candidate_root": str(workspace),
+                "shadow_state_root": str(shadow_root),
+                **supplied,
+            }
+            results = run_command_specs(
+                workspace,
+                log_root,
+                list(profile_data.get("commands") or []),
+                values=command_values,
+                default_timeout_seconds=int(profile_data.get("timeout_seconds", 1800)),
+                name_prefix=profile_name,
+                process_sandbox=self.config.operator.verification.process_sandbox,
+                require_process_sandbox=self.config.operator.verification.require_process_sandbox,
+                network_access=bool(profile_data.get("network_access", False)),
+                hidden_roots=(self.store.root, self.store.artifact_root),
+                writable_roots=(shadow_root,),
+                read_only_binds=self._runtime_binds(workspace),
+            )
+            receipt = derive_metric_receipt(
+                source="trusted_baseline_experiment",
+                profile=profile_name,
+                values=supplied,
+                base_sha=base_sha,
+                head_sha=snapshot.head_sha,
+                patch_digest=snapshot.patch_digest,
+                command_results=results,
+                profile_contract=profile_data,
+            )
+            path = record_baseline(
+                self.project_root,
+                name,
+                receipt,
+                profile_values=supplied,
+                notes=notes,
+            )
+            return {"path": str(path), "baseline": read_baseline(self.project_root, name)}
+        except Exception as exc:
+            if isinstance(exc, OperatorGovernanceError):
+                raise
+            raise OperatorGovernanceError(f"trusted baseline capture failed: {exc}") from exc
+        finally:
+            if workspace.exists():
+                run_git(
+                    self.project_root,
+                    ["worktree", "remove", "--force", str(workspace)],
+                    check=False,
+                )
+
+    def compare_experiment_baseline(self, request_id: str, name: str) -> dict[str, Any]:
+        request, _ = self._effective_request(request_id)
+        snapshot = self._snapshot(request_id, request)
+        baseline = baseline_for_request(self.project_root, name, request.base_sha)
+        matching = [
+            item.get("metric_receipt")
+            for item in self.store.read_experiments(request_id)
+            if item.get("status") == "COMPLETED"
+            and item.get("candidate_head_sha") == snapshot.head_sha
+            and item.get("patch_digest") == snapshot.patch_digest
+            and item.get("profile") == baseline["profile"]
+            and (item.get("metric_receipt") or {}).get("input_digest")
+            == baseline["input_digest"]
+        ]
+        if not matching:
+            raise OperatorGovernanceError(
+                "missing completed trusted experiment for the current candidate patch and baseline profile"
+            )
+        return compare_baseline(
+            self.project_root,
+            name,
+            matching[-1],
+            self.policy().data.get("metrics") or {},
+            request_base_sha=request.base_sha,
+        )
+
     @_leased_request
     def run_experiment(
         self,
@@ -566,24 +749,7 @@ class OperatorGovernanceService:
         if run_git(workspace, ["status", "--porcelain"], check=True).stdout.strip():
             raise OperatorGovernanceError("shadow experiments require a committed and clean candidate")
         snapshot = self._snapshot(request_id, request)
-        profile_name = profile or self.config.operator.experiments.default_profile
-        try:
-            profile_data = self.config.operator.experiments.profiles[profile_name]
-        except KeyError as exc:
-            raise OperatorGovernanceError(f"unknown Operator experiment profile: {profile_name}") from exc
-        commands = profile_data.get("commands") or []
-        if not isinstance(commands, list) or not commands:
-            raise OperatorGovernanceError(f"experiment profile has no commands: {profile_name}")
-        supplied = {str(key): str(value) for key, value in (values or {}).items()}
-        missing = [
-            str(name)
-            for name in profile_data.get("required_values") or []
-            if str(name) not in supplied
-        ]
-        if missing:
-            raise OperatorGovernanceError(
-                f"experiment profile {profile_name} requires values: {', '.join(missing)}"
-            )
+        profile_name, profile_data, supplied = self._experiment_profile(profile, values)
         experiment_id = self.store.next_id("experiment")
         experiment_workspace = (
             self.config.operator.worktrees.root / ".experiments" / experiment_id / "candidate"
@@ -602,6 +768,7 @@ class OperatorGovernanceService:
             "candidate_worktree": str(experiment_workspace),
             "shadow_state_root": str(shadow_root),
             "scope_version": scope_version,
+            "profile_values": supplied,
             "created_at": utc_now(),
             "started_at": utc_now(),
         }
@@ -632,7 +799,7 @@ class OperatorGovernanceService:
             results = run_command_specs(
                 experiment_workspace,
                 self.store.artifact_root / request_id / "experiments" / experiment_id,
-                commands,
+                list(profile_data.get("commands") or []),
                 values=command_values,
                 default_timeout_seconds=int(profile_data.get("timeout_seconds", 1800)),
                 name_prefix=profile_name,
@@ -665,15 +832,30 @@ class OperatorGovernanceService:
         current = self._snapshot(request_id, request)
         if current.patch_digest != snapshot.patch_digest or current.head_sha != snapshot.head_sha:
             failure = failure or "candidate changed while shadow experiment was running"
-        failed_commands = [item["name"] for item in results if not item["passed"]]
-        if failed_commands and failure is None:
-            failure = f"experiment commands failed: {', '.join(failed_commands)}"
+        receipt: dict[str, Any] | None = None
+        if failure is None:
+            try:
+                receipt = derive_metric_receipt(
+                    source="operator_candidate_experiment",
+                    profile=profile_name,
+                    values=supplied,
+                    base_sha=request.base_sha,
+                    head_sha=snapshot.head_sha,
+                    patch_digest=snapshot.patch_digest,
+                    command_results=results,
+                    profile_contract=profile_data,
+                )
+            except OperatorMetricsError as exc:
+                failure = str(exc)
+        passed = bool(results) and all(bool(item["passed"]) for item in results)
         record.update(
             {
                 "status": "FAILED" if failure else "COMPLETED",
                 "finished_at": utc_now(),
                 "failure": failure,
+                "passed": passed,
                 "command_results": results,
+                "metric_receipt": receipt,
             }
         )
         self.store.update_experiment(record)
@@ -681,7 +863,7 @@ class OperatorGovernanceService:
             request_id,
             "experiment_failed" if failure else "experiment_completed",
             "trusted-host",
-            {"experiment_id": experiment_id, "failure": failure},
+            {"experiment_id": experiment_id, "failure": failure, "passed": passed},
         )
         return record
 
@@ -1250,7 +1432,6 @@ class OperatorGovernanceService:
         request_id: str,
         *,
         mode: str = "full",
-        current_metrics: Mapping[str, float] | None = None,
         actor: str | None = None,
     ) -> dict[str, Any]:
         projection = self.projection(request_id)
@@ -1274,8 +1455,14 @@ class OperatorGovernanceService:
         if not policy.trusted:
             decision.violations.append("bootstrap policy cannot produce VERIFIED authority")
             decision.allowed = False
-        if decision.effective_risk in {"medium", "high", "constitutional"} and not request.performance_baseline:
-            decision.violations.append("medium or protected change requires a trusted performance baseline")
+        baseline_layers = {
+            str(item) for item in policy.data.get("baseline_required_layers") or []
+        }
+        behavior_change = bool((set(decision.changed_layers) or request.declared_layers) & baseline_layers)
+        if mode == "full" and behavior_change and not request.performance_baseline:
+            decision.violations.append(
+                "behavior-affecting change requires a trusted performance baseline"
+            )
             decision.allowed = False
         extra_profiles = (
             self.config.operator.verification.fast_profiles
@@ -1377,13 +1564,33 @@ class OperatorGovernanceService:
                 or observed_after.head_sha != decision.head_sha
             ):
                 failures.append("candidate changed while trusted verification was running")
-        if not failures and request.performance_baseline:
+        if not failures and mode == "full" and request.performance_baseline:
             try:
+                baseline = baseline_for_request(
+                    self.project_root,
+                    request.performance_baseline,
+                    request.base_sha,
+                )
+                matching_receipts = [
+                    item.get("metric_receipt")
+                    for item in self.store.read_experiments(request_id)
+                    if item.get("status") == "COMPLETED"
+                    and item.get("candidate_head_sha") == decision.head_sha
+                    and item.get("patch_digest") == decision.patch_digest
+                    and item.get("profile") == baseline["profile"]
+                    and (item.get("metric_receipt") or {}).get("input_digest")
+                    == baseline["input_digest"]
+                ]
+                if not matching_receipts:
+                    raise OperatorMetricsError(
+                        "missing completed trusted experiment for the current candidate patch and baseline profile"
+                    )
                 regression = compare_baseline(
                     self.project_root,
                     request.performance_baseline,
-                    current_metrics or {},
+                    matching_receipts[-1],
                     policy.data.get("metrics") or {},
+                    request_base_sha=request.base_sha,
                 )
             except OperatorMetricsError as exc:
                 regression = {"ok": False, "failures": [str(exc)], "comparisons": {}}
@@ -1495,10 +1702,9 @@ class OperatorGovernanceService:
         self,
         request_id: str,
         *,
-        current_metrics: Mapping[str, float] | None = None,
         actor: str | None = None,
     ) -> dict[str, Any]:
-        return self.verify(request_id, mode="full", current_metrics=current_metrics, actor=actor)
+        return self.verify(request_id, mode="full", actor=actor)
 
     def advance(self, request_id: str, *, actor: str | None = None) -> dict[str, Any]:
         """Perform one policy-approved scheduler step without giving an agent state-write access."""
@@ -1544,6 +1750,37 @@ class OperatorGovernanceService:
                 ),
             }
         if latest_check.mode == "fast":
+            request, _ = self._effective_request(request_id)
+            if request.performance_baseline:
+                baseline = baseline_for_request(
+                    self.project_root,
+                    request.performance_baseline,
+                    request.base_sha,
+                )
+                snapshot = self._snapshot(request_id, request)
+                matching = [
+                    item
+                    for item in self.store.read_experiments(request_id)
+                    if item.get("status") == "COMPLETED"
+                    and item.get("candidate_head_sha") == snapshot.head_sha
+                    and item.get("patch_digest") == snapshot.patch_digest
+                    and item.get("profile") == baseline["profile"]
+                    and (item.get("metric_receipt") or {}).get("input_digest")
+                    == baseline["input_digest"]
+                ]
+                if not matching:
+                    return {
+                        "action": "experiment_run",
+                        "result": self.run_experiment(
+                            request_id,
+                            profile=str(baseline["profile"]),
+                            values={
+                                str(key): str(value)
+                                for key, value in (baseline.get("profile_values") or {}).items()
+                            },
+                            actor=actor,
+                        ),
+                    }
             return {"action": "verify_full", "result": self.verify(request_id, mode="full", actor=actor)}
         return {"action": "blocked", "reason": "no legal automatic transition", "status": self.status(request_id)}
 
@@ -1561,12 +1798,30 @@ class OperatorGovernanceService:
         projection = self.projection(request_id)
         self.guard.require_phase(projection.state, "REQUESTED", "ACTIVE", "VERIFIED")
         request, current_version = self._effective_request(request_id)
+        new_layers = tuple(dict.fromkeys(str(item) for item in add_layers))
+        new_paths = tuple(dict.fromkeys(str(item) for item in add_paths))
+        if not new_layers and not new_paths:
+            raise OperatorGovernanceError("scope change must add a layer or path")
+        if new_layers and not new_paths:
+            raise OperatorGovernanceError("adding a scope layer requires at least one planned path")
+        if new_layers:
+            constitution = self.policy().data
+            missing_layer_paths = [
+                layer
+                for layer in new_layers
+                if not any(layer in layers_for_file(constitution, path) for path in new_paths)
+            ]
+            if missing_layer_paths:
+                raise OperatorGovernanceError(
+                    "scope expansion has no matching planned path for layer(s): "
+                    + ", ".join(missing_layer_paths)
+                )
         layers = tuple(
             dict.fromkeys(
-                [request.primary_layer, *request.secondary_layers, *[str(item) for item in add_layers]]
+                [request.primary_layer, *request.secondary_layers, *new_layers]
             )
         )
-        paths = tuple(dict.fromkeys([*request.planned_paths, *[str(item) for item in add_paths]]))
+        paths = tuple(dict.fromkeys([*request.planned_paths, *new_paths]))
         revision = ScopeRevision(
             revision_id=self.store.next_id("scope"),
             request_id=request_id,

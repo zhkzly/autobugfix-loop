@@ -248,12 +248,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
                         }
                     ],
                 },
-                "swebench-smoke": {
+                "local-dataset-e2e": {
                     "timeout_seconds": 7200,
                     "required_values": ["dataset"],
                     "commands": [
                         {
-                            "name": "swebench-verified-smoke",
+                            "name": "local-dataset-e2e",
                             "argv": [
                                 "uv",
                                 "run",
@@ -265,7 +265,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                                 "--dataset",
                                 "{dataset}",
                                 "--out",
-                                "{shadow_state_root}/swebench",
+                                "{shadow_state_root}/dataset-e2e",
                             ],
                         }
                     ],

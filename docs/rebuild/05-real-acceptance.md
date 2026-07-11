@@ -14,7 +14,7 @@ real GitHub source -> injected failing regression -> configured target repo
 -> isolated Execution worktree -> real Codex Writer -> real pytest verifier
 -> read-only Codex Evaluator -> human gate/archive
 -> accepted evidence -> Memory digest/proposal (pending only)
--> committed oracle -> isolated Eval Execution -> generated/oracle scoring
+-> committed diagnostic oracle -> isolated Eval Execution -> independent test scoring
 ```
 
 The target main checkout must never be modified. Every model run must retain
@@ -98,8 +98,11 @@ worktree and invokes the real Execution loop again.
 The Eval result must prove:
 
 - the model mode is `codex`, with real Writer and Evaluator roles;
-- generated diff and oracle diff are both non-empty and byte-for-byte equal;
-- the configured pytest command passes;
+- generated diff and diagnostic oracle diff are both non-empty;
+- the configured pytest command passes independently in the generated
+  worktree;
+- oracle diff equality is recorded only as diagnostic metadata and does not
+  reject a behaviorally correct alternative patch;
 - the report decision is `pass` and the run summary has no failures;
 - the Eval-owned Execution task stops at the human gate;
 - Eval does not accept, archive, deploy PPE, or approve Memory;

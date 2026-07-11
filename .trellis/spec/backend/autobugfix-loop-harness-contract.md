@@ -88,6 +88,9 @@
   - Eval may create isolated repos/control roots and collect generated diff,
     oracle diff/tests, reports, scores, and diagnosis.
   - Eval must not approve PPE, archive execution tasks, or approve memory.
+  - Eval adapters materialize benchmark-specific repositories and oracles into
+    one versioned Case contract. Tests/official harness results are the primary
+    score; oracle diff equality is diagnostic only.
 - Operator loop purpose:
   - Debug and improve Autobugfix itself by reading artifacts, locating the
     failing subsystem, and changing code/skills/config on non-main branches.
@@ -141,14 +144,14 @@
 - Memory tests for collect/digest/maintain/proposal/approve separation.
 - Eval tests that call real execution-loop surfaces with a fake backend only in
   tests, then write generated/oracle artifacts and reports.
-- Acceptance tests that run the real toy repo E2E path from
+- Acceptance tests that run the pinned public real-repository E2E path from
   `docs/rebuild/05-real-acceptance.md`.
 - Before finishing implementation work, run:
   - `uv run pytest -q`
   - `uv run python -m compileall -q src tests scripts`
   - `git diff --check`
   - role skill validation when available
-  - real toy repo E2E when the change can affect execution, memory, eval, or
+  - real repository E2E when the change can affect execution, memory, eval, or
     operator behavior
 
 ### 7. Wrong vs Correct

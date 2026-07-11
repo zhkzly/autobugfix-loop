@@ -174,6 +174,13 @@ class OperatorRequest:
             raise OperatorModelError("evidence must not be empty")
         if not self.validation_profiles:
             raise OperatorModelError("validation_profiles must not be empty")
+        if not self.planned_paths:
+            raise OperatorModelError("planned_paths must not be empty")
+        for path in self.planned_paths:
+            _required(path, "planned_paths")
+            normalized = path.replace("\\", "/")
+            if normalized.startswith("/") or ".." in normalized.split("/"):
+                raise OperatorModelError(f"planned path must be repository-relative: {path!r}")
         if self.expires_at:
             datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
 

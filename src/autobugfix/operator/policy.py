@@ -105,20 +105,42 @@ def _matches_any(path: str, patterns: Iterable[str]) -> bool:
     return any(_match_path(pattern, path) for pattern in patterns)
 
 
+def _pattern_specificity(pattern: str) -> tuple[int, int, int]:
+    normalized = pattern.replace("\\", "/")
+    segments = [segment for segment in normalized.split("/") if segment]
+    wildcard_markers = ("*", "?", "[")
+    exact = int(not any(marker in normalized for marker in wildcard_markers))
+    literal_segments = sum(
+        1 for segment in segments if not any(marker in segment for marker in wildcard_markers)
+    )
+    literal_characters = sum(
+        1 for character in normalized if character not in "*?[]"
+    )
+    return exact, literal_segments, literal_characters
+
+
 def layers_for_file(constitution: Mapping[str, Any], path: str) -> list[str]:
+    resolution = constitution.get("layer_resolution") or {}
+    if not isinstance(resolution, dict):
+        raise OperatorPolicyError("layer_resolution must be a mapping")
+    strategy = str(resolution.get("strategy") or "most_specific")
+    if strategy != "most_specific":
+        raise OperatorPolicyError(f"unsupported layer resolution strategy: {strategy!r}")
     layers = constitution.get("layers") or {}
     if not isinstance(layers, dict):
         return []
-    matches: list[str] = []
+    matches: dict[str, tuple[int, int, int]] = {}
     for layer, raw in layers.items():
         if not isinstance(raw, dict):
             continue
         patterns = [str(item) for item in raw.get("paths") or []]
-        if _matches_any(path, patterns):
-            matches.append(str(layer))
-    if len(matches) > 1 and "docs_skills" in matches:
-        matches.remove("docs_skills")
-    return matches
+        matching = [_pattern_specificity(pattern) for pattern in patterns if _match_path(pattern, path)]
+        if matching:
+            matches[str(layer)] = max(matching)
+    if not matches:
+        return []
+    best = max(matches.values())
+    return sorted(layer for layer, specificity in matches.items() if specificity == best)
 
 
 def _protected_patterns(constitution: Mapping[str, Any]) -> list[str]:
@@ -233,12 +255,45 @@ def static_constitution_violations(project_root: Path, constitution: Mapping[str
     invariants = constitution.get("static_invariants") or {}
     if not isinstance(invariants, dict):
         return ["static_invariants must be a mapping"]
+    if constitution.get("baseline_root") != ".autobugfix-baselines":
+        violations.append("baseline_root must match the trusted baseline store")
+    baseline_authority = constitution.get("baseline_authority") or {}
+    if not isinstance(baseline_authority, dict) or baseline_authority.get(
+        "candidate_supplied_authority"
+    ) != "forbidden":
+        violations.append("candidate-supplied baseline authority must be forbidden")
 
     gitignore = project_root / ".gitignore"
     gitignore_text = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
     for required in invariants.get("required_gitignore") or []:
         if str(required) not in gitignore_text:
             violations.append(f"missing gitignore runtime pattern: {required}")
+
+    resolution = constitution.get("layer_resolution") or {}
+    if not isinstance(resolution, dict):
+        violations.append("layer_resolution must be a mapping")
+    else:
+        if resolution.get("strategy") != "most_specific":
+            violations.append("layer_resolution.strategy must be 'most_specific'")
+        if resolution.get("ambiguity") != "reject":
+            violations.append("layer_resolution.ambiguity must be 'reject'")
+        prefixes = tuple(str(item) for item in resolution.get("governed_prefixes") or [])
+        if not prefixes:
+            violations.append("layer_resolution.governed_prefixes must not be empty")
+        else:
+            try:
+                tracked = run_git(project_root, ["ls-files"], check=True).stdout.splitlines()
+            except GitError as exc:
+                violations.append(f"cannot inspect governed paths: {exc}")
+            else:
+                for path in sorted(item for item in tracked if item.startswith(prefixes)):
+                    owners = layers_for_file(constitution, path)
+                    if not owners:
+                        violations.append(f"governed path has no layer owner: {path}")
+                    elif len(owners) > 1:
+                        violations.append(
+                            f"governed path has ambiguous layer owners {owners}: {path}"
+                        )
 
     roles: Mapping[str, Any] = {}
     role_runtime: Mapping[str, Any] = {}
@@ -355,6 +410,13 @@ def evaluate_policy(
         if not file_layers:
             unclassified.append(file_path)
             out_of_scope.append(file_path)
+            continue
+        if len(file_layers) > 1:
+            unclassified.append(file_path)
+            out_of_scope.append(file_path)
+            violations.append(
+                f"changed file has ambiguous layer ownership {file_layers}: {file_path}"
+            )
             continue
         for layer in file_layers:
             changed_layers.setdefault(layer, []).append(file_path)

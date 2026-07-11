@@ -27,8 +27,7 @@ from autobugfix.worker import start_worker, stop_worker, worker_status
 from autobugfix.memory_worker import start_worker as start_memory_worker
 from autobugfix.memory_worker import stop_worker as stop_memory_worker
 from autobugfix.memory_worker import worker_status as memory_worker_status
-from autobugfix.git_utils import rev_parse
-from autobugfix.operator.metrics import compare_baseline, parse_metric, record_baseline
+from autobugfix.operator.metrics import read_baseline
 from autobugfix.operator.models import (
     VALID_APPROVAL_DECISIONS,
     VALID_CONFIDENCE,
@@ -263,20 +262,22 @@ def command_dataset(args: argparse.Namespace) -> int:
 def command_eval(args: argparse.Namespace) -> int:
     action = args.eval_action
     if action == "run":
-        print(
-            run_eval(
-                Path.cwd(),
-                Path(args.dataset),
-                Path(args.out),
-                case_selector=args.case,
-                run_id=args.run_id,
-                model_mode=args.model_mode,
-                test_command=args.test_command,
-                codex_timeout_seconds=args.codex_timeout_seconds,
-                writer_timeout_seconds=args.writer_timeout_seconds,
-                evaluator_timeout_seconds=args.evaluator_timeout_seconds,
-            )
+        run_dir = run_eval(
+            Path.cwd(),
+            Path(args.dataset),
+            Path(args.out),
+            case_selector=args.case,
+            run_id=args.run_id,
+            model_mode=args.model_mode,
+            test_command=args.test_command,
+            codex_timeout_seconds=args.codex_timeout_seconds,
+            writer_timeout_seconds=args.writer_timeout_seconds,
+            evaluator_timeout_seconds=args.evaluator_timeout_seconds,
         )
+        print(run_dir)
+        summary = yaml.safe_load((run_dir / "summary.yaml").read_text(encoding="utf-8")) or {}
+        if summary.get("failed_count") or summary.get("harness_error_count"):
+            return 1
     elif action == "score":
         print(score_path(Path(args.path)))
     elif action == "diagnose":
@@ -451,7 +452,6 @@ def command_operator(args: argparse.Namespace) -> int:
         report = service.verify(
             args.request_id,
             mode=getattr(args, "mode", "full"),
-            current_metrics=parse_metric(args.metric or []),
             actor=args.actor,
         )
         _print_yaml(report)
@@ -528,24 +528,19 @@ def command_operator(args: argparse.Namespace) -> int:
         _print_yaml(service.revoke(args.request_id, actor=args.actor, reason=args.reason))
     elif action == "baseline":
         if args.baseline_action == "record":
-            path = record_baseline(
-                root,
+            report = service.capture_baseline(
                 args.name,
-                parse_metric(args.metric or []),
-                base_sha=args.base_sha or rev_parse(root, "HEAD"),
-                artifacts=args.artifact or [],
+                profile=args.profile,
+                values=_parse_values(args.value or []),
                 notes=args.notes or "",
             )
-            print(path)
+            _print_yaml(report)
         elif args.baseline_action == "compare":
-            report = compare_baseline(
-                root,
-                args.name,
-                parse_metric(args.metric or []),
-                service.policy().data.get("metrics") or {},
-            )
+            report = service.compare_experiment_baseline(args.request_id, args.name)
             _print_yaml(report)
             return 0 if report["ok"] else 1
+        elif args.baseline_action == "show":
+            _print_yaml(read_baseline(root, args.name))
     return 0
 
 
@@ -698,7 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
     erun.add_argument("--case")
     erun.add_argument("--out", required=True)
     erun.add_argument("--run-id", default="run")
-    erun.add_argument("--model-mode", default="codex", choices=["codex", "fake"])
+    erun.add_argument("--model-mode", default="codex", choices=["codex"])
     erun.add_argument("--test-command")
     erun.add_argument("--codex-timeout-seconds", type=int)
     erun.add_argument("--writer-timeout-seconds", type=int)
@@ -770,7 +765,7 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--summary", required=True)
     request.add_argument("--primary-layer", choices=VALID_LAYERS, required=True)
     request.add_argument("--secondary-layer", action="append", choices=VALID_LAYERS)
-    request.add_argument("--planned-path", action="append")
+    request.add_argument("--planned-path", action="append", required=True)
     request.add_argument("--risk", choices=VALID_RISKS, default="low")
     request.add_argument("--validation-profile", action="append")
     request.add_argument("--performance-baseline")
@@ -864,7 +859,6 @@ def build_parser() -> argparse.ArgumentParser:
     validate = operator_sub.add_parser("validate")
     governance_options(validate)
     validate.add_argument("--request-id", required=True)
-    validate.add_argument("--metric", action="append", help="Current metric as key=value")
     validate.add_argument("--actor")
     validate.set_defaults(func=command_operator)
 
@@ -872,7 +866,6 @@ def build_parser() -> argparse.ArgumentParser:
     governance_options(verify)
     verify.add_argument("--request-id", required=True)
     verify.add_argument("--mode", choices=["fast", "full"], default="full")
-    verify.add_argument("--metric", action="append", help="Current metric as key=value")
     verify.add_argument("--actor")
     verify.set_defaults(func=command_operator)
 
@@ -969,16 +962,19 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_record = baseline_sub.add_parser("record")
     governance_options(baseline_record)
     baseline_record.add_argument("--name", required=True)
-    baseline_record.add_argument("--metric", action="append", help="Numeric metric as key=value")
-    baseline_record.add_argument("--base-sha")
-    baseline_record.add_argument("--artifact", action="append")
+    baseline_record.add_argument("--profile")
+    baseline_record.add_argument("--value", action="append", help="Experiment input as key=value")
     baseline_record.add_argument("--notes")
     baseline_record.set_defaults(func=command_operator)
     baseline_compare = baseline_sub.add_parser("compare")
     governance_options(baseline_compare)
     baseline_compare.add_argument("--name", required=True)
-    baseline_compare.add_argument("--metric", action="append", help="Current numeric metric as key=value")
+    baseline_compare.add_argument("--request-id", required=True)
     baseline_compare.set_defaults(func=command_operator)
+    baseline_show = baseline_sub.add_parser("show")
+    governance_options(baseline_show)
+    baseline_show.add_argument("--name", required=True)
+    baseline_show.set_defaults(func=command_operator)
 
     writer_view = sub.add_parser("writer")
     writer_view_sub = writer_view.add_subparsers(dest="writer_view_action", required=True)

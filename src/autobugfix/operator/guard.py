@@ -66,8 +66,31 @@ def effective_request(request: OperatorRequest, revisions: Iterable[ScopeRevisio
     )
 
 
-def _matches_any(path: str, patterns: Iterable[str]) -> bool:
-    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+def _literal_prefix(pattern: str) -> str:
+    normalized = pattern.replace("\\", "/")
+    marker_positions = [position for marker in "*?[" if (position := normalized.find(marker)) >= 0]
+    if not marker_positions:
+        return normalized
+    prefix = normalized[: min(marker_positions)]
+    return prefix.rsplit("/", 1)[0] if "/" in prefix else ""
+
+
+def _patterns_may_overlap(left: str, right: str) -> bool:
+    left_glob = any(marker in left for marker in "*?[")
+    right_glob = any(marker in right for marker in "*?[")
+    if not left_glob:
+        return fnmatch.fnmatch(left, right)
+    if not right_glob:
+        return fnmatch.fnmatch(right, left)
+    left_prefix = _literal_prefix(left).rstrip("/")
+    right_prefix = _literal_prefix(right).rstrip("/")
+    if not left_prefix or not right_prefix:
+        return True
+    return (
+        left_prefix == right_prefix
+        or left_prefix.startswith(f"{right_prefix}/")
+        or right_prefix.startswith(f"{left_prefix}/")
+    )
 
 
 def compute_scope_risk(request: OperatorRequest, constitution: Mapping[str, Any]) -> tuple[str, list[str]]:
@@ -83,8 +106,11 @@ def compute_scope_risk(request: OperatorRequest, constitution: Mapping[str, Any]
         inferred_layers.update(layers)
         if not set(layers) & request.declared_layers:
             violations.append(f"planned path is outside declared layers: {path}")
-        if _matches_any(path, protected_patterns):
+        if any(_patterns_may_overlap(path, pattern) for pattern in protected_patterns):
             protected = True
+    missing_layers = sorted(request.declared_layers - inferred_layers)
+    for layer in missing_layers:
+        violations.append(f"declared layer has no planned path: {layer}")
     if protected:
         computed = "constitutional"
     elif len(request.declared_layers | inferred_layers) > 1:

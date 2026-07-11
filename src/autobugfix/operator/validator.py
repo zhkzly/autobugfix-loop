@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Mapping
@@ -11,7 +12,12 @@ from typing import Any, Mapping
 from autobugfix.models import utc_now
 from autobugfix.config import load_config
 from autobugfix.operator.guard import effective_request
-from autobugfix.operator.metrics import OperatorMetricsError, compare_baseline
+from autobugfix.operator.metrics import (
+    OperatorMetricsError,
+    baseline_for_request,
+    compare_baseline,
+    derive_metric_receipt,
+)
 from autobugfix.operator.models import digest_payload
 from autobugfix.operator.policy import PolicyDecision, evaluate_policy
 from autobugfix.operator.store import OperatorStore
@@ -46,6 +52,7 @@ def _run_command(
     read_only_binds: tuple[tuple[Path, Path], ...],
 ) -> dict[str, Any]:
     started_at = utc_now()
+    started_monotonic = time.monotonic()
     timed_out = False
     environment = {
         key: value
@@ -145,6 +152,7 @@ def _run_command(
         "passed": exit_code == 0,
         "started_at": started_at,
         "finished_at": utc_now(),
+        "duration_seconds": time.monotonic() - started_monotonic,
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
@@ -255,7 +263,6 @@ def validate_operator_request(
     trusted_file: Path | None = None,
     bootstrap_policy: bool = False,
     run_profiles: bool = True,
-    current_metrics: Mapping[str, float] | None = None,
     allowed_signers: Path | None = None,
     phase: str = "postflight",
     record: bool = True,
@@ -294,14 +301,17 @@ def validate_operator_request(
     )
     validation_id = f"validation-{uuid.uuid4().hex[:12]}"
     command_results: list[dict[str, Any]] = []
+    experiment_results: list[dict[str, Any]] = []
     regression: dict[str, Any] | None = None
 
     if not policy.trusted:
         decision.violations.append("bootstrap policy is local feedback only and cannot produce merge-ready authority")
         decision.allowed = False
 
-    if decision.effective_risk in {"medium", "high", "constitutional"} and not request.performance_baseline:
-        decision.violations.append("cross-layer or protected change requires a performance baseline")
+    baseline_layers = {str(item) for item in policy.data.get("baseline_required_layers") or []}
+    behavior_change = bool((set(decision.changed_layers) or request.declared_layers) & baseline_layers)
+    if behavior_change and not request.performance_baseline:
+        decision.violations.append("behavior-affecting change requires a trusted performance baseline")
         decision.allowed = False
 
     if decision.allowed and run_profiles:
@@ -329,13 +339,58 @@ def validate_operator_request(
             decision.violations.append("one or more trusted validation profile commands failed")
             decision.allowed = False
 
-    if decision.allowed and request.performance_baseline:
+    current_receipt: dict[str, Any] | None = None
+    if decision.allowed and request.performance_baseline and run_profiles:
         try:
+            baseline = baseline_for_request(
+                record_root,
+                request.performance_baseline,
+                request.base_sha,
+            )
+            profile = baseline["profile_contract"]
+            profile_values = {
+                str(key): str(value)
+                for key, value in (baseline.get("profile_values") or {}).items()
+            }
+            shadow_root = store.root / "standalone" / validation_id / "shadow"
+            shadow_root.mkdir(parents=True, exist_ok=True)
+            experiment_results = run_command_specs(
+                candidate,
+                store.artifact_root / request_id / "standalone" / validation_id / "experiment",
+                list(profile.get("commands") or []),
+                values={
+                    "request_id": request_id,
+                    "base_sha": decision.base_sha,
+                    "head_sha": decision.head_sha,
+                    "candidate_root": str(candidate),
+                    "shadow_state_root": str(shadow_root),
+                    **profile_values,
+                },
+                default_timeout_seconds=int(profile.get("timeout_seconds", 1800)),
+                name_prefix=str(baseline["profile"]),
+                process_sandbox=config.operator.verification.process_sandbox,
+                require_process_sandbox=config.operator.verification.require_process_sandbox,
+                network_access=bool(profile.get("network_access", False)),
+                hidden_roots=(store.root, store.artifact_root),
+                writable_roots=(shadow_root,),
+                read_only_binds=runtime_binds,
+            )
+            current_receipt = derive_metric_receipt(
+                source="trusted_admission_experiment",
+                profile=str(baseline["profile"]),
+                values=profile_values,
+                base_sha=decision.base_sha,
+                head_sha=decision.head_sha,
+                patch_digest=decision.patch_digest,
+                command_results=experiment_results,
+                profile_contract=profile,
+            )
             regression = compare_baseline(
                 record_root,
                 request.performance_baseline,
-                current_metrics or {},
+                current_receipt,
                 policy.data.get("metrics") or {},
+                request_base_sha=request.base_sha,
             )
         except OperatorMetricsError as exc:
             regression = {"ok": False, "failures": [str(exc)], "comparisons": {}}
@@ -350,8 +405,9 @@ def validate_operator_request(
         "candidate_root": str(candidate),
         "policy": decision.to_dict(),
         "command_results": command_results,
+        "experiment_results": experiment_results,
         "regression": regression,
-        "current_metrics": {str(key): float(value) for key, value in (current_metrics or {}).items()},
+        "metric_receipt": current_receipt,
         "created_at": utc_now(),
     }
     report = {**payload, "validation_digest": digest_payload(payload)}

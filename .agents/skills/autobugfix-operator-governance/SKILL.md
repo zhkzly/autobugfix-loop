@@ -19,22 +19,26 @@ trusted service owns state.
 2. Read `autobugfix operator status`. It is a service-derived view, not
    permission to write SQLite.
 3. Diagnose the owning layer from real evidence before requesting changes.
-4. Create a request with frozen base, layers, planned paths, profiles, and
-   baseline. Never write governance records directly.
-5. Request `start`; only the service may create the experiment worktree.
-6. Request one Writer attempt. Do not edit main or candidate directly.
-7. Request fast verification and consume Guard feedback rather than model
+4. Capture the configured trusted-ref experiment baseline before changing a
+   behavior layer. Metrics typed by an Operator are not evidence.
+5. Create a request with frozen base, layers, at least one planned path pattern,
+   profiles, and baseline. Never write governance records directly.
+6. Request `start`; only the service may create the experiment worktree.
+7. Request one Writer attempt. Do not edit main or candidate directly.
+8. Request fast verification and consume Guard feedback rather than model
    claims.
-8. Retry deterministic failures within budget. Revert unnecessary scope via
+9. Retry deterministic failures within budget. Revert unnecessary scope via
    Writer; request a versioned scope expansion when evidence proves it needed.
-9. Cross-layer expansion needs approval bound to that scope version.
+10. Cross-layer expansion needs approval bound to that scope version and at
+   least one path pattern for every added layer.
    Protected/constitutional expansion needs verified human authority.
-10. Commit through `operator candidate-commit`; it writes the advisory PR
+11. Commit through `operator candidate-commit`; it writes the advisory PR
     manifest before the trusted commit. Then request full verification.
-11. Run the configured real-repository E2E or SWE-bench experiment when system
-    evidence is required. Toy runs are developer smoke only. Shadow state is
-    non-authoritative and host-scored.
-12. Promote only a current VERIFIED patch. PR merge, canary activation, and
+12. Run the same configured experiment profile. Guard derives a metric receipt
+    bound to profile inputs, HEAD, and patch digest. A generic local dataset
+    profile is not an official SWE-bench run; official claims require the
+    official adapter and harness. Toy runs are developer smoke only.
+13. Promote only a current VERIFIED patch. PR merge, canary activation, and
     rollback are separate trusted transitions.
 
 Request phases are only REQUESTED, ACTIVE, VERIFIED, and CLOSED. WriterRun,

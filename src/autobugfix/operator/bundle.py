@@ -5,8 +5,15 @@ from typing import Any, Iterable
 
 import yaml
 
+from autobugfix.config import load_config
 from autobugfix.operator.approvals import OperatorApprovalError, verify_external_approval
 from autobugfix.operator.guard import effective_request
+from autobugfix.operator.metrics import (
+    OperatorMetricsError,
+    baseline_for_request,
+    compare_baseline,
+    derive_metric_receipt,
+)
 from autobugfix.operator.models import (
     OperatorApproval,
     OperatorEvent,
@@ -18,7 +25,7 @@ from autobugfix.operator.models import (
 from autobugfix.operator.policy import evaluate_policy
 from autobugfix.operator.projection import OperatorProjectionError, project_request
 from autobugfix.operator.trusted import TrustedPolicy
-from autobugfix.operator.validator import run_validation_profiles
+from autobugfix.operator.validator import run_command_specs, run_validation_profiles
 
 
 class OperatorBundleError(RuntimeError):
@@ -79,7 +86,6 @@ def validate_bundle(
     runtime_venv: Path | None = None,
 ) -> dict[str, Any]:
     """Re-derive merge authority without trusting candidate-authored status claims."""
-    del trusted_baseline_root  # Baseline metrics must be re-measured by trusted profiles, never read from the manifest.
     bundle = read_bundle(bundle_path)
     triage = OperatorTriage.from_dict(bundle["triage"])
     base_request = OperatorRequest.from_dict(bundle["request"])
@@ -136,22 +142,112 @@ def validate_bundle(
     )
     violations.extend(decision.violations)
     command_results: list[dict[str, Any]] = []
+    experiment_results: list[dict[str, Any]] = []
+    metric_receipt: dict[str, Any] | None = None
+    regression: dict[str, Any] | None = None
+    baseline: dict[str, Any] | None = None
+    baseline_layers = {
+        str(item) for item in trusted_policy.data.get("baseline_required_layers") or []
+    }
+    behavior_change = bool(
+        (set(decision.changed_layers) or request.declared_layers) & baseline_layers
+    )
+    authority_root = trusted_baseline_root.resolve() if trusted_baseline_root else None
+    if run_profiles and authority_root is None:
+        violations.append("remote admission profiles require a trusted base checkout")
+    if behavior_change:
+        if not request.performance_baseline:
+            violations.append("behavior-affecting change requires a trusted performance baseline")
+        elif authority_root is None:
+            violations.append("remote admission requires a trusted baseline checkout")
+        else:
+            try:
+                baseline = baseline_for_request(
+                    authority_root,
+                    request.performance_baseline,
+                    request.base_sha,
+                )
+            except OperatorMetricsError as exc:
+                violations.append(str(exc))
     if run_profiles and not violations:
-        command_results = run_validation_profiles(
-            candidate_root.resolve(),
-            candidate_root.resolve(),
-            request.request_id,
-            f"trusted-pr-{request.request_id}",
-            decision,
-            trusted_policy.data,
-            read_only_binds=(
-                ((runtime_venv.resolve(), candidate_root.resolve() / ".venv"),)
-                if runtime_venv is not None and runtime_venv.is_dir()
-                else ()
-            ),
+        validation_id = f"trusted-pr-{request.request_id}"
+        runtime_binds = (
+            ((runtime_venv.resolve(), candidate_root.resolve() / ".venv"),)
+            if runtime_venv is not None and runtime_venv.is_dir()
+            else ()
         )
-        if any(not item["passed"] for item in command_results):
-            violations.append("one or more trusted-base validation commands failed")
+        log_owner = authority_root or candidate_root.resolve()
+        authority_state = log_owner / ".autobugfix/operator-pr" / request.request_id
+        authority_hidden_root = log_owner / ".autobugfix"
+        try:
+            command_results = run_validation_profiles(
+                candidate_root.resolve(),
+                log_owner,
+                request.request_id,
+                validation_id,
+                decision,
+                trusted_policy.data,
+                log_root_override=authority_state / "validation",
+                hidden_roots=(authority_hidden_root,),
+                read_only_binds=runtime_binds,
+            )
+            if any(not item["passed"] for item in command_results):
+                violations.append("one or more trusted-base validation commands failed")
+        except Exception as exc:
+            violations.append(f"trusted-base validation harness failed: {exc}")
+
+        if not violations and baseline is not None:
+            profile = baseline["profile_contract"]
+            profile_values = {
+                str(key): str(value)
+                for key, value in (baseline.get("profile_values") or {}).items()
+            }
+            shadow_root = authority_state / "experiment-shadow"
+            shadow_root.mkdir(parents=True, exist_ok=True)
+            try:
+                config = load_config(log_owner)
+                experiment_results = run_command_specs(
+                    candidate_root.resolve(),
+                    authority_state / "experiment",
+                    list(profile.get("commands") or []),
+                    values={
+                        "request_id": request.request_id,
+                        "base_sha": decision.base_sha,
+                        "head_sha": decision.head_sha,
+                        "candidate_root": str(candidate_root.resolve()),
+                        "shadow_state_root": str(shadow_root),
+                        **profile_values,
+                    },
+                    default_timeout_seconds=int(profile.get("timeout_seconds", 1800)),
+                    name_prefix=str(baseline["profile"]),
+                    process_sandbox=config.operator.verification.process_sandbox,
+                    require_process_sandbox=config.operator.verification.require_process_sandbox,
+                    network_access=bool(profile.get("network_access", False)),
+                    hidden_roots=(authority_hidden_root,),
+                    writable_roots=(shadow_root,),
+                    read_only_binds=runtime_binds,
+                )
+                metric_receipt = derive_metric_receipt(
+                    source="trusted_pr_admission_experiment",
+                    profile=str(baseline["profile"]),
+                    values=profile_values,
+                    base_sha=decision.base_sha,
+                    head_sha=decision.head_sha,
+                    patch_digest=decision.patch_digest,
+                    command_results=experiment_results,
+                    profile_contract=profile,
+                )
+                regression = compare_baseline(
+                    authority_root,
+                    request.performance_baseline,
+                    metric_receipt,
+                    trusted_policy.data.get("metrics") or {},
+                    request_base_sha=request.base_sha,
+                )
+                if not regression["ok"]:
+                    violations.extend(str(item) for item in regression["failures"])
+            except Exception as exc:
+                violations.append(f"trusted baseline experiment failed: {exc}")
     return {
         "allowed": not violations and decision.allowed and trusted_policy.trusted,
         "manifest": str(bundle_path),
@@ -164,5 +260,8 @@ def validate_bundle(
         "policy": decision.to_dict(),
         "trusted_external_approvals": [item.to_dict() for item in approvals],
         "command_results": command_results,
+        "experiment_results": experiment_results,
+        "metric_receipt": metric_receipt,
+        "regression": regression,
         "violations": violations,
     }

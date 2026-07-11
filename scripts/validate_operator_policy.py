@@ -23,7 +23,6 @@ def main() -> int:
     parser.add_argument("--allowed-signers")
     parser.add_argument("--policy-only", action="store_true")
     parser.add_argument("--phase", choices=["postflight", "merge"], default="merge")
-    parser.add_argument("--metric", action="append", default=[])
     parser.add_argument("--no-record", action="store_true")
     args = parser.parse_args()
 
@@ -47,17 +46,12 @@ def main() -> int:
         )
         allowed = report["allowed"]
     else:
-        metrics: dict[str, float] = {}
-        for item in args.metric:
-            key, value = item.split("=", 1)
-            metrics[key] = float(value)
         report = validate_operator_request(
             project_root,
             args.request_id,
             candidate_root=candidate_root,
             trusted_policy=policy,
             run_profiles=not args.policy_only,
-            current_metrics=metrics,
             allowed_signers=allowed_signers,
             phase=args.phase,
             record=not args.no_record,

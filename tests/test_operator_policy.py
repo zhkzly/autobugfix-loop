@@ -14,8 +14,10 @@ import yaml
 from autobugfix.cli import main
 from autobugfix.models import CodexRequest, CodexResult
 from autobugfix.operator.bundle import OperatorBundleError, validate_bundle
-from autobugfix.operator.metrics import compare_baseline, record_baseline
+from autobugfix.operator.guard import compute_scope_risk
+from autobugfix.operator.metrics import compare_baseline, derive_metric_receipt, record_baseline
 from autobugfix.operator.policy import layers_for_file, static_constitution_violations
+from autobugfix.operator.models import OperatorModelError, digest_payload
 from autobugfix.operator.service import OperatorGovernanceError, OperatorGovernanceService
 from autobugfix.operator.store import OperatorStoreError
 from autobugfix.operator.trusted import load_trusted_policy
@@ -159,6 +161,7 @@ def write_control_config(root: Path) -> None:
 
 def write_test_policy(root: Path, tmp_path: Path, *, canary_passes: bool = True) -> Path:
     policy = yaml.safe_load(PACKAGE_POLICY.read_text(encoding="utf-8"))
+    policy["baseline_required_layers"] = []
     state_db = root / ".autobugfix/operator-v3/governance.sqlite3"
     policy["validation_profiles"]["eval"] = {
         "timeout_seconds": 30,
@@ -214,7 +217,16 @@ def create_request(
     risk: str = "low",
     baseline: str | None = None,
     creator: str = "operator-agent",
+    planned_paths: tuple[str, ...] | None = None,
 ):
+    default_paths = {
+        "execution": ("src/autobugfix/runner.py",),
+        "memory": ("src/autobugfix/memory/**",),
+        "eval": ("src/autobugfix/eval/runner.py",),
+        "operator": ("src/autobugfix/operator/**",),
+        "shared_runtime": ("src/autobugfix/config.py",),
+        "docs_skills": ("docs/**",),
+    }
     triage = service.create_triage(
         triage_id=f"triage-{request_id}",
         summary="Observed a reproducible harness failure",
@@ -232,6 +244,7 @@ def create_request(
         requested_risk=risk,
         validation_profiles=(primary,),
         performance_baseline=baseline,
+        planned_paths=planned_paths or default_paths[primary],
         creator=creator,
     )
 
@@ -349,7 +362,7 @@ def test_signed_constitutional_approval_is_verified(tmp_path: Path):
 def test_candidate_constitution_cannot_authorize_itself(tmp_path: Path):
     root = make_operator_repo(tmp_path)
     service = service_for(root, tmp_path)
-    create_request(service, request_id="self-amend", primary="operator")
+    create_request(service, request_id="self-amend", primary="eval")
     workspace = Path(service.start("self-amend")["workspace"]["path"])
     (workspace / "src/autobugfix/operator/constitution.yaml").write_text(
         "version: 999\nprotected_paths: []\n", encoding="utf-8"
@@ -475,6 +488,16 @@ def test_static_policy_rejects_sdk_hook_enablement_and_runtime_disablement(tmp_p
     assert "codex.role_runtime.enabled expected True, got False" in violations
 
 
+def test_remote_operator_gate_fetches_history_and_preserves_authoritative_logs():
+    workflow = (PROJECT_ROOT / ".github/workflows/operator-policy.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert workflow.count("fetch-depth: 0") == 2
+    assert "actions/upload-artifact@v4" in workflow
+    assert "trusted/.autobugfix/operator-pr" in workflow
+
+
 def test_real_state_machine_uses_sandboxed_checks_and_advisory_manifest(tmp_path: Path):
     root = make_operator_repo(tmp_path)
     service = service_for(root, tmp_path)
@@ -557,24 +580,178 @@ def test_canary_activation_and_rollback_restore_last_known_good(tmp_path: Path):
 
 def test_baseline_contract_rejects_missing_and_regressed_metrics(tmp_path: Path):
     root = make_operator_repo(tmp_path)
+    stdout = tmp_path / "stdout.log"
+    stderr = tmp_path / "stderr.log"
+    stdout.write_text("passed\n", encoding="utf-8")
+    stderr.write_text("", encoding="utf-8")
+    profile_contract = {"commands": [{"name": "smoke", "argv": ["true"]}]}
+    baseline_receipt = derive_metric_receipt(
+        source="test",
+        profile="smoke",
+        values={},
+        base_sha="abc123",
+        head_sha="abc123",
+        patch_digest="base-patch",
+        command_results=(
+            {
+                "name": "smoke",
+                "exit_code": 0,
+                "passed": True,
+                "timed_out": False,
+                "duration_seconds": 10.0,
+                "stdout_path": str(stdout),
+                "stderr_path": str(stderr),
+            },
+        ),
+        profile_contract=profile_contract,
+    )
     record_baseline(
         root,
         "eval-smoke",
-        {"pass_rate": 1.0, "artifact_completeness": 1.0, "runtime_seconds": 10.0},
-        base_sha="abc123",
+        baseline_receipt,
+        profile_values={},
     )
     contract = yaml.safe_load(PACKAGE_POLICY.read_text(encoding="utf-8"))["metrics"]
-    missing = compare_baseline(root, "eval-smoke", {"pass_rate": 1.0}, contract)
+    missing_receipt = dict(baseline_receipt)
+    missing_receipt["metrics"] = {"pass_rate": 1.0}
+    missing_payload = {key: value for key, value in missing_receipt.items() if key != "receipt_digest"}
+    missing_receipt["receipt_digest"] = digest_payload(missing_payload)
+    missing = compare_baseline(root, "eval-smoke", missing_receipt, contract)
+    regressed_receipt = derive_metric_receipt(
+        source="test",
+        profile="smoke",
+        values={},
+        base_sha="abc123",
+        head_sha="def456",
+        patch_digest="candidate-patch",
+        command_results=(
+            {
+                "name": "smoke",
+                "exit_code": 1,
+                "passed": False,
+                "timed_out": False,
+                "duration_seconds": 20.0,
+                "stdout_path": str(stdout),
+                "stderr_path": str(stderr),
+            },
+        ),
+        profile_contract=profile_contract,
+    )
     regressed = compare_baseline(
         root,
         "eval-smoke",
-        {"pass_rate": 0.0, "artifact_completeness": 1.0, "runtime_seconds": 20.0},
+        regressed_receipt,
         contract,
     )
     assert not missing["ok"]
     assert any("artifact_completeness" in item for item in missing["failures"])
     assert not regressed["ok"]
     assert any("pass_rate" in item for item in regressed["failures"])
+
+
+def test_behavior_scope_requires_baseline_and_patch_bound_experiment(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    policy_path = write_test_policy(root, tmp_path)
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["baseline_required_layers"] = ["eval"]
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+    service = service_for(root, tmp_path, policy=policy_path)
+
+    missing = create_request(service, request_id="baseline-missing")
+    report = service.preflight(missing.request_id)
+    assert not report["allowed"]
+    assert "behavior-affecting scope requires a trusted performance baseline" in report["violations"]
+
+    captured = service.capture_baseline("eval-smoke", profile="smoke")
+    assert captured["baseline"]["metrics"]["pass_rate"] == 1.0
+    unpublished = create_request(
+        service,
+        request_id="baseline-unpublished",
+        baseline="eval-smoke",
+    )
+    unpublished_report = service.preflight(unpublished.request_id)
+    assert not unpublished_report["allowed"]
+    assert any("not committed" in item for item in unpublished_report["violations"])
+    run(["git", "add", ".autobugfix-baselines/eval-smoke.yaml"], root)
+    run(["git", "commit", "-m", "Record trusted Eval baseline"], root)
+    request = create_request(service, request_id="baseline-bound", baseline="eval-smoke")
+    service.start(request.request_id)
+    service.start_writer(request.request_id)
+    assert service.verify(request.request_id, mode="fast")["check_run"]["status"] == "PASSED"
+    service.commit_candidate(request.request_id, message="candidate with trusted baseline")
+
+    without_experiment = service.verify(request.request_id, mode="full")
+    assert without_experiment["check_run"]["status"] == "FAILED"
+    assert any(
+        "missing completed trusted experiment" in item
+        for item in without_experiment["check_run"]["failures"]
+    )
+
+    experiment = service.run_experiment(request.request_id, profile="smoke")
+    assert experiment["status"] == "COMPLETED"
+    assert experiment["metric_receipt"]["patch_digest"] == service._snapshot(
+        request.request_id
+    ).patch_digest
+    verified = service.verify(request.request_id, mode="full")
+    assert verified["check_run"]["status"] == "PASSED"
+    assert verified["regression"]["ok"]
+    manifest = (
+        Path(service.store.read_workspace(request.request_id)["path"])
+        / ".autobugfix-governance"
+        / request.request_id
+        / "bundle.yaml"
+    )
+    trusted = load_trusted_policy(root, trusted_ref=None, trusted_file=policy_path)
+    remote = validate_bundle(
+        manifest,
+        manifest.parents[2],
+        trusted,
+        run_profiles=True,
+        trusted_baseline_root=root,
+    )
+    assert remote["allowed"]
+    assert remote["regression"]["ok"]
+    assert remote["metric_receipt"]["source"] == "trusted_pr_admission_experiment"
+
+
+def test_committed_baseline_rejects_later_behavior_commit(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    policy_path = write_test_policy(root, tmp_path)
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["baseline_required_layers"] = ["eval"]
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+    service = service_for(root, tmp_path, policy=policy_path)
+    service.capture_baseline("stale-eval", profile="smoke")
+    run(["git", "add", ".autobugfix-baselines/stale-eval.yaml"], root)
+    run(["git", "commit", "-m", "Record Eval baseline"], root)
+    runner = root / "src/autobugfix/eval/runner.py"
+    runner.write_text("# behavior changed after baseline measurement\n", encoding="utf-8")
+    run(["git", "add", str(runner.relative_to(root))], root)
+    run(["git", "commit", "-m", "Change Eval behavior"], root)
+    request = create_request(service, request_id="stale-baseline", baseline="stale-eval")
+
+    report = service.preflight(request.request_id)
+
+    assert not report["allowed"]
+    assert any("baseline is stale" in item for item in report["violations"])
+
+
+def test_baseline_profile_values_reject_secrets_and_local_absolute_paths(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+
+    with pytest.raises(OperatorGovernanceError, match="sensitive authority data"):
+        service.capture_baseline(
+            "secret-input",
+            profile="smoke",
+            values={"api_token": "do-not-commit"},
+        )
+    with pytest.raises(OperatorGovernanceError, match="CI-portable"):
+        service.capture_baseline(
+            "local-path-input",
+            profile="smoke",
+            values={"dataset": str(tmp_path / "cases.jsonl")},
+        )
 
 
 def test_cli_has_no_arbitrary_set_state_or_fake_human_switch(tmp_path: Path, monkeypatch):
@@ -585,6 +762,19 @@ def test_cli_has_no_arbitrary_set_state_or_fake_human_switch(tmp_path: Path, mon
     assert main(["operator", "guide", "--trusted-file", trusted]) == 0
     with pytest.raises(SystemExit):
         main(["operator", "set-state", "--request-id", "forged", "--state", "VERIFIED"])
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "operator",
+                "verify",
+                "--trusted-file",
+                trusted,
+                "--request-id",
+                "forged",
+                "--metric",
+                "pass_rate=1",
+            ]
+        )
     with pytest.raises(SystemExit):
         main(
             [
@@ -605,7 +795,7 @@ def test_cli_has_no_arbitrary_set_state_or_fake_human_switch(tmp_path: Path, mon
         )
 
 
-def test_constitution_classifies_every_governed_source_path():
+def test_constitution_classifies_every_governed_source_path_once():
     root = Path(__file__).parents[1]
     constitution = yaml.safe_load(PACKAGE_POLICY.read_text(encoding="utf-8"))
     tracked = run(["git", "ls-files"], root).stdout.splitlines()
@@ -620,7 +810,78 @@ def test_constitution_classifies_every_governed_source_path():
         ".trellis/tasks/",
         "docs/",
     )
-    missing = sorted(
-        path for path in tracked if path.startswith(prefixes) and not layers_for_file(constitution, path)
+    invalid = {
+        path: layers_for_file(constitution, path)
+        for path in tracked
+        if path.startswith(prefixes) and len(layers_for_file(constitution, path)) != 1
+    }
+    assert invalid == {}
+
+
+def test_layer_resolution_prefers_specific_rule_and_rejects_tied_owners():
+    constitution = {
+        "layer_resolution": {"strategy": "most_specific", "ambiguity": "reject"},
+        "layers": {
+            "docs_skills": {"paths": [".agents/role-skills/**"]},
+            "execution": {"paths": [".agents/role-skills/execution/**"]},
+        },
+    }
+    assert layers_for_file(constitution, ".agents/role-skills/execution/writer/SKILL.md") == [
+        "execution"
+    ]
+    constitution["layers"]["memory"] = {"paths": [".agents/role-skills/execution/**"]}
+    assert layers_for_file(constitution, ".agents/role-skills/execution/writer/SKILL.md") == [
+        "execution",
+        "memory",
+    ]
+
+
+def test_planned_glob_that_can_touch_protected_path_requires_constitutional_scope(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    request = create_request(
+        service,
+        request_id="protected-glob",
+        planned_paths=("src/autobugfix/eval/**",),
     )
-    assert missing == []
+
+    risk, violations = compute_scope_risk(request, service.policy().data)
+
+    assert risk == "constitutional"
+    assert not violations
+
+
+def test_request_requires_planned_paths_and_scope_layer_expansion_requires_path(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    triage = service.create_triage(
+        triage_id="triage-scope-required",
+        summary="scope",
+        suspected_layers=("eval",),
+        evidence=("evidence/report.yaml",),
+        creator="operator-agent",
+    )
+    with pytest.raises(OperatorModelError, match="planned_paths must not be empty"):
+        service.create_request(
+            request_id="scope-required",
+            triage_id=triage.triage_id,
+            summary="scope",
+            primary_layer="eval",
+            validation_profiles=("eval",),
+            creator="operator-agent",
+        )
+
+    create_request(service, request_id="scope-expand")
+    with pytest.raises(OperatorGovernanceError, match="requires at least one planned path"):
+        service.request_scope_change(
+            "scope-expand",
+            add_layers=("shared_runtime",),
+            reason="config is implicated",
+        )
+    with pytest.raises(OperatorGovernanceError, match="no matching planned path"):
+        service.request_scope_change(
+            "scope-expand",
+            add_layers=("shared_runtime",),
+            add_paths=("src/autobugfix/eval/runner.py",),
+            reason="declared layer does not match the proposed path",
+        )

@@ -55,8 +55,8 @@ State the intended real validation path before changing code:
 - Compile command, `uv run python -m compileall -q src tests scripts`.
 - Diff hygiene command, `git diff --check`.
 - Role skill validation when the validator is available.
-- Real toy repo E2E when execution, memory, eval, operator, or runtime behavior
-  may be affected.
+- Pinned public real-repository E2E when execution, memory, eval, operator, or
+  runtime behavior may be affected. Toy runs are developer smoke only.
 
 ## Common Drift To Avoid
 

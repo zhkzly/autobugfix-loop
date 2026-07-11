@@ -89,26 +89,37 @@ Project config may choose model/timeouts but may not weaken permission minima.
 
 1. `guide`: read project purpose, loop ownership, roles, and transitions.
 2. `triage`: record evidence-backed diagnosis without granting write scope.
-3. `request`: freeze triage digest, base SHA, branch, initial scope, profiles,
-   baseline, creator, expiry, and constitution digest.
-4. `start`: validate authority and create the real non-main worktree.
-5. `writer-start|writer-retry|writer-cancel`: create one bounded WriterRun.
-6. `verify --mode fast`: derive complete diff and publish feedback; it cannot
+3. `baseline record`: execute a configured experiment profile on the frozen
+   trusted ref and derive an immutable host-observed metric receipt containing
+   the executable profile contract.
+4. Baseline publication: a human or trusted CI publisher reviews and commits
+   the protected receipt to the trusted base. Operator Writer cannot publish
+   it. The measured SHA may differ from the request base only by intervening
+   `.autobugfix-baselines/**` metadata commits.
+5. `request`: freeze triage digest, base SHA, branch, initial layers, non-empty
+   planned path patterns, profiles, baseline, creator, expiry, and constitution
+   digest.
+6. `start`: validate authority and create the real non-main worktree.
+7. `writer-start|writer-retry|writer-cancel`: create one bounded WriterRun.
+8. `verify --mode fast`: derive complete diff and publish feedback; it cannot
    transition to VERIFIED.
-7. `scope-change`: append a version. Cross-layer approval binds to that exact
-   version; protected scope requires verified human authority.
-8. `candidate-commit`: generate an advisory PR manifest, stage, and commit the
+9. `scope-change`: append a version. Adding a layer requires a planned path
+   classified to that layer;
+   cross-layer approval binds to that exact version and protected scope
+   requires verified human authority.
+10. `candidate-commit`: generate an advisory PR manifest, stage, and commit the
    candidate through the service.
-9. `experiment-run`: run configured toy/SWE-bench profiles in a detached
-   shadow worktree/state root and preserve host-observed results.
-10. `verify --mode full`: run policy, isolated deterministic profiles,
-    regression checks, artifact capture, and patch-bound semantic review.
+11. `experiment-run`: run a configured profile in a detached shadow
+    worktree/state root and derive a host-observed receipt bound to profile
+    inputs, HEAD, and patch digest.
+12. `verify --mode full`: run policy, isolated deterministic profiles,
+    receipt-based regression checks, artifact capture, and patch-bound semantic review.
     Every required gate must pass before ACTIVE -> VERIFIED.
-11. `promotion-prepare`: bind a clean VERIFIED patch/head and current full
+13. `promotion-prepare`: bind a clean VERIFIED patch/head and current full
     CheckRun into an external receipt.
-12. `promotion-open-pr` -> `promotion-observe-merge` -> `promotion-canary`:
+14. `promotion-open-pr` -> `promotion-observe-merge` -> `promotion-canary`:
     merge and active-release activation remain separate.
-13. `promotion-rollback`: atomically restore last-known-good and write a
+15. `promotion-rollback`: atomically restore last-known-good and write a
     revert intent; `promotion-revert-pr` creates the non-force Git revert PR.
 
 `operator advance` performs one legal scheduler step at a time. It may
@@ -122,6 +133,14 @@ authority, semantic, or retry-budget blocks.
 - Protected/constitutional scope needs OpenSSH-signed human or allowlisted
   GitHub authority.
 - Candidate risk is recomputed from the trusted constitution and complete diff.
+- Layer ownership uses the most-specific matching constitution rule; equal
+  top-specificity cross-layer matches are rejected as ambiguous.
+- Behavior-layer full verification requires a baseline and a matching trusted
+  experiment receipt. Caller-provided numeric metrics have no authority.
+- Trusted-base PR admission loads the committed baseline from the PR base,
+  reruns its embedded experiment profile against the candidate, compares the
+  host-derived receipt, and uploads raw Guard logs. Candidate manifests and
+  candidate configuration cannot supply that authority.
 - Requested risk may raise but never lower computed risk.
 - A changed patch, HEAD, scope version, policy digest, or approval binding
   makes previous verification/promotion authority stale.
@@ -196,7 +215,7 @@ uv run --cache-dir /tmp/uv-cache python scripts/real_operator_acceptance.py --mo
 Assertions must cover four Request phases, event/record tamper detection,
 request leases, Writer cancellation/timeout/retry, scope-version authority,
 candidate constitution self-amendment, process/root isolation, advisory
-manifest revalidation, shadow experiments, stale patch reopening, canary,
+manifest revalidation, shadow experiment receipts, stale patch reopening, canary,
 last-known-good rollback, and retained raw SDK/check artifacts.
 
 Acceptance oracles assert observable behavior, changed-path scope, Git

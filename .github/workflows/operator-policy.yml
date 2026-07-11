@@ -19,6 +19,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: trusted
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout candidate without credentials
@@ -27,6 +28,7 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.sha }}
           path: candidate
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install uv
@@ -49,3 +51,12 @@ jobs:
           --expected-base-sha ${{ github.event.pull_request.base.sha }}
           --repository ${{ github.repository }}
           --pull-request ${{ github.event.pull_request.number }}
+
+      - name: Preserve trusted Operator gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operator-gate-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: trusted/.autobugfix/operator-pr
+          if-no-files-found: ignore
+          retention-days: 30

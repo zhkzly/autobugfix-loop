@@ -204,13 +204,23 @@ uv run autobugfix operator triage \
   --confidence medium \
   --evidence .autobugfix-evals/run/case/report.yaml
 
+uv run autobugfix operator baseline record \
+  --name real-e2e \
+  --profile real-e2e
+
+# Human/CI authority step: publish only the protected baseline receipt.
+git add .autobugfix-baselines/real-e2e.yaml
+git commit -m "Record trusted real-e2e baseline"
+
 uv run autobugfix operator request \
   --request-id op-eval-diff \
   --triage-id triage-eval-diff \
   --summary "fix eval artifact capture" \
   --primary-layer eval \
+  --planned-path 'src/autobugfix/eval/**' \
   --risk low \
-  --validation-profile eval
+  --validation-profile eval \
+  --performance-baseline real-e2e
 
 uv run autobugfix operator preflight --request-id op-eval-diff
 uv run autobugfix operator start --request-id op-eval-diff
@@ -226,7 +236,8 @@ uv run autobugfix operator promotion-prepare --request-id op-eval-diff
 ```
 
 `operator advance` performs one legal scheduler action at a time: start,
-Writer, fast check, candidate commit, full check, or stop for intervention.
+Writer, fast check, candidate commit, matching experiment, full check, or stop
+for intervention.
 Writer has only the filtered read surface `autobugfix writer
 task|context|scope|feedback|check-result`; it cannot call Operator mutations.
 
@@ -305,22 +316,32 @@ uv run python scripts/validate_operator_policy.py \
   --trusted-ref origin/main
 ```
 
-Regression baselines are versioned contracts under `.autobugfix-baselines/`.
-Required metrics cannot be omitted and the candidate PR cannot provide its own
-trusted baseline:
+Regression baselines are immutable contracts under `.autobugfix-baselines/`.
+The trusted service captures them by running a configured experiment profile
+on the frozen trusted ref. Candidate metrics come only from a Guard-observed
+experiment bound to the current HEAD and patch digest; CLI callers cannot type
+numeric metrics into an authority path. The captured receipt must be reviewed
+and committed to the trusted base before creating a request, so remote CI can
+read it without trusting candidate files. Its measured SHA may precede the
+request base only by baseline-metadata commits; any intervening code/skill/config
+change makes it stale:
 
 ```bash
 uv run autobugfix operator baseline record \
   --name real-e2e \
-  --metric pass_rate=1 \
-  --metric artifact_completeness=1 \
-  --metric runtime_seconds=12
+  --profile real-e2e
+
+# Performed by a human or trusted CI publisher, never Operator Writer.
+git add .autobugfix-baselines/real-e2e.yaml
+git commit -m "Record trusted real-e2e baseline"
+
+uv run autobugfix operator experiment-run \
+  --request-id op-eval-diff \
+  --profile real-e2e
 
 uv run autobugfix operator baseline compare \
   --name real-e2e \
-  --metric pass_rate=1 \
-  --metric artifact_completeness=1 \
-  --metric runtime_seconds=14
+  --request-id op-eval-diff
 ```
 
 Install repository-specific reviewer/public-key allowlists, CODEOWNERS, and
@@ -343,8 +364,10 @@ uv run python scripts/real_repository_acceptance.py --model gpt-5.4-mini
 The script clones the public upstream commit, commits a reproducible regression
 to a local fixture remote, verifies that Execution changes only its task
 worktree, compiles accepted evidence into a pending Memory proposal, and runs a
-second isolated Eval execution whose generated diff must equal the committed
-oracle. The configured target main checkout must remain byte-for-byte clean.
+second isolated Eval execution whose generated patch must pass an independent
+real pytest oracle. The committed oracle diff is retained only for diagnosis;
+an equivalent alternative implementation is valid. The configured target main
+checkout must remain byte-for-byte clean.
 Official SWE-bench Verified scoring still requires its container harness; a
 local run without that harness must not be labeled as a benchmark result.
 

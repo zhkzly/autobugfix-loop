@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/autobugfix-loop-harness-contract.md", "reason": "Preserve four-loop ownership and real harness boundaries."}
+{"file": ".trellis/spec/backend/operator-governance-policy.md", "reason": "Implement trusted Operator transitions, scope, baseline, and admission contracts."}
+{"file": ".trellis/spec/guides/autobugfix-task-start-checklist.md", "reason": "Use the required real validation and reviewer workflow."}

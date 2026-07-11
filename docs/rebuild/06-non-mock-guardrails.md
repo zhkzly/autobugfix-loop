@@ -64,4 +64,6 @@ rg -n "mars_agent|/Users/|bytedance|autobugfix-worktrees" src README.md AGENTS.m
 
 Findings are not automatically fatal; tests may contain fake helpers. But every fake must be test-scoped, named as such, and not used by production CLI paths.
 Acceptance Over Unit Tests
-Unit tests prove contracts. They do not prove the product is real. The rebuild is not complete until 05-real-acceptance.md passes against a toy repo.
+Unit tests prove contracts. They do not prove the product is real. The rebuild
+is not complete until `05-real-acceptance.md` passes against the pinned public
+repository fixture with production Codex roles.

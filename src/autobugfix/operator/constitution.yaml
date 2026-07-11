@@ -136,6 +136,30 @@ governance_metadata_paths:
   - .autobugfix-governance/**
 
 baseline_root: .autobugfix-baselines
+baseline_authority:
+  capture_owner: trusted_guard
+  publication_owner: human_or_trusted_ci
+  candidate_supplied_authority: forbidden
+  permitted_post_measurement_changes: [.autobugfix-baselines/**]
+baseline_required_layers:
+  - execution
+  - memory
+  - eval
+  - operator
+  - shared_runtime
+
+layer_resolution:
+  strategy: most_specific
+  ambiguity: reject
+  governed_prefixes:
+    - src/
+    - tests/
+    - scripts/
+    - .github/
+    - .agents/
+    - .trellis/spec/
+    - .trellis/tasks/
+    - docs/
 
 layers:
   execution:
@@ -332,7 +356,7 @@ metrics:
   pass_rate:
     direction: higher_is_better
     required: true
-    minimum: 1.0
+    max_regression_absolute: 0.0
   artifact_completeness:
     direction: higher_is_better
     required: true
@@ -341,6 +365,7 @@ metrics:
     direction: lower_is_better
     required: false
     max_regression_percent: 20.0
+    min_baseline_for_percent: 5.0
   codex_calls:
     direction: lower_is_better
     required: false
