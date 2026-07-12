@@ -181,6 +181,18 @@ class EvalGuardConfig:
 
 
 @dataclass(slots=True)
+class RawCodexBaselineConfig:
+    runner_project: Path = Path("baselines/raw_codex_sdk")
+    runtime_root: Path = Path(".autobugfix/raw-codex-baseline")
+    sdk_version: str = "0.1.0b3"
+    model: str = "gpt-5.4-mini"
+    reasoning_effort: str = "medium"
+    service_tier: str | None = None
+    timeout_seconds: int = 500
+    require_process_sandbox: bool = True
+
+
+@dataclass(slots=True)
 class EvalBenchmarkConfig:
     cache_root: Path = Path(".autobugfix/benchmark-cache")
     trusted_case_root: Path = Path(".autobugfix/trusted-eval-cases")
@@ -190,6 +202,7 @@ class EvalBenchmarkConfig:
     min_free_disk_gb: int = 10
     guard: EvalGuardConfig = field(default_factory=EvalGuardConfig)
     defects4j: Defects4JBenchmarkConfig = field(default_factory=Defects4JBenchmarkConfig)
+    raw_codex: RawCodexBaselineConfig = field(default_factory=RawCodexBaselineConfig)
 
 
 @dataclass(slots=True)

@@ -102,3 +102,97 @@ def test_defects4j_run_case_cli_forwards_bounded_production_options(
         "max_attempts": 2,
     }
     assert "decision: pass" in capsys.readouterr().out
+
+
+def test_raw_codex_baseline_cli_delegates_all_state_changes_to_service(
+    tmp_path, monkeypatch, capsys
+):
+    project_root, _ = make_service_project(tmp_path)
+    monkeypatch.chdir(project_root)
+    calls = []
+
+    def fake_prepare(self, protocol, source_manifest, h0_report):
+        del self
+        calls.append(("prepare", protocol, source_manifest, h0_report))
+        return {"prepared_manifest_digest": "a" * 64}
+
+    def fake_pilot(self, protocol, source_manifest, **kwargs):
+        del self
+        calls.append(("pilot", protocol, source_manifest, kwargs))
+        return {"summary": {"harness_error_count": 0}}
+
+    def fake_run(self, manifest, **kwargs):
+        del self
+        calls.append(("run", manifest, kwargs))
+        return {"summary": {"status": "completed"}}
+
+    def fake_report(run_dir, h0_report):
+        calls.append(("report", run_dir, h0_report))
+        return {"record_digest": "b" * 64}
+
+    monkeypatch.setattr(
+        "autobugfix.cli.RawCodexBaselineService.prepare", fake_prepare
+    )
+    monkeypatch.setattr(
+        "autobugfix.cli.RawCodexBaselineService.pilot", fake_pilot
+    )
+    monkeypatch.setattr(
+        "autobugfix.cli.RawCodexBaselineService.run_formal", fake_run
+    )
+    monkeypatch.setattr(
+        "autobugfix.cli.RawCodexBaselineService.report",
+        staticmethod(fake_report),
+    )
+
+    assert main(
+        [
+            "eval",
+            "baseline",
+            "prepare-raw-codex",
+            "--protocol",
+            "protocol.yaml",
+            "--source-manifest",
+            "source.yaml",
+            "--h0-report",
+            "h0.yaml",
+        ]
+    ) == 0
+    assert main(
+        [
+            "eval",
+            "baseline",
+            "pilot-raw-codex",
+            "--protocol",
+            "protocol.yaml",
+            "--source-manifest",
+            "source.yaml",
+            "--case",
+            "d4j-gson-2",
+            "--run-id",
+            "pilot-1",
+        ]
+    ) == 0
+    assert main(
+        [
+            "eval",
+            "baseline",
+            "run-raw-codex",
+            "--manifest",
+            "prepared.yaml",
+            "--run-id",
+            "formal-1",
+        ]
+    ) == 0
+    assert main(
+        [
+            "eval",
+            "baseline",
+            "report-raw-codex",
+            "--run-dir",
+            "formal-1",
+            "--h0-report",
+            "h0.yaml",
+        ]
+    ) == 0
+    assert [call[0] for call in calls] == ["prepare", "pilot", "run", "report"]
+    capsys.readouterr()

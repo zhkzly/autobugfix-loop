@@ -226,3 +226,55 @@ class IssueEvidenceFetcher:
             encoding="utf-8",
         )
         return evidence
+
+
+def visible_problem_statement(receipt: Any) -> tuple[str, list[dict[str, str]]]:
+    """Project a receipt into the issue/evidence text visible to repair agents."""
+
+    issue_path = Path(receipt.issue_evidence_path)
+    attachments: list[dict[str, str]] = []
+    title = f"Repair Defects4J {receipt.project}-{receipt.bug_id}"
+    body = ""
+    if issue_path.is_file():
+        data = yaml.safe_load(issue_path.read_text(encoding="utf-8")) or {}
+        if isinstance(data, dict):
+            title = str(data.get("title") or title)
+            body = str(data.get("body") or "")
+            for uri in data.get("attachment_uris") or []:
+                attachments.append(
+                    {
+                        "kind": "upstream-attachment",
+                        "uri": str(uri),
+                        "description": "Attachment referenced by the upstream issue",
+                    }
+                )
+    trigger_text = "\n".join(f"- {item}" for item in receipt.triggering_tests)
+    failure_text = ""
+    if receipt.failure_evidence_path != "unavailable":
+        failure_path = Path(receipt.failure_evidence_path)
+        if failure_path.is_file():
+            failure_text = failure_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).strip()
+    reproduction = (
+        receipt.reproduction_command
+        if receipt.reproduction_command != "unavailable"
+        else "defects4j test -w /workspace"
+    )
+    problem = "\n\n".join(
+        part
+        for part in (
+            title,
+            body,
+            "Official triggering tests:\n" + trigger_text,
+            "Pinned reproduction command:\n" + reproduction,
+            (
+                "Observed buggy failure output and stack trace:\n" + failure_text
+                if failure_text
+                else ""
+            ),
+            "Modify production source only. The Execution verifier will run only the declared visible triggering tests.",
+        )
+        if part.strip()
+    )
+    return problem, attachments

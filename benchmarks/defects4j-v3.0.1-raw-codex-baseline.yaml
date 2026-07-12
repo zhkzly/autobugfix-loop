@@ -1,0 +1,17 @@
+schema_version: 1
+manifest_id: defects4j-v3.0.1-raw-codex-sdk
+source_evaluation_manifest_id: defects4j-v3.0.1-h0-16
+benchmark: defects4j
+dataset_revision: defects4j-v3.0.1
+expected_case_count: 16
+development_case_ids:
+  - d4j-jsoup-2
+  - d4j-gson-2
+  - d4j-jacksoncore-2
+model: gpt-5.4-mini
+sdk_version: 0.1.0b3
+reasoning_effort: medium
+service_tier: null
+timeout_seconds: 500
+turns_per_case: 1
+concurrency: 1

@@ -240,6 +240,29 @@ class BenchmarkStore:
             )
         return manifest
 
+    def read_prepared_raw_baseline_manifest(
+        self,
+        path: Path,
+    ):
+        from autobugfix.eval.baselines.models import PreparedRawBaselineManifest
+
+        resolved = path.resolve()
+        manifest_root = (self.trusted_root / "manifests").resolve()
+        if not resolved.is_relative_to(manifest_root):
+            raise BenchmarkContractError(
+                "prepared Raw baseline manifest is outside trusted benchmark root"
+            )
+        manifest = PreparedRawBaselineManifest.from_yaml(resolved)
+        digest = str(manifest.to_dict()["record_digest"])
+        if (
+            resolved.name != f"raw-codex-{digest}.yaml"
+            or resolved.parent.name != manifest.manifest_id
+        ):
+            raise BenchmarkContractError(
+                "prepared Raw baseline manifest path does not match its identity"
+            )
+        return manifest
+
     def write_visible_yaml(
         self, manifest_id: str, name: str, data: Mapping[str, Any]
     ) -> Path:

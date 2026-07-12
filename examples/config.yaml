@@ -28,6 +28,15 @@ eval:
     min_free_disk_gb: 10
     guard:
       trusted_ref: origin/main
+    raw_codex:
+      runner_project: baselines/raw_codex_sdk
+      runtime_root: .autobugfix/raw-codex-baseline
+      sdk_version: 0.1.0b3
+      model: gpt-5.4-mini
+      reasoning_effort: medium
+      service_tier: null
+      timeout_seconds: 500
+      require_process_sandbox: true
     defects4j:
       image: autobugfix/defects4j:3.0.1
       verifier_image: autobugfix/defects4j-verifier:3.0.1

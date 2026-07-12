@@ -67,6 +67,36 @@ an extra case run. Only harness failure makes the command fail.
 `report-evaluation` is deterministic postprocessing over frozen artifacts; it
 must never invoke Writer, verifier, or official scorer again.
 
+The Raw Codex SDK comparator is an Eval-owned measurement arm for Experiment
+1, not an Operator request and not an Execution backend. Its standalone uv
+project calls `openai_codex.Codex` directly for exactly one fresh thread and
+one turn per case. It receives only the sanitized buggy worktree and visible
+case bundle; it receives no Autobugfix skills, Memory, managed verifier
+feedback, fixed truth, gold patch, hidden tests, or official score.
+
+Use this order:
+
+```text
+autobugfix eval baseline pilot-raw-codex --protocol <raw-seed>
+  --source-manifest <prepared-H0> --case <declared-development-case>
+  --run-id <pilot-id>
+autobugfix eval baseline prepare-raw-codex --protocol <raw-seed>
+  --source-manifest <prepared-H0> --h0-report <frozen-H0-report>
+autobugfix eval baseline run-raw-codex --manifest <prepared-raw>
+  --run-id <formal-id>
+autobugfix eval baseline report-raw-codex --run-dir <formal-run>
+  --h0-report <same-frozen-H0-report>
+```
+
+Pilot only on a predeclared development case. After pilot harness fixes,
+commit and freeze the runner before formal generation. A valid failed repair
+remains in the result. Any transport, sandbox, materialization, patch-apply,
+or scorer harness error invalidates the whole formal run; never resume selected
+cases or use an official result to start another SDK turn. Operator must not
+triage Raw/H0 case outcomes into H0 changes, skills, or Memory during this
+measurement. The standalone Raw process loads no Operator or role skill; this
+skill governs the supervising human/main-agent workflow only.
+
 `seal` and `guard-run` are human Guard actions for treatment studies, not the
 Experiment 1 H0 measurement. When used, they must execute from a clean control
 checkout at `eval.benchmarks.guard.trusted_ref`; the encrypted bundle, public
