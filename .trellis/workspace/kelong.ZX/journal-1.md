@@ -103,3 +103,37 @@ Implemented Governance V4 studies, independent H0 experiment lines, human-gated 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: Raw Codex SDK baseline
+
+**Date**: 2026-07-12
+**Task**: Raw Codex SDK baseline
+**Branch**: `experiment/raw-codex-sdk-baseline`
+
+### Summary
+
+Built and froze an isolated direct openai-codex 0.1.0b3 comparator, ran 16 Defects4J cases once with gpt-5.4-mini, and produced a digest-bound H0 comparison: primary H0 11/13 versus Raw 10/13, zero harness errors.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9b144bb` | (see git log) |
+| `e2605d8` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
