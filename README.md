@@ -297,13 +297,20 @@ uv run autobugfix eval benchmark run-evaluation \
   --manifest .autobugfix/trusted-eval-cases/manifests/defects4j-v3.0.1-h0-16/<prepared>.yaml \
   --out .autobugfix/eval-runs \
   --run-id defects4j-h0-16
+
+# Rebuild the digest-bound aggregate from immutable case artifacts without
+# rerunning Execution or any official scorer.
+uv run autobugfix eval benchmark report-evaluation \
+  --run-dir .autobugfix/eval-runs/defects4j-h0-16
 ```
 
 Both commands require a clean Autobugfix checkout. `prepare-evaluation` binds
 the commit/tree, `.autobugfix/config.yaml`, resolved Writer/Evaluator roles,
 skill contents, active Memory, model, attempt budget, and every qualified case
 receipt. `run-evaluation` rejects any drift and writes a final
-`subject-noninterference.yaml` receipt.
+`subject-noninterference.yaml` receipt. The final `evaluation-report.yaml`
+derives first-attempt success, loop rescue, SDK calls, verifier/oracle
+agreement, confidence interval, runtime distribution, and per-case digests.
 
 For a separate Operator treatment study, derive a binding, run the encrypted
 Holdout, and import the signed aggregate through service-owned transitions:

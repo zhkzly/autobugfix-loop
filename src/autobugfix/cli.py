@@ -292,6 +292,9 @@ def command_eval(args: argparse.Namespace) -> int:
             )
             _print_yaml(report)
             return 0 if report["summary"].get("harness_error_count") == 0 else 1
+        if args.benchmark_action == "report-evaluation":
+            _print_yaml(service.report_evaluation(Path(args.run_dir)))
+            return 0
         if args.benchmark_action == "seal":
             if not sys.stdin.isatty():
                 raise RuntimeError(
@@ -933,6 +936,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     benchmark_run_evaluation.add_argument("--run-id", required=True)
     benchmark_run_evaluation.set_defaults(func=command_eval)
+    benchmark_report_evaluation = benchmark_sub.add_parser("report-evaluation")
+    benchmark_report_evaluation.add_argument("--run-dir", required=True)
+    benchmark_report_evaluation.set_defaults(func=command_eval)
     benchmark_seal = benchmark_sub.add_parser("seal")
     benchmark_seal.add_argument("--manifest", required=True)
     benchmark_seal.set_defaults(func=command_eval)

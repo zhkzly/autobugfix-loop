@@ -51,6 +51,7 @@ from autobugfix.eval.benchmarks.verify import (
     official_oracle_for_receipt,
 )
 from autobugfix.eval.runner import run_eval
+from autobugfix.eval.reporting import write_evaluation_report
 from autobugfix.eval.scorers import normalize_diff
 from autobugfix.git_utils import rev_parse, run_git
 from autobugfix.models import utc_now
@@ -389,6 +390,7 @@ class EvalBenchmarkService:
             raise EvalBenchmarkServiceError(
                 "formal evaluation changed the frozen H0 inputs"
             )
+        evaluation_report = write_evaluation_report(run_dir)
         summary = yaml.safe_load(
             (run_dir / "summary.yaml").read_text(encoding="utf-8")
         ) or {}
@@ -397,7 +399,18 @@ class EvalBenchmarkService:
             "prepared_manifest_digest": prepared.to_dict()["record_digest"],
             "subject_sha": prepared.subject_sha,
             "summary": summary,
+            "evaluation_report": str(evaluation_report),
         }
+
+    @staticmethod
+    def report_evaluation(run_dir: Path) -> dict[str, Any]:
+        path = write_evaluation_report(run_dir)
+        report = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(report, dict):
+            raise EvalBenchmarkServiceError(
+                "formal evaluation report must be a mapping"
+            )
+        return {"evaluation_report": str(path), "report": report}
 
     @staticmethod
     def _seed_manifest(

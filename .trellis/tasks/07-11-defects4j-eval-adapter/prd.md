@@ -74,9 +74,9 @@ Autobugfix, create `H_bug`, or expose official evaluation results to Writer.
       an immutable noninterference receipt proves no post-score mutation.
 - [x] A real production `gpt-5.4-mini` case completes the full protocol. Its
       official failure is retained as a valid H0 result, not fed back to Writer.
-- [ ] The final 16-case manifest is pre-registered and every eligible case is
+- [x] The final 16-case manifest is pre-registered and every eligible case is
       run exactly once under the frozen Experiment 1 protocol.
-- [ ] The report includes repair success, first-attempt success, bounded-loop
+- [x] The report includes repair success, first-attempt success, bounded-loop
       rescue, iterations, model calls, runtime, verifier/oracle agreement,
       harness errors, and artifact completeness.
 - [x] Existing `local-git` Eval datasets remain compatible.
