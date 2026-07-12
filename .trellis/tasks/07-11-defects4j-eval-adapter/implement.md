@@ -79,7 +79,7 @@ Formal H0 result for subject `f529f09de53183d7ddbf9e05b31a9d3b3fbde008`:
       has no independent subagent tool, so do not represent them as subagent
       reviews. The acceptance pass recognizes the real one-case protocol pilot
       but does not treat it as the formal 16-case capability result.
-- [ ] Commit and push source changes without runtime benchmark artifacts.
+- [x] Commit and push source changes without runtime benchmark artifacts.
 
 ## Rollback Points
 
