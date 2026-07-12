@@ -1,0 +1,38 @@
+name: pr2-real-e2e
+base_sha: 0ca8f66a7d1f58ae2d92ff88ea7e5ad5d7123e90
+profile: real-e2e
+profile_contract:
+  commands:
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - scripts/real_repository_acceptance.py
+    - --root
+    - '{shadow_state_root}/real-e2e'
+    - --model
+    - gpt-5.4-mini
+    name: real-repository-e2e
+  network_access: true
+  timeout_seconds: 3600
+profile_digest: 58a34e67110daf517fceb4385c12fc6f383c951f1411e92cc5cba062b5aa2fb2
+profile_values: {}
+input_digest: bb5358ae89259e0f0fd390d04e9e1c758867f2856f3c42ae82ed2b76a10d7b02
+metrics:
+  artifact_completeness: 1.0
+  pass_rate: 1.0
+  runtime_seconds: 580.5896795839999
+receipt_digest: 30559c5ba31f0f703ef9ffaa765dd530a0ce0d4dbf090239b987ef4b7881a4a2
+commands:
+- name: real-repository-e2e
+  exit_code: 0
+  passed: true
+  timed_out: false
+  duration_seconds: 580.5896795839999
+  stdout_sha256: 96ac2e08bbd83c5cd0534eda60252f56085bd7b0f56e5b34a18d5953155d6fe2
+  stderr_sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+notes: Trusted baseline for governed PR 2 admission
+created_at: '2026-07-12T04:42:46Z'
+baseline_digest: 45d8bb297f02638414fdd9d02463dbea137721a8117f499413ec96c776d347dd

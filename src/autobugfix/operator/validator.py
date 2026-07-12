@@ -89,6 +89,9 @@ def _run_command(
         ]
         if not network_access:
             wrapper.append("--unshare-net")
+        # Mount the broad candidate first. Authority masks and exact runtime
+        # grants must remain visible as more-specific overlays.
+        wrapper.extend(["--bind", str(candidate_root), str(candidate_root)])
         for root in hidden_roots:
             resolved = root.resolve()
             if resolved.exists():
@@ -107,9 +110,7 @@ def _run_command(
                 raise OperatorValidationError(f"read-only sandbox bind does not exist: {source}")
             destination.mkdir(parents=True, exist_ok=True)
             wrapper.extend(["--ro-bind", str(source), str(destination)])
-        wrapper.extend(
-            ["--bind", str(candidate_root), str(candidate_root), "--chdir", str(candidate_root), "--"]
-        )
+        wrapper.extend(["--chdir", str(candidate_root), "--"])
         executed_argv = [*wrapper, *argv]
     elif require_process_sandbox:
         raise OperatorValidationError(
