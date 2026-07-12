@@ -184,6 +184,39 @@ def test_eval_rejects_identical_patch_when_independent_oracle_fails(tmp_path):
     assert summary["failed_count"] == 1
 
 
+def test_official_scorer_runs_in_fresh_checkout_not_execution_worktree(tmp_path):
+    project_root, row, _ = prepare_historical_case(tmp_path)
+    row["test_command"] = "python3 -m unittest discover"
+    row["oracle_command"] = (
+        "python3 -c \"from pathlib import Path; "
+        "Path('official-scorer-marker').write_text('scored')\""
+    )
+    problem = tmp_path / "isolated-scorer.jsonl"
+    problem.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    run_dir = run_eval(
+        project_root,
+        problem,
+        tmp_path / "eval-runs",
+        run_id="isolated-scorer",
+        backend=FakeCodexBackend(),
+    )
+    case_dir = run_dir / str(row["raw_id"])
+    task_data = yaml.safe_load(
+        next((case_dir / "control/.autobugfix/tasks").glob("*/task.yaml")).read_text(
+            encoding="utf-8"
+        )
+    )
+    execution_worktree = Path(task_data["worktree_path"])
+
+    assert (case_dir / "oracle/candidate/official-scorer-marker").is_file()
+    assert not (execution_worktree / "official-scorer-marker").exists()
+    noninterference = yaml.safe_load(
+        (case_dir / "oracle-noninterference.yaml").read_text(encoding="utf-8")
+    )
+    assert noninterference["unchanged"] is True
+
+
 def test_eval_reports_unsupported_adapter_as_harness_error(tmp_path):
     project_root, row, _ = prepare_historical_case(tmp_path)
     row["source"] = {

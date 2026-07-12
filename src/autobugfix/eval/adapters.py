@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from autobugfix.eval.models import EvalCase, OracleResult
+from autobugfix.eval.models import EvalCase, FrozenSubmission, OracleResult
 from autobugfix.eval.benchmarks.verify import (
-    Defects4JManagedVerifier,
+    Defects4JOfficialOracle,
 )
 from autobugfix.git_utils import run_git
 from autobugfix.models import utc_now
-from autobugfix.verifier import ExecutionVerifierBackend, run_verifier
+from autobugfix.verifier import run_verifier
 
 
 class EvalAdapterError(RuntimeError):
@@ -32,15 +32,67 @@ class EvalCaseAdapter(Protocol):
 
     def oracle_diff(self, case: EvalCase) -> str | None: ...
 
-    def verify(
+    def score_submission(
         self,
         case: EvalCase,
-        worktree: Path,
+        materialized: MaterializedCase,
+        submission: FrozenSubmission,
         artifact_dir: Path,
         *,
         command_override: str | None = None,
-        verifier_backend: ExecutionVerifierBackend | None = None,
+        official_evaluator: object | None = None,
     ) -> OracleResult: ...
+
+
+class SubmissionApplyError(EvalAdapterError):
+    def __init__(self, stdout: str, stderr: str, exit_code: int):
+        super().__init__(stderr.strip() or "frozen submission patch could not be applied")
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exit_code = exit_code
+
+
+def _submission_checkout(
+    case: EvalCase,
+    materialized: MaterializedCase,
+    submission: FrozenSubmission,
+    destination: Path,
+) -> Path:
+    if submission.case_id != case.case_id:
+        raise EvalAdapterError("frozen submission is bound to a different case")
+    clone = subprocess.run(
+        [
+            "git",
+            "clone",
+            "--no-hardlinks",
+            str(materialized.remote),
+            str(destination),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if clone.returncode != 0:
+        raise EvalAdapterError(
+            clone.stderr.strip() or "cannot create isolated scoring checkout"
+        )
+    run_git(destination, ["checkout", "--detach", case.base_commit], check=True)
+    run_git(destination, ["clean", "-fdx"], check=True)
+    if submission.patch.strip():
+        applied = subprocess.run(
+            ["git", "-C", str(destination), "apply", "--binary", "-"],
+            input=submission.patch,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if applied.returncode != 0:
+            raise SubmissionApplyError(
+                applied.stdout,
+                applied.stderr,
+                applied.returncode,
+            )
+    return destination
 
 
 class LocalGitAdapter:
@@ -66,18 +118,19 @@ class LocalGitAdapter:
             check=True,
         ).stdout
 
-    def verify(
+    def score_submission(
         self,
         case: EvalCase,
-        worktree: Path,
+        materialized: MaterializedCase,
+        submission: FrozenSubmission,
         artifact_dir: Path,
         *,
         command_override: str | None = None,
-        verifier_backend: ExecutionVerifierBackend | None = None,
+        official_evaluator: object | None = None,
     ) -> OracleResult:
-        if verifier_backend is not None:
+        if official_evaluator is not None:
             raise EvalAdapterError(
-                "local-git adapter does not accept a managed verifier backend"
+                "local-git adapter does not accept a managed official evaluator"
             )
         started = utc_now()
         command = case.resolved_oracle_command(command_override)
@@ -114,7 +167,32 @@ class LocalGitAdapter:
                 finished_at=utc_now(),
                 error=error,
             )
-        result = run_verifier(worktree, command, timeout_seconds=case.oracle.timeout_seconds)
+        try:
+            candidate = _submission_checkout(
+                case,
+                materialized,
+                submission,
+                artifact_dir / "candidate",
+            )
+        except SubmissionApplyError as exc:
+            stdout_path.write_text(exc.stdout, encoding="utf-8")
+            stderr_path.write_text(exc.stderr, encoding="utf-8")
+            return OracleResult(
+                status="failed",
+                oracle_type="command",
+                command="git apply --binary && " + command,
+                exit_code=exc.exit_code,
+                stdout_path=str(stdout_path),
+                stderr_path=str(stderr_path),
+                started_at=started,
+                finished_at=utc_now(),
+                error="frozen submission could not be applied to the clean buggy revision",
+            )
+        result = run_verifier(
+            candidate,
+            command,
+            timeout_seconds=case.oracle.timeout_seconds,
+        )
         stdout_path.write_text(result.stdout, encoding="utf-8")
         stderr_path.write_text(result.stderr, encoding="utf-8")
         return OracleResult(
@@ -165,22 +243,23 @@ class Defects4JAdapter:
     def oracle_diff(self, case: EvalCase) -> str | None:
         return None
 
-    def verify(
+    def score_submission(
         self,
         case: EvalCase,
-        worktree: Path,
+        materialized: MaterializedCase,
+        submission: FrozenSubmission,
         artifact_dir: Path,
         *,
         command_override: str | None = None,
-        verifier_backend: ExecutionVerifierBackend | None = None,
+        official_evaluator: object | None = None,
     ) -> OracleResult:
         del command_override
         started = utc_now()
         artifact_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = artifact_dir / "stdout.log"
         stderr_path = artifact_dir / "stderr.log"
-        if not isinstance(verifier_backend, Defects4JManagedVerifier):
-            error = "Defects4J case has no trusted managed verifier authority"
+        if not isinstance(official_evaluator, Defects4JOfficialOracle):
+            error = "Defects4J case has no independent official evaluator"
             stdout_path.write_text("", encoding="utf-8")
             stderr_path.write_text(error + "\n", encoding="utf-8")
             return OracleResult(
@@ -198,14 +277,35 @@ class Defects4JAdapter:
         try:
             if (
                 case.benchmark is None
-                or verifier_backend.contract.eligibility_receipt_digest
+                or official_evaluator.contract.eligibility_receipt_digest
                 != case.benchmark.eligibility_receipt_digest
             ):
                 raise EvalAdapterError(
-                    "Defects4J verifier contract is not bound to the case eligibility receipt"
+                    "Defects4J official evaluator is not bound to the case receipt"
                 )
-            result = verifier_backend.run(
-                worktree,
+            try:
+                candidate = _submission_checkout(
+                    case,
+                    materialized,
+                    submission,
+                    artifact_dir / "candidate",
+                )
+            except SubmissionApplyError as exc:
+                stderr_path.write_text(exc.stderr, encoding="utf-8")
+                stdout_path.write_text(exc.stdout, encoding="utf-8")
+                return OracleResult(
+                    status="failed",
+                    oracle_type="defects4j",
+                    command="git apply --binary && " + command,
+                    exit_code=exc.exit_code,
+                    stdout_path=str(stdout_path),
+                    stderr_path=str(stderr_path),
+                    started_at=started,
+                    finished_at=utc_now(),
+                    error="frozen submission could not be applied to the clean buggy revision",
+                )
+            result = official_evaluator.run(
+                candidate,
                 artifact_dir / "managed",
                 timeout_seconds=case.oracle.timeout_seconds,
             )
@@ -225,12 +325,12 @@ class Defects4JAdapter:
                 exit_code=result.exit_code,
                 stdout_path=str(stdout_path),
                 stderr_path=str(stderr_path),
-                started_at=started,
-                finished_at=utc_now(),
+                started_at=result.started_at,
+                finished_at=result.finished_at,
                 error=(
                     ""
                     if status != "error"
-                    else f"managed verifier outcome: {result.outcome}"
+                    else f"official evaluator outcome: {result.outcome}"
                 ),
             )
         except Exception as exc:

@@ -213,10 +213,20 @@ uv run autobugfix eval run --dataset problem_prompts.jsonl --out .autobugfix-eva
 
 ### Defects4J Cases
 
-Defects4J is a Case source; Docker is the pinned materialization and official
-test environment. The Codex Writer still edits an ordinary local task
-worktree. Host Java, Perl, SVN, cpanm, and Defects4J installations are neither
-required nor configurable.
+All benchmark adapters follow the same measurement contract:
+
+```text
+repository@buggy-revision + issue/evidence
+-> complete Execution loop
+-> frozen patch and trace
+-> dataset official evaluator
+-> immutable score
+```
+
+Defects4J is one Case source and official evaluator; Docker provides its pinned
+checkout and test environment. The Codex Writer still edits an ordinary local
+task worktree. Host Java, Perl, SVN, cpanm, and Defects4J installations are
+neither required nor configurable.
 
 Build the two pinned roles from the same Dockerfile once. The materializer has
 official checkout/oracle metadata; the verifier removes gold patches and
@@ -233,22 +243,23 @@ docker build --target verifier \
   -f containers/defects4j/Dockerfile .
 ```
 
-Then run a real case through Docker preflight, production Python Codex SDK
-Execution, and an independent official oracle:
+Then qualify and run a real case through Docker, the production Python Codex
+SDK Execution loop, submission freeze, and an independent official evaluator:
 
 ```bash
 uv run autobugfix eval benchmark doctor --adapter defects4j
 
-uv run autobugfix eval benchmark seal \
-  --manifest benchmarks/defects4j-v3.0.1-seed.yaml
+uv run autobugfix eval benchmark preflight \
+  --manifest benchmarks/defects4j-v3.0.1-pilot.yaml \
+  --case d4j-jacksoncore-2
 
 uv run autobugfix eval benchmark run-case \
-  --manifest benchmarks/defects4j-v3.0.1-seed.yaml \
-  --case d4j-jsoup-2 \
+  --manifest benchmarks/defects4j-v3.0.1-pilot.yaml \
+  --case d4j-jacksoncore-2 \
   --out .autobugfix/eval-runs \
-  --run-id h0-jsoup-2 \
+  --run-id h0-jacksoncore-2 \
   --model gpt-5.4-mini \
-  --max-attempts 3
+  --max-attempts 2
 ```
 
 `AUTOBUGFIX_DOCKER_BIN` may select an installed Docker executable for one
@@ -257,25 +268,45 @@ to the resulting immutable image ID. Runtime cases, receipts, SDK logs,
 events, diffs, and official-test artifacts remain gitignored below
 `.autobugfix/`.
 
-Preflight retains the checkout-generated `defects4j.build.properties` below
-the trusted Eval root and binds its digest into the eligibility receipt. The
-Writer never receives that file. The managed verifier injects it only into an
-isolated verification copy, runs the immutable verifier image, and removes the
-copy after preserving the official logs.
+Preflight may privately inspect buggy and fixed revisions to establish that the
+official benchmark is runnable. Those facts remain below the trusted Eval
+root. The Writer never receives fixed code, developer patches, private failure
+baselines, modified-class hints, or official scores.
 
-`seal` performs real repeated tests for all 10 visible Optimization cases and
-six repository-disjoint Holdout cases. Holdout identities and preflight
-artifacts are authenticated AES-GCM envelopes; the public projection contains
-only Optimization identities, opaque wave tokens, counts, and the trusted
-Guard code identity. Seal and Holdout execution fail unless the control
-checkout is clean and exactly matches `eval.benchmarks.guard.trusted_ref`.
-Qualification
-uses fail-to-pass plus pass-to-pass semantics: fixed-revision failures must be
-stable, buggy failures must equal that baseline plus triggering tests, and a
-generated patch may have no failure outside the fixed baseline.
+During Execution, the managed verifier runs only the predeclared visible
+triggering tests. Its compiler/test output is legitimate bounded-loop feedback.
+After Execution terminates, Eval freezes the generated patch, task/events
+digests, subject SHA, and iteration count. Only then does a fresh scoring
+checkout run the official full-suite evaluator. A noninterference receipt
+proves that scoring did not alter the patch, task state, trace, or attempts.
 
-For an Operator Study, derive a binding, run the encrypted Holdout, and import
-the signed aggregate through service-owned transitions:
+Experiment 1 pre-registers 16 `evaluation` cases and measures the same frozen
+H0 once per case. A failed official score is a valid unsuccessful repair, not
+permission to rerun, tune H0, or feed oracle output to Writer. Existing sealed
+Holdout and Study commands remain available for separate Operator treatment
+studies. The formal H0 measurement uses these commands:
+
+```bash
+# No model calls: qualify all cases and freeze H0/config/roles/skills/Memory.
+uv run autobugfix eval benchmark prepare-evaluation \
+  --manifest benchmarks/defects4j-v3.0.1-evaluation.yaml
+
+# Use the prepared_manifest path printed above. Repair failures are measured
+# results; only a harness error makes the experiment command fail.
+uv run autobugfix eval benchmark run-evaluation \
+  --manifest .autobugfix/trusted-eval-cases/manifests/defects4j-v3.0.1-h0-16/<prepared>.yaml \
+  --out .autobugfix/eval-runs \
+  --run-id defects4j-h0-16
+```
+
+Both commands require a clean Autobugfix checkout. `prepare-evaluation` binds
+the commit/tree, `.autobugfix/config.yaml`, resolved Writer/Evaluator roles,
+skill contents, active Memory, model, attempt budget, and every qualified case
+receipt. `run-evaluation` rejects any drift and writes a final
+`subject-noninterference.yaml` receipt.
+
+For a separate Operator treatment study, derive a binding, run the encrypted
+Holdout, and import the signed aggregate through service-owned transitions:
 
 ```bash
 uv run autobugfix operator study guard-binding \
@@ -435,15 +466,15 @@ advances the Git ref plus SQLite generation with compare-and-swap. Rollback
 creates a new commit whose tree equals the selected checkpoint; it never resets
 or force-pushes history.
 
-The planned studies use the same `--cohort-id` and therefore must match frozen
-H0 Git, harness, policy, role-config, config, model, skills, and Memory digests.
-They otherwise share only frozen `H0`. Experiment 1 uses 10 visible
-Defects4J Optimization cases and 6 sealed unseen-repository Holdout cases to
-produce `H_bug`. Experiment 2 independently uses 10 SWE-bench Verified
-Optimization cases and 6 SWE-bench-Live sealed unseen-repository Holdout cases
-to produce `H_general`. Experiment 2 must not inherit `H_bug` code, skills,
-Memory, artifacts, results, or case-level feedback. These are experiment
-protocols, not changes to the four-loop project constitution.
+The two planned experiments share only the same frozen H0 definition.
+Experiment 1 is a descriptive capability measurement: 16 pre-registered
+Defects4J cases run against unchanged H0, and official scoring occurs only
+after each final submission is frozen. It creates no Operator treatment and no
+`H_bug`. Experiment 2 independently starts from the original H0 and uses 10
+visible SWE-bench Verified cases plus 6 sealed SWE-bench-Live cases to test
+whether Operator can produce `H_general`. Experiment 2 must not inherit
+Experiment 1 outcomes or case-level feedback. These are experiment protocols,
+not changes to the four-loop project constitution.
 
 `operator advance` performs one legal scheduler action at a time: start,
 Writer, fast check, candidate commit, matching experiment, full check, or stop

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,9 @@ from autobugfix.eval.benchmarks.models import (
     DoctorCheck,
     DoctorReport,
     EligibilityReceipt,
+    EvaluationSeedManifest,
+    PreparedEvaluationCase,
+    PreparedEvaluationManifest,
     SealedBenchmarkManifest,
     SealedCaseReference,
     digest_file,
@@ -33,8 +37,12 @@ from autobugfix.eval.benchmarks.authority import (
 from autobugfix.eval.benchmarks.runtime import run_command
 from autobugfix.eval.benchmarks.verify import (
     Defects4JVerifierContract,
+    Defects4JOracleContract,
     cleanup_test_artifacts,
-    run_official_verifier,
+    managed_verifier_for_receipt,
+    official_oracle_for_receipt,
+    run_official_oracle,
+    run_visible_verifier,
     unexpected_failures,
     validate_changed_paths,
 )
@@ -90,6 +98,66 @@ def test_benchmark_seed_enforces_split_and_nested_wave_contract():
     bad["holdout_project_pool"] = ["Gson", "JacksonCore", "JacksonXml"]
     with pytest.raises(BenchmarkContractError, match="forbids public"):
         BenchmarkSeedManifest.from_dict(bad)
+
+
+def test_pure_evaluation_seed_has_no_optimization_or_holdout_roles():
+    manifest = EvaluationSeedManifest.from_yaml(
+        Path(__file__).parents[1] / "benchmarks/defects4j-v3.0.1-pilot.yaml"
+    )
+    assert manifest.expected_case_count == 1
+    assert manifest.model == "gpt-5.4-mini"
+    assert manifest.max_attempts == 2
+    assert manifest.cases[0].case_id == "d4j-jacksoncore-2"
+    encoded = yaml.safe_dump(manifest.to_dict(), sort_keys=False)
+    assert "optimization" not in encoded
+    assert "holdout" not in encoded
+
+
+def test_formal_evaluation_seed_preregisters_sixteen_cases():
+    manifest = EvaluationSeedManifest.from_yaml(
+        Path(__file__).parents[1]
+        / "benchmarks/defects4j-v3.0.1-evaluation.yaml"
+    )
+
+    assert manifest.expected_case_count == 16
+    assert len(manifest.cases) == 16
+    assert len({(case.project, case.bug_id) for case in manifest.cases}) == 16
+
+
+def test_prepared_evaluation_manifest_binds_h0_and_receipts():
+    prepared = PreparedEvaluationManifest(
+        manifest_id="defects4j-h0",
+        seed_manifest_digest="a" * 64,
+        benchmark="defects4j",
+        framework_revision=DEFECTS4J_FRAMEWORK_REVISION,
+        dataset_revision="defects4j-v3.0.1",
+        runtime_id="sha256:" + "2" * 64,
+        verifier_runtime_id="sha256:" + "3" * 64,
+        subject_sha="b" * 40,
+        subject_tree="c" * 40,
+        config_digest="d" * 64,
+        roles_digest="e" * 64,
+        skills_digest="f" * 64,
+        memory_digest="0" * 64,
+        model="gpt-5.4-mini",
+        max_attempts=2,
+        expected_case_count=1,
+        cases=(
+            PreparedEvaluationCase(
+                case_id="d4j-lang-1",
+                project="Lang",
+                bug_id=1,
+                receipt_digest="1" * 64,
+            ),
+        ),
+        prepared_at=utc_now(),
+    )
+    encoded = prepared.to_dict()
+
+    assert PreparedEvaluationManifest.from_dict(encoded) == prepared
+    encoded["model"] = "forged-model"
+    with pytest.raises(BenchmarkContractError, match="digest mismatch"):
+        PreparedEvaluationManifest.from_dict(encoded)
 
 
 def test_sealed_manifest_enforces_total_waves_and_hides_holdout_identity():
@@ -355,6 +423,284 @@ def test_defects4j_doctor_fails_closed_and_retains_report_when_docker_is_missing
     assert checks["framework_info"]["observed"] == "not run"
 
 
+def test_prepare_evaluation_freezes_clean_h0_after_all_cases_qualify(
+    tmp_path,
+    monkeypatch,
+):
+    project_root, _ = make_service_project(tmp_path)
+    (project_root / ".gitignore").write_text(
+        ".autobugfix/*\n!.autobugfix/config.yaml\n",
+        encoding="utf-8",
+    )
+    run(["git", "init", "--initial-branch=main", str(project_root)])
+    run(["git", "-C", str(project_root), "config", "user.email", "eval@example.invalid"])
+    run(["git", "-C", str(project_root), "config", "user.name", "Eval"])
+    run(["git", "-C", str(project_root), "add", ".gitignore"])
+    run(
+        [
+            "git",
+            "-C",
+            str(project_root),
+            "add",
+            "-f",
+            ".autobugfix/config.yaml",
+        ]
+    )
+    run(["git", "-C", str(project_root), "commit", "-m", "subject"])
+    manifest_path = tmp_path / "evaluation.yaml"
+    manifest_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 3,
+                "manifest_id": "evaluation-two",
+                "benchmark": "defects4j",
+                "framework_revision": DEFECTS4J_FRAMEWORK_REVISION,
+                "dataset_revision": "defects4j-v3.0.1",
+                "expected_case_count": 2,
+                "model": "gpt-5.4-mini",
+                "max_attempts": 2,
+                "cases": [
+                    {"case_id": "d4j-lang-1", "project": "Lang", "bug_id": 1},
+                    {"case_id": "d4j-lang-2", "project": "Lang", "bug_id": 2},
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    qualified: list[str] = []
+
+    class FakeRuntime:
+        def __init__(self, config):
+            self.config = config
+
+        def doctor(self, artifact_root):
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            return DoctorReport(
+                adapter="defects4j",
+                framework_revision=DEFECTS4J_FRAMEWORK_REVISION,
+                runtime_id="sha256:" + "a" * 64,
+                verifier_runtime_id="sha256:" + "b" * 64,
+                started_at=utc_now(),
+                finished_at=utc_now(),
+                checks=(DoctorCheck("docker", True, "available", "available"),),
+            )
+
+        def preflight_case(
+            self,
+            manifest,
+            case,
+            *,
+            role,
+            first_wave,
+            artifact_root,
+        ):
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            qualified.append(case.case_id)
+            return replace(
+                EligibilityReceipt.pending(
+                    receipt_id=f"{case.case_id}-receipt",
+                    manifest_digest=manifest.manifest_digest,
+                    case_id=case.case_id,
+                    project=case.project,
+                    bug_id=case.bug_id,
+                    role=role,
+                    first_wave=first_wave,
+                    framework_revision=manifest.framework_revision,
+                    dataset_revision=manifest.dataset_revision,
+                    status="eligible",
+                    reason="",
+                ),
+                runtime_id="sha256:" + "a" * 64,
+                verifier_runtime_id="sha256:" + "b" * 64,
+            )
+
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.service.Defects4JRuntime",
+        FakeRuntime,
+    )
+    result = EvalBenchmarkService(project_root).prepare_evaluation(manifest_path)
+    prepared = PreparedEvaluationManifest.from_yaml(
+        Path(result["prepared_manifest"])
+    )
+
+    assert qualified == ["d4j-lang-1", "d4j-lang-2"]
+    assert result["case_count"] == 2
+    assert prepared.subject_sha == run(
+        ["git", "-C", str(project_root), "rev-parse", "HEAD"]
+    ).stdout.strip()
+    assert [case.case_id for case in prepared.cases] == qualified
+
+
+def test_prepare_evaluation_rejects_dirty_subject_before_doctor(tmp_path):
+    project_root, _ = make_service_project(tmp_path)
+    run(["git", "init", "--initial-branch=main", str(project_root)])
+    run(["git", "-C", str(project_root), "config", "user.email", "eval@example.invalid"])
+    run(["git", "-C", str(project_root), "config", "user.name", "Eval"])
+    run(["git", "-C", str(project_root), "add", "-A"])
+    run(["git", "-C", str(project_root), "commit", "-m", "subject"])
+    (project_root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    manifest_path = tmp_path / "evaluation.yaml"
+    manifest_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 3,
+                "manifest_id": "evaluation-one",
+                "benchmark": "defects4j",
+                "framework_revision": DEFECTS4J_FRAMEWORK_REVISION,
+                "dataset_revision": "defects4j-v3.0.1",
+                "expected_case_count": 1,
+                "model": "gpt-5.4-mini",
+                "max_attempts": 2,
+                "cases": [
+                    {"case_id": "d4j-lang-1", "project": "Lang", "bug_id": 1}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalBenchmarkServiceError, match="must be clean"):
+        EvalBenchmarkService(project_root).prepare_evaluation(manifest_path)
+
+
+def test_run_evaluation_consumes_trusted_prepared_receipts_once(
+    tmp_path,
+    monkeypatch,
+):
+    project_root, _ = make_service_project(tmp_path)
+    (project_root / ".gitignore").write_text(
+        ".autobugfix/*\n!.autobugfix/config.yaml\n",
+        encoding="utf-8",
+    )
+    run(["git", "init", "--initial-branch=main", str(project_root)])
+    run(["git", "-C", str(project_root), "config", "user.email", "eval@example.invalid"])
+    run(["git", "-C", str(project_root), "config", "user.name", "Eval"])
+    run(["git", "-C", str(project_root), "add", ".gitignore"])
+    run(
+        [
+            "git",
+            "-C",
+            str(project_root),
+            "add",
+            "-f",
+            ".autobugfix/config.yaml",
+        ]
+    )
+    run(["git", "-C", str(project_root), "commit", "-m", "subject"])
+    service = EvalBenchmarkService(project_root)
+    fingerprint = service._evaluation_subject_fingerprint("gpt-5.4-mini")
+    receipt = replace(
+        EligibilityReceipt.pending(
+            receipt_id="d4j-lang-1-receipt",
+            manifest_digest="a" * 64,
+            case_id="d4j-lang-1",
+            project="Lang",
+            bug_id=1,
+            role="evaluation",
+            first_wave=16,
+            framework_revision=DEFECTS4J_FRAMEWORK_REVISION,
+            dataset_revision="defects4j-v3.0.1",
+            status="eligible",
+            reason="",
+        ),
+        runtime_id="sha256:" + "b" * 64,
+        verifier_runtime_id="sha256:" + "c" * 64,
+    )
+    receipt_digest = str(receipt.to_dict()["record_digest"])
+    prepared = PreparedEvaluationManifest(
+        manifest_id="evaluation-one",
+        seed_manifest_digest="a" * 64,
+        benchmark="defects4j",
+        framework_revision=DEFECTS4J_FRAMEWORK_REVISION,
+        dataset_revision="defects4j-v3.0.1",
+        runtime_id=receipt.runtime_id,
+        verifier_runtime_id=receipt.verifier_runtime_id,
+        subject_sha=fingerprint["subject_sha"],
+        subject_tree=fingerprint["subject_tree"],
+        config_digest=fingerprint["config_digest"],
+        roles_digest=fingerprint["roles_digest"],
+        skills_digest=fingerprint["skills_digest"],
+        memory_digest=fingerprint["memory_digest"],
+        model="gpt-5.4-mini",
+        max_attempts=2,
+        expected_case_count=1,
+        cases=(
+            PreparedEvaluationCase(
+                case_id=receipt.case_id,
+                project=receipt.project,
+                bug_id=receipt.bug_id,
+                receipt_digest=receipt_digest,
+            ),
+        ),
+        prepared_at=utc_now(),
+    )
+    prepared_data = prepared.to_dict()
+    prepared_path = service.store.write_trusted_manifest(
+        prepared.manifest_id,
+        f"evaluation-{prepared_data['record_digest']}.yaml",
+        prepared_data,
+    )
+    monkeypatch.setattr(service.store, "read_receipt", lambda path: receipt)
+    monkeypatch.setattr(
+        service,
+        "_visible_case_row",
+        lambda value: {"case_id": value.case_id, "prepared": True},
+    )
+    verifier = object()
+    evaluator = object()
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.service.managed_verifier_for_receipt",
+        lambda value, config: verifier,
+    )
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.service.official_oracle_for_receipt",
+        lambda value, config: evaluator,
+    )
+    observed: dict[str, object] = {}
+
+    def fake_run_eval(project, dataset, out, **kwargs):
+        observed["project"] = project
+        observed["dataset"] = dataset
+        observed.update(kwargs)
+        run_dir = out / str(kwargs["run_id"])
+        run_dir.mkdir(parents=True)
+        (run_dir / "summary.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "case_count": 1,
+                    "passed_count": 0,
+                    "failed_count": 1,
+                    "harness_error_count": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return run_dir
+
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.service.run_eval",
+        fake_run_eval,
+    )
+    result = service.run_evaluation(
+        prepared_path,
+        out_root=project_root / ".autobugfix/eval-runs",
+        run_id="h0-one",
+    )
+
+    assert result["summary"]["failed_count"] == 1
+    assert result["summary"]["harness_error_count"] == 0
+    assert observed["model"] == "gpt-5.4-mini"
+    assert observed["max_attempts"] == 2
+    assert observed["verifier_backends"] == {receipt.case_id: verifier}
+    assert observed["official_evaluators"] == {receipt.case_id: evaluator}
+    assert yaml.safe_load(
+        (Path(result["run_dir"]) / "subject-noninterference.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["unchanged"] is True
+
+
 def test_defects4j_runtime_rejects_unsafe_project_names(tmp_path):
     project_root, _ = make_service_project(tmp_path)
     runtime = Defects4JRuntime(load_config(project_root).eval.benchmarks)
@@ -576,6 +922,44 @@ def test_defects4j_failing_test_parser_and_deterministic_history_free_snapshot(t
     assert heads[0] == heads[1]
 
 
+def test_visible_triggering_test_can_pass_without_failing_tests_file(
+    tmp_path,
+    monkeypatch,
+):
+    project_root, _ = make_service_project(tmp_path)
+    runtime = Defects4JRuntime(load_config(project_root).eval.benchmarks)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    def fake_container(command, *, artifact_root, name, **kwargs):
+        del kwargs
+        assert command[-2:] == ["-t", "example.Test::passes"]
+        run_root = artifact_root / name
+        run_root.mkdir(parents=True)
+        stdout = run_root / "stdout.log"
+        stderr = run_root / "stderr.log"
+        stdout.write_text("test passed\n", encoding="utf-8")
+        stderr.write_text("", encoding="utf-8")
+        return SimpleNamespace(
+            passed=True,
+            timed_out=False,
+            exit_code=0,
+            stdout_path=str(stdout),
+            stderr_path=str(stderr),
+        )
+
+    monkeypatch.setattr(runtime, "_run_container", fake_container)
+    _, failures = runtime.verify_worktree(
+        worktree,
+        artifact_root=tmp_path / "artifacts",
+        single_test="example.Test::passes",
+    )
+    assert failures == ()
+    assert (tmp_path / "artifacts/official-test/failing_tests").read_text(
+        encoding="utf-8"
+    ) == ""
+
+
 def test_defects4j_repair_contract_allows_only_stable_fixed_baseline_failures():
     triggering = ("example.TriggerTest::fails",)
     baseline = ("example.EnvironmentTest::requiresNetwork",)
@@ -688,16 +1072,24 @@ def test_official_verifier_injects_digest_bound_metadata_only_during_check(
         framework_revision=DEFECTS4J_FRAMEWORK_REVISION,
         project="Lang",
         bug_id=1,
-        eligibility_receipt_digest="b" * 64,
         source_roots=("src/main/java",),
-        baseline_failing_tests=(),
+        triggering_tests=("example.TriggerTest::fails",),
         verifier_metadata_path=str(metadata.resolve()),
         verifier_metadata_sha256=digest_file(metadata),
         timeout_seconds=60,
     )
 
-    def fake_verify(_self, worktree, *, artifact_root, name="official-test", image=None):
+    def fake_verify(
+        _self,
+        worktree,
+        *,
+        artifact_root,
+        name="official-test",
+        image=None,
+        single_test=None,
+    ):
         del name, image
+        assert single_test == "example.TriggerTest::fails"
         assert (worktree / ".defects4j.config").read_text(encoding="utf-8") == (
             "pid=Lang\nvid=1b\n"
         )
@@ -709,13 +1101,18 @@ def test_official_verifier_injects_digest_bound_metadata_only_during_check(
         stderr = artifact_root / "stderr.log"
         stdout.write_text("official pass\n", encoding="utf-8")
         stderr.write_text("", encoding="utf-8")
-        return SimpleNamespace(stdout_path=str(stdout), stderr_path=str(stderr)), ()
+        return SimpleNamespace(
+            stdout_path=str(stdout),
+            stderr_path=str(stderr),
+            timed_out=False,
+            exit_code=0,
+        ), ()
 
     monkeypatch.setattr(
         "autobugfix.eval.benchmarks.verify.Defects4JRuntime.verify_worktree",
         fake_verify,
     )
-    passed, failures, _, _, exit_code = run_official_verifier(
+    passed, failures, _, _, exit_code = run_visible_verifier(
         repo,
         contract,
         tmp_path / "artifacts",
@@ -804,6 +1201,126 @@ def test_visible_defects4j_case_uses_managed_verifier_without_oracle_paths(
     assert "java.lang.AssertionError: escaped token" in row["task"]["problem_statement"]
     assert "defects4j test -w /workspace" in row["task"]["problem_statement"]
     assert EvalCase.from_row(row).source.adapter == "defects4j"
+
+    managed = managed_verifier_for_receipt(receipt, config.eval.benchmarks)
+    changed_hidden_truth = replace(
+        receipt,
+        baseline_failing_tests=("different.HiddenFailure::fails",),
+        gold_patch_path=str(
+            config.eval.benchmarks.trusted_case_root / "different-gold.patch"
+        ),
+        gold_patch_sha256="different-gold-digest",
+    )
+    managed_after_hidden_change = managed_verifier_for_receipt(
+        changed_hidden_truth,
+        config.eval.benchmarks,
+    )
+    assert managed.command_id == managed_after_hidden_change.command_id
+    visible_contract = yaml.safe_dump(managed.contract.to_dict(), sort_keys=False)
+    assert "baseline_failing_tests" not in visible_contract
+    assert "gold" not in visible_contract
+    assert (
+        official_oracle_for_receipt(receipt, config.eval.benchmarks)
+        .contract.baseline_failing_tests
+        == ("secret.EnvironmentTest::fails",)
+    )
+
+
+def test_official_oracle_runs_full_suite_only_after_receiving_private_contract(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src/main/java").mkdir(parents=True)
+    (repo / "src/main/java/Main.java").write_text(
+        "class Main {}\n", encoding="utf-8"
+    )
+    run(["git", "init", "--initial-branch=main", str(repo)])
+    run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"])
+    run(["git", "-C", str(repo), "config", "user.name", "Test"])
+    run(["git", "-C", str(repo), "add", "-A"])
+    run(["git", "-C", str(repo), "commit", "-m", "base"])
+    (repo / "src/main/java/Main.java").write_text(
+        "class Main { int fixed; }\n", encoding="utf-8"
+    )
+    metadata = tmp_path / "trusted/defects4j.build.properties"
+    metadata.parent.mkdir()
+    metadata.write_text(
+        "d4j.project.id=Lang\nd4j.bug.id=1\n", encoding="utf-8"
+    )
+    contract = Defects4JOracleContract(
+        image_id="sha256:" + "a" * 64,
+        platform="linux/amd64",
+        framework_revision=DEFECTS4J_FRAMEWORK_REVISION,
+        project="Lang",
+        bug_id=1,
+        eligibility_receipt_digest="b" * 64,
+        source_roots=("src/main/java",),
+        baseline_failing_tests=("example.EnvironmentTest::fails",),
+        verifier_metadata_path=str(metadata.resolve()),
+        verifier_metadata_sha256=digest_file(metadata),
+        timeout_seconds=60,
+    )
+
+    def fake_verify(
+        _self,
+        worktree,
+        *,
+        artifact_root,
+        name="official-test",
+        image=None,
+        single_test=None,
+    ):
+        del worktree, image
+        assert name == "official-full-suite"
+        assert single_test is None
+        path = artifact_root / name
+        path.mkdir(parents=True, exist_ok=True)
+        stdout = path / "stdout.log"
+        stderr = path / "stderr.log"
+        stdout.write_text("full suite completed\n", encoding="utf-8")
+        stderr.write_text("", encoding="utf-8")
+        return SimpleNamespace(
+            stdout_path=str(stdout),
+            stderr_path=str(stderr),
+            timed_out=False,
+            exit_code=0,
+        ), ("example.EnvironmentTest::fails",)
+
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.verify.Defects4JRuntime.verify_worktree",
+        fake_verify,
+    )
+    passed, failures, _, stderr, exit_code = run_official_oracle(
+        repo,
+        contract,
+        tmp_path / "oracle-artifacts",
+    )
+    assert passed is True
+    assert failures == ("example.EnvironmentTest::fails",)
+    assert "Failures outside" not in stderr
+    assert exit_code == 0
+
+
+def test_official_oracle_rejects_source_root_outside_repository(tmp_path):
+    metadata = tmp_path / "defects4j.build.properties"
+    metadata.write_text("d4j.project.id=Lang\n", encoding="utf-8")
+
+    with pytest.raises(BenchmarkContractError, match="repository-relative"):
+        Defects4JOracleContract(
+            image_id="sha256:" + "a" * 64,
+            platform="linux/amd64",
+            framework_revision=DEFECTS4J_FRAMEWORK_REVISION,
+            project="Lang",
+            bug_id=1,
+            eligibility_receipt_digest="b" * 64,
+            source_roots=("../outside",),
+            baseline_failing_tests=(),
+            verifier_metadata_path=str(metadata.resolve()),
+            verifier_metadata_sha256=digest_file(metadata),
+            timeout_seconds=60,
+        )
 
 
 def test_seal_encrypts_holdout_authority_and_deidentifies_visible_projection(

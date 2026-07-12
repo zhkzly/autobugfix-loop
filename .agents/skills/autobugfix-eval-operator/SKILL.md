@@ -14,36 +14,61 @@ Autobugfix but does not own the other loops' state.
 The Operator is a bounded execution node. Use Governance v4 before modifying
 code, tests, config, skills, validation, or baselines.
 
-Two studies are deliberately independent. Experiment 1 starts at frozen `H0`,
-uses Defects4J, exposes 10 Optimization cases, seals 6 unseen-repository
-Holdout cases externally, and may produce `H_bug`. Experiment 2 separately
-starts at the same named `H0` cohort, exposes 10 SWE-bench Verified
-Optimization cases, seals 6 unseen-repository SWE-bench-Live Holdout cases
-externally, and may produce `H_general`. Never initialize Experiment 2 from
-`H_bug` or transfer code, skills, Memory, artifacts, results, or case-level
-feedback. Both use only `gpt-5.4-mini`, human-granted `3 -> 8 -> 16` waves,
-concurrency one, and no fallback. Holdout manifests/gold/results remain outside
-Operator roots; only aggregate final metrics may be registered.
+Benchmark adapters share one protocol:
+
+```text
+repository@buggy-revision + issue/evidence
+-> complete Execution loop
+-> frozen final patch and trace
+-> dataset official evaluator
+-> immutable result
+```
+
+Experiment 1 is not an Operator optimization loop. It freezes the current H0,
+pre-registers 16 Defects4J `evaluation` cases, runs the same production
+Execution configuration once per case, and scores each frozen submission. Do
+not triage a case result to change H0, create `H_bug`, add an attempt, update
+Memory, or exclude a valid failed repair during Experiment 1.
+
+Experiment 2 is separate. It starts from the original frozen H0, may expose 10
+SWE-bench Verified Optimization cases to Operator, seals 6 unseen-repository
+SWE-bench-Live cases, and may produce `H_general`. Never transfer Experiment 1
+outcomes or case-level feedback into Experiment 2. Primary production calls use
+`gpt-5.4-mini`, concurrency one, fixed budgets, and no model fallback.
 
 Defects4J uses two images built from one pinned Dockerfile: the materializer
-contains checkout/oracle metadata, while the verifier image removes gold
-patches and localization hints. The Writer edits a local task worktree;
-Docker only materializes the official buggy revision and runs official tests.
+contains private checkout/scoring metadata, while the verifier image removes
+gold patches, fixed truth, and localization hints. The Writer edits a local
+task worktree. Docker materializes the official buggy revision, runs declared
+visible triggering tests during Execution, and runs the full official evaluator
+only after submission freeze.
 Never add or request host Java, Perl, SVN, cpanm, Defects4J, `PERL5LIB`, or
 library-path configuration. Before opening a governed wave, qualify each
 suite through the service-owned commands:
 
 ```text
-autobugfix eval benchmark seal --manifest <seed>
+autobugfix eval benchmark prepare-evaluation --manifest <evaluation-seed>
+autobugfix eval benchmark run-evaluation --manifest <prepared-manifest>
+  --out .autobugfix/eval-runs --run-id <id>
+
+# Separate Operator treatment studies only:
+autobugfix eval benchmark seal --manifest <treatment-seed>
 autobugfix eval benchmark run-case --manifest <seed> --case <visible-id>
   --out .autobugfix/eval-runs --run-id <id>
   --model gpt-5.4-mini --max-attempts 2
 ```
 
-`seal` and `guard-run` are human Guard actions. They must execute from a clean
-control checkout at `eval.benchmarks.guard.trusted_ref`; the encrypted bundle,
-public manifest, and aggregate metric bind that Git tree, machine constitution,
-and harness digest. Never run either action from an Operator candidate.
+`prepare-evaluation` is no-model and must finish all case qualification before
+formal generation starts. It freezes H0 Git/tree, config, roles, skills,
+Memory, model, budget, and receipt digests. `run-evaluation` accepts the
+prepared manifest only; a repair failure is a measured result and cannot cause
+an extra case run. Only harness failure makes the command fail.
+
+`seal` and `guard-run` are human Guard actions for treatment studies, not the
+Experiment 1 H0 measurement. When used, they must execute from a clean control
+checkout at `eval.benchmarks.guard.trusted_ref`; the encrypted bundle, public
+manifest, and aggregate metric bind that Git tree, machine constitution, and
+harness digest. Never run either action from an Operator candidate.
 
 For a governed Study, use this aggregate flow:
 
@@ -66,22 +91,26 @@ therefore produces H0/Baseline authority. It must reject a binding whose
 the experiment task provides a trusted isolated subject broker that reports
 the exact experiment-line SHA; changing a YAML binding is not execution.
 
-Do not interpret every fixed-revision failure as a benchmark failure.
-Defects4J qualification deterministically requires a stable fixed failure
-baseline and a buggy delta equal to official triggering tests. Generated
-patches must eliminate all failures outside that baseline. Never move this
-decision into Writer/Evaluator prose or expose Holdout identity maps to the
-Operator.
+Private Defects4J qualification may compare buggy and fixed revisions to reject
+an unstable benchmark case. Never move its fixed baseline, gold data, or
+diagnosis into Writer/Evaluator prose. The Execution verifier contract contains
+only visible triggering tests. The official full-suite evaluator runs after the
+final patch and trace are frozen, and its result cannot become Writer feedback.
 
 Every Execution verifier attempt must retain worktree-external Docker raw
 logs. A missing verifier artifact path, SDK timeout event, Docker client hang,
-or unstable fixed baseline is a harness diagnosis, not another Writer retry.
+or unstable private qualification is a harness diagnosis, not another Writer
+retry.
 
 Classify import failures, Docker failures, generated build-artifact pollution,
 and non-idempotent verifier results as Eval harness defects. They are not model
 repair failures and must not be fed to another Writer attempt until fixed.
 
-## Required Workflow
+## Operator Treatment Workflow
+
+The workflow below applies when Operator is authorized to improve Autobugfix,
+including Experiment 2. It must not be inserted into Experiment 1 between H0
+case generation and official scoring.
 
 1. Read real artifacts and diagnose the owning layer. Do not jump directly to
    prompt or skill changes. SWE-bench inputs do not replace screenshots, logs,

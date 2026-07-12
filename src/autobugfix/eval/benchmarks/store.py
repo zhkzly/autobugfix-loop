@@ -12,6 +12,7 @@ import yaml
 from autobugfix.eval.benchmarks.models import (
     BenchmarkContractError,
     EligibilityReceipt,
+    PreparedEvaluationManifest,
     SealedBenchmarkManifest,
     digest_file,
     safe_component,
@@ -217,6 +218,27 @@ class BenchmarkStore:
         if not isinstance(data, Mapping):
             raise BenchmarkContractError("sealed manifest must be a mapping")
         return SealedBenchmarkManifest.from_dict(data)
+
+    def read_prepared_evaluation_manifest(
+        self,
+        path: Path,
+    ) -> PreparedEvaluationManifest:
+        resolved = path.resolve()
+        manifest_root = (self.trusted_root / "manifests").resolve()
+        if not resolved.is_relative_to(manifest_root):
+            raise BenchmarkContractError(
+                "prepared evaluation manifest is outside trusted benchmark root"
+            )
+        manifest = PreparedEvaluationManifest.from_yaml(resolved)
+        digest = str(manifest.to_dict()["record_digest"])
+        if (
+            resolved.name != f"evaluation-{digest}.yaml"
+            or resolved.parent.name != manifest.manifest_id
+        ):
+            raise BenchmarkContractError(
+                "prepared evaluation manifest path does not match its identity"
+            )
+        return manifest
 
     def write_visible_yaml(
         self, manifest_id: str, name: str, data: Mapping[str, Any]

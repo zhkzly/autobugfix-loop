@@ -281,6 +281,17 @@ def command_eval(args: argparse.Namespace) -> int:
             report = service.preflight(Path(args.manifest), case_selector=args.case)
             _print_yaml(report)
             return 0 if report["failed_count"] == 0 else 1
+        if args.benchmark_action == "prepare-evaluation":
+            _print_yaml(service.prepare_evaluation(Path(args.manifest)))
+            return 0
+        if args.benchmark_action == "run-evaluation":
+            report = service.run_evaluation(
+                Path(args.manifest),
+                out_root=Path(args.out),
+                run_id=args.run_id,
+            )
+            _print_yaml(report)
+            return 0 if report["summary"].get("harness_error_count") == 0 else 1
         if args.benchmark_action == "seal":
             if not sys.stdin.isatty():
                 raise RuntimeError(
@@ -912,6 +923,16 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_preflight.add_argument("--manifest", required=True)
     benchmark_preflight.add_argument("--case")
     benchmark_preflight.set_defaults(func=command_eval)
+    benchmark_prepare_evaluation = benchmark_sub.add_parser("prepare-evaluation")
+    benchmark_prepare_evaluation.add_argument("--manifest", required=True)
+    benchmark_prepare_evaluation.set_defaults(func=command_eval)
+    benchmark_run_evaluation = benchmark_sub.add_parser("run-evaluation")
+    benchmark_run_evaluation.add_argument("--manifest", required=True)
+    benchmark_run_evaluation.add_argument(
+        "--out", default=".autobugfix/eval-runs"
+    )
+    benchmark_run_evaluation.add_argument("--run-id", required=True)
+    benchmark_run_evaluation.set_defaults(func=command_eval)
     benchmark_seal = benchmark_sub.add_parser("seal")
     benchmark_seal.add_argument("--manifest", required=True)
     benchmark_seal.set_defaults(func=command_eval)

@@ -1,0 +1,57 @@
+schema_version: 3
+manifest_id: defects4j-v3.0.1-h0-16
+benchmark: defects4j
+framework_revision: 6d54320e0db5a357f9ab38a8e4d2e5aead7e1c09
+dataset_revision: defects4j-v3.0.1
+expected_case_count: 16
+model: gpt-5.4-mini
+max_attempts: 2
+cases:
+  - case_id: d4j-jsoup-2
+    project: Jsoup
+    bug_id: 2
+  - case_id: d4j-gson-2
+    project: Gson
+    bug_id: 2
+  - case_id: d4j-mockito-1
+    project: Mockito
+    bug_id: 1
+  - case_id: d4j-time-1
+    project: Time
+    bug_id: 1
+  - case_id: d4j-gson-3
+    project: Gson
+    bug_id: 3
+  - case_id: d4j-jsoup-1
+    project: Jsoup
+    bug_id: 1
+  - case_id: d4j-mockito-2
+    project: Mockito
+    bug_id: 2
+  - case_id: d4j-time-2
+    project: Time
+    bug_id: 2
+  - case_id: d4j-gson-5
+    project: Gson
+    bug_id: 5
+  - case_id: d4j-jsoup-5
+    project: Jsoup
+    bug_id: 5
+  - case_id: d4j-jacksondatabind-67
+    project: JacksonDatabind
+    bug_id: 67
+  - case_id: d4j-jacksoncore-4
+    project: JacksonCore
+    bug_id: 4
+  - case_id: d4j-jacksondatabind-36
+    project: JacksonDatabind
+    bug_id: 36
+  - case_id: d4j-jacksonxml-3
+    project: JacksonXml
+    bug_id: 3
+  - case_id: d4j-jacksonxml-5
+    project: JacksonXml
+    bug_id: 5
+  - case_id: d4j-jacksoncore-2
+    project: JacksonCore
+    bug_id: 2

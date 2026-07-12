@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -11,13 +12,21 @@ from autobugfix.codex_backend import CodexBackend
 from autobugfix.config import default_config_dict, load_config
 from autobugfix.eval.adapters import get_adapter
 from autobugfix.eval.artifacts import copy_role_skills, read_jsonl, write_text, write_yaml
+from autobugfix.eval.benchmarks.models import digest_file, record_with_digest
 from autobugfix.eval.diagnosis import diagnose_run
-from autobugfix.eval.models import EvalCase, EvalObservation, OracleResult
+from autobugfix.eval.models import (
+    EvalCase,
+    EvalObservation,
+    FrozenSubmission,
+    OracleResult,
+)
 from autobugfix.eval.scorers import normalize_diff, score_case, score_observation
 from autobugfix.models import AutobugfixConfig, RoleConfig, utc_now
 from autobugfix.role_config import resolve_role
 from autobugfix.service import AutobugfixService
 from autobugfix.verifier import ExecutionVerifierBackend
+from autobugfix.git_utils import rev_parse
+from autobugfix.worktree import diff_for_task
 
 
 class EvalRunnerError(RuntimeError):
@@ -38,6 +47,13 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
         else:
             result[key] = value
     return result
+
+
+def _subject_sha(project_root: Path) -> str:
+    try:
+        return rev_parse(project_root, "HEAD")
+    except Exception:
+        return "unavailable"
 
 
 def _role_to_raw(role: RoleConfig) -> dict[str, object]:
@@ -189,6 +205,7 @@ def _run_case(
     max_attempts: int,
     backend: CodexBackend | None,
     verifier_backend: ExecutionVerifierBackend | None,
+    official_evaluator: object | None,
     sdk_hidden_paths: tuple[Path, ...],
 ) -> dict[str, Any]:
     write_yaml(case_dir / "case.yaml", case.to_dict())
@@ -302,6 +319,49 @@ def _run_case(
         generated = generated_path.read_text(encoding="utf-8") if generated_path.exists() else ""
         write_text(case_dir / "generated.diff", generated)
 
+        if not current.worktree_path:
+            raise EvalRunnerError("Execution task has no generated worktree to freeze")
+        execution_worktree = Path(current.worktree_path)
+        execution_repo = isolated_config.repo(case.repo)
+        base_ref = str(
+            current.metadata.get("base_commit")
+            or f"{execution_repo.remote}/{execution_repo.main_branch}"
+        )
+        live_patch = diff_for_task(execution_repo, execution_worktree, base_ref)
+        if live_patch != generated:
+            raise EvalRunnerError(
+                "Execution diff artifact differs from the live task worktree"
+            )
+
+        events_path = task_dir / "events.jsonl"
+        task_path = task_dir / "task.yaml"
+        frozen_patch_path = case_dir / "generated.diff"
+        submission = record_with_digest(
+            {
+                "schema": "autobugfix-eval-submission-v1",
+                "case_id": case.case_id,
+                "task_id": task_id,
+                "subject_sha": _subject_sha(project_root),
+                "execution_state": execution_state,
+                "iterations": current.iterations,
+                "patch_path": str(frozen_patch_path),
+                "patch_sha256": digest_file(frozen_patch_path),
+                "worktree_patch_sha256": hashlib.sha256(
+                    live_patch.encode("utf-8")
+                ).hexdigest(),
+                "events_sha256": digest_file(events_path),
+                "task_sha256": digest_file(task_path),
+                "frozen_at": utc_now(),
+            }
+        )
+        write_yaml(case_dir / "submission.yaml", submission)
+        frozen_submission = FrozenSubmission(
+            case_id=case.case_id,
+            patch=generated,
+            patch_sha256=str(submission["patch_sha256"]),
+            record_digest=str(submission["record_digest"]),
+        )
+
         try:
             oracle_diff = adapter.oracle_diff(case)
         except Exception as exc:
@@ -309,15 +369,54 @@ def _run_case(
         if oracle_diff is not None:
             write_text(case_dir / "oracle.diff", oracle_diff)
 
-        if not current.worktree_path:
-            raise EvalRunnerError("Execution task has no generated worktree for oracle verification")
-        oracle_result = adapter.verify(
+        oracle_result = adapter.score_submission(
             case,
-            Path(current.worktree_path),
+            materialized,
+            frozen_submission,
             case_dir / "oracle",
             command_override=test_command_override,
-            verifier_backend=verifier_backend,
+            official_evaluator=official_evaluator,
         )
+        post_oracle_live_patch = diff_for_task(
+            execution_repo,
+            execution_worktree,
+            base_ref,
+        )
+        post_oracle = {
+            "patch_sha256": digest_file(frozen_patch_path),
+            "worktree_patch_sha256": hashlib.sha256(
+                post_oracle_live_patch.encode("utf-8")
+            ).hexdigest(),
+            "events_sha256": digest_file(events_path),
+            "task_sha256": digest_file(task_path),
+            "iterations": service.store.load(task_id).iterations,
+        }
+        expected_post_oracle = {
+            "patch_sha256": submission["patch_sha256"],
+            "worktree_patch_sha256": submission["worktree_patch_sha256"],
+            "events_sha256": submission["events_sha256"],
+            "task_sha256": submission["task_sha256"],
+            "iterations": submission["iterations"],
+        }
+        unchanged = post_oracle == expected_post_oracle
+        write_yaml(
+            case_dir / "oracle-noninterference.yaml",
+            record_with_digest(
+                {
+                    "schema": "autobugfix-oracle-noninterference-v1",
+                    "case_id": case.case_id,
+                    "submission_digest": submission["record_digest"],
+                    "unchanged": unchanged,
+                    "expected": expected_post_oracle,
+                    "observed": post_oracle,
+                    "checked_at": utc_now(),
+                }
+            ),
+        )
+        if not unchanged:
+            raise EvalRunnerError(
+                "official evaluator changed the frozen Execution submission"
+            )
         write_yaml(case_dir / "oracle-result.yaml", oracle_result.to_dict())
         equals = (
             normalize_diff(generated) == normalize_diff(oracle_diff)
@@ -440,6 +539,7 @@ def run_eval(
     max_attempts: int = 1,
     backend: CodexBackend | None = None,
     verifier_backends: Mapping[str, ExecutionVerifierBackend] | None = None,
+    official_evaluators: Mapping[str, object] | None = None,
     sdk_hidden_paths: tuple[Path, ...] = (),
 ) -> Path:
     if max_attempts < 1:
@@ -488,15 +588,22 @@ def run_eval(
     if not cases and not reports:
         raise EvalRunnerError("no eval cases selected")
     resolved_verifiers = dict(verifier_backends or {})
+    resolved_evaluators = dict(official_evaluators or {})
     for case in cases:
-        if case.source.adapter != "defects4j" or case.case_id in resolved_verifiers:
+        if case.source.adapter != "defects4j" or (
+            case.case_id in resolved_verifiers
+            and case.case_id in resolved_evaluators
+        ):
             continue
         if case.benchmark is None:
             raise EvalRunnerError(
                 f"Defects4J case {case.case_id} has no benchmark receipt binding"
             )
         from autobugfix.eval.benchmarks.store import BenchmarkStore
-        from autobugfix.eval.benchmarks.verify import managed_verifier_for_receipt
+        from autobugfix.eval.benchmarks.verify import (
+            managed_verifier_for_receipt,
+            official_oracle_for_receipt,
+        )
 
         benchmark_config = source_config.eval.benchmarks
         benchmark_store = BenchmarkStore(
@@ -517,7 +624,7 @@ def run_eval(
             ) from exc
         managed = managed_verifier_for_receipt(receipt, benchmark_config)
         if (
-            receipt.role != "optimization"
+            receipt.role not in {"evaluation", "optimization"}
             or case.execution.test_command != managed.command_id
             or case.environment.image != receipt.verifier_runtime_id
             or case.repository.base_commit != receipt.sanitized_base_sha
@@ -526,6 +633,10 @@ def run_eval(
                 f"Defects4J case {case.case_id} disagrees with its trusted receipt"
             )
         resolved_verifiers[case.case_id] = managed
+        resolved_evaluators[case.case_id] = official_oracle_for_receipt(
+            receipt,
+            benchmark_config,
+        )
     write_yaml(
         run_dir / "resolved-config.yaml",
         {
@@ -558,6 +669,7 @@ def run_eval(
             max_attempts=max_attempts,
             backend=backend,
             verifier_backend=resolved_verifiers.get(case.case_id),
+            official_evaluator=resolved_evaluators.get(case.case_id),
             sdk_hidden_paths=sdk_hidden_paths,
         )
         for case in cases
@@ -573,6 +685,8 @@ def run_eval(
         "oracle-result.yaml",
         "oracle/stdout.log",
         "oracle/stderr.log",
+        "submission.yaml",
+        "oracle-noninterference.yaml",
     )
     report_case_ids = [str(item["case_id"]) for item in reports]
     present = sum(

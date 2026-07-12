@@ -779,24 +779,29 @@ class Defects4JRuntime:
         artifact_root: Path,
         name: str = "official-test",
         image: str | None = None,
+        single_test: str | None = None,
     ) -> tuple[CommandEvidence, tuple[str, ...]]:
         failing_path = worktree / "failing_tests"
         if failing_path.exists():
             failing_path.unlink()
+        command = ["defects4j", "test", "-w", "/workspace"]
+        if single_test is not None:
+            command.extend(("-t", single_test))
         evidence = self._run_container(
-            ["defects4j", "test", "-w", "/workspace"],
+            command,
             artifact_root=artifact_root,
             name=name,
             mounts=((worktree, "/workspace", False),),
             user=self._current_user(),
             image=image,
         )
-        if not evidence.passed:
-            raise Defects4JError(
-                f"official Defects4J test command failed with {evidence.exit_code}"
+        failures = self._failing_tests(failing_path) if failing_path.is_file() else ()
+        if failing_path.is_file():
+            shutil.copy2(failing_path, artifact_root / name / "failing_tests")
+        else:
+            (artifact_root / name / "failing_tests").write_text(
+                "", encoding="utf-8"
             )
-        failures = self._failing_tests(failing_path)
-        shutil.copy2(failing_path, artifact_root / name / "failing_tests")
         return evidence, failures
 
     def _sanitize_snapshot(

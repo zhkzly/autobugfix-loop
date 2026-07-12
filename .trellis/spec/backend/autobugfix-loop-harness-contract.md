@@ -87,6 +87,14 @@
 - Eval loop purpose:
   - Build reproducible benchmark/historical-case harnesses that call the real
     execution loop and measure system behavior.
+  - All benchmark adapters implement one protocol: materialize a buggy
+    repository and visible issue/evidence, run the complete Execution loop,
+    freeze its final patch and trace, then invoke the dataset's independent
+    official evaluator or scorer.
+  - Execution-visible verifier results may drive bounded repair retries only
+    when they are declared before the run and would be available in real use.
+    Gold patches, fixed truth, hidden tests, official verdicts, and scorer
+    diagnosis belong to Eval and must never become Execution feedback.
   - Eval may create isolated repos/control roots and collect generated diff,
     oracle diff/tests, reports, scores, and diagnosis.
   - Eval must not approve PPE, archive execution tasks, or approve memory.
@@ -107,10 +115,15 @@
     risk, runtime-role, transition, and verification minima.
   - Project Codex hooks guard the supervising main-agent Operator session only;
     isolated SDK role runtimes disable hooks and remain safe without them.
-  - Named studies use service-owned experiment lines, explicit Mini budget
-    waves, trusted integration, immutable checkpoints, and history-preserving
-    rollback. `H_bug` and `H_general` are independent successors of the same
-    frozen `H0`; neither may inherit the other's treatment or case feedback.
+  - Operator treatment studies use service-owned experiment lines, explicit
+    Mini budget waves, trusted integration, immutable checkpoints, and
+    history-preserving rollback. The generic `H_bug` and `H_general`
+    checkpoint types are available for independent treatments from a frozen
+    `H0`; neither treatment may inherit the other's feedback.
+  - The current Experiment 1 is instead a descriptive Defects4J measurement of
+    unchanged H0. Operator does not participate, create `H_bug`, or modify H0
+    from official scores. Experiment 2 independently starts from the original
+    H0 and may use Operator to produce `H_general` on SWE tasks.
   - Benchmark sources, Optimization/Holdout splits, and checkpoint names are
     experiment protocols. They may evolve through governed research changes
     without redefining the four loop purposes in this project constitution.
@@ -120,11 +133,10 @@
     final metrics only.
   - Defects4J uses one Docker-based authority split into pinned materializer
     and verifier images. The verifier image retains only framework metadata
-    needed by `defects4j test` and removes gold patches and localization hints.
-    Qualification binds both image IDs, framework revision, source roots,
-    stable fixed-revision failure baseline, triggering tests, and raw commands
-    into immutable receipts. Generated patches pass only when no failure
-    outside that baseline remains.
+    needed by visible triggering-test commands and removes fixed truth, gold
+    patches, and localization hints. Private qualification may establish a
+    stable fixed baseline, but the full official evaluator may consume that
+    baseline only after the generated patch and Execution trace are frozen.
   - Holdout identity and case-level evidence are authenticated encrypted Guard
     artifacts. Seal and Guard execution require a clean checkout at the
     configured trusted ref and bind its Git tree, machine constitution, and

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping
@@ -12,7 +13,26 @@ class EvalCaseError(ValueError):
 TaskType = Literal["bugfix", "feature", "maintenance", "unknown"]
 OracleStatus = Literal["passed", "failed", "error"]
 OracleVisibility = Literal["hidden", "diagnostic", "public"]
-ExperimentRole = Literal["optimization", "sealed_holdout"]
+ExperimentRole = Literal["evaluation", "optimization", "sealed_holdout"]
+
+
+@dataclass(slots=True, frozen=True)
+class FrozenSubmission:
+    """Immutable data handed from Execution to an external benchmark scorer."""
+
+    case_id: str
+    patch: str
+    patch_sha256: str
+    record_digest: str
+
+    def __post_init__(self) -> None:
+        observed = hashlib.sha256(self.patch.encode("utf-8")).hexdigest()
+        if self.patch_sha256 != observed:
+            raise EvalCaseError("frozen submission patch digest mismatch")
+        if len(self.record_digest) != 64 or any(
+            value not in "0123456789abcdef" for value in self.record_digest
+        ):
+            raise EvalCaseError("frozen submission record digest must be sha256")
 
 
 def _required(value: object, name: str) -> str:
@@ -87,7 +107,7 @@ class EvalExperimentSpec:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "EvalExperimentSpec":
         role = str(data.get("role") or "")
-        if role not in {"optimization", "sealed_holdout"}:
+        if role not in {"evaluation", "optimization", "sealed_holdout"}:
             raise EvalCaseError(f"unsupported experiment role: {role!r}")
         first_wave = int(data.get("first_wave") or 0)
         if first_wave not in {3, 8, 16}:

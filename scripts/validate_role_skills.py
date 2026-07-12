@@ -37,7 +37,7 @@ REQUIRED_MARKERS = {
         "Guard-owned facts",
     ),
     ".agents/skills/autobugfix-operator-governance/SKILL.md": (
-        "governed benchmark study",
+        "governed Operator treatment study",
         "3 -> 8 -> 16",
         "Defects4J",
         "SWE-bench Verified",
@@ -48,7 +48,8 @@ REQUIRED_MARKERS = {
         "Defects4J",
         "SWE-bench Verified",
         "SWE-bench-Live",
-        "10 Optimization",
+        "16 Defects4J",
+        "official evaluator",
         "6 unseen-repository",
     ),
 }
