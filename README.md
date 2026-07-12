@@ -220,7 +220,9 @@ required nor configurable.
 
 Build the two pinned roles from the same Dockerfile once. The materializer has
 official checkout/oracle metadata; the verifier removes gold patches and
-localization hints while retaining metadata required by `defects4j test`:
+localization hints while retaining metadata required by `defects4j test`. The
+verifier keeps only the `project_repos/README` bootstrap sentinel, not project
+Git repositories or archives:
 
 ```bash
 docker build --target materializer \
@@ -246,7 +248,7 @@ uv run autobugfix eval benchmark run-case \
   --out .autobugfix/eval-runs \
   --run-id h0-jsoup-2 \
   --model gpt-5.4-mini \
-  --max-attempts 2
+  --max-attempts 3
 ```
 
 `AUTOBUGFIX_DOCKER_BIN` may select an installed Docker executable for one
@@ -254,6 +256,12 @@ process. The configured image tag is inspected first; all case commands bind
 to the resulting immutable image ID. Runtime cases, receipts, SDK logs,
 events, diffs, and official-test artifacts remain gitignored below
 `.autobugfix/`.
+
+Preflight retains the checkout-generated `defects4j.build.properties` below
+the trusted Eval root and binds its digest into the eligibility receipt. The
+Writer never receives that file. The managed verifier injects it only into an
+isolated verification copy, runs the immutable verifier image, and removes the
+copy after preserving the official logs.
 
 `seal` performs real repeated tests for all 10 visible Optimization cases and
 six repository-disjoint Holdout cases. Holdout identities and preflight

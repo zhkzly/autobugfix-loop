@@ -22,7 +22,9 @@ Defects4J has exactly one production runtime family: two roles built from one
 pinned Dockerfile. The materializer contains checkout/oracle metadata. The
 verifier removes gold patches and localization hints but retains
 `active-bugs.csv`, commit databases, layout/build metadata, and other files
-required by the official `defects4j test` implementation.
+required by the official `defects4j test` implementation. It removes every
+project repository entry while retaining only `project_repos/README`, which
+the pinned Defects4J bootstrap requires before any command can run.
 
 ```yaml
 eval:
@@ -61,8 +63,10 @@ For a visible seed case, `EvalBenchmarkService` performs:
 2. Optionally enrich visible input from the upstream issue; tracker failure
    does not replace or invalidate official triggering-test evidence.
 3. Checkout `<id>b`, `<id>f`, and a fresh `<id>b` snapshot through the official
-   CLI. Checkout runs with the image's default root because official project
-   caches are root-owned; output ownership is normalized immediately.
+   CLI. The container runs as the current host UID/GID so bind-mounted output
+   is writable without a privileged ownership-repair phase. An ephemeral
+   container-only Git config marks checkout repositories safe; it never
+   changes the host Git configuration.
 4. Export `tests.trigger` and `dir.src.classes`.
 5. Repeat official full tests. Fixed failures must be identical across runs;
    buggy failures must be exactly that stable baseline plus every trigger.
@@ -88,10 +92,13 @@ The deterministic verifier:
 - derives complete tracked and untracked Git changes;
 - rejects changes outside exported production source roots;
 - mounts the task worktree into the immutable image;
+- injects the digest-bound `defects4j.build.properties` retained under the
+  trusted Eval root into an isolated verification copy only;
 - runs `defects4j test` and reads the official `failing_tests` file;
 - accepts only failures present in the digest-bound fixed-revision baseline;
 - removes only build/test artifacts created by that invocation while
-  preserving all pre-existing Writer changes, including untracked source;
+  preserving all pre-existing Writer changes, including untracked source, and
+  removes the injected service metadata before returning;
 - writes raw command logs to a persistent worktree-external artifact root;
 - returns success only when the command executes and no failure outside the
   stable baseline remains.

@@ -295,6 +295,8 @@ class EligibilityReceipt:
     failure_evidence_path: str = "unavailable"
     failure_evidence_sha256: str = "unavailable"
     reproduction_command: str = "unavailable"
+    verifier_metadata_path: str = "unavailable"
+    verifier_metadata_sha256: str = "unavailable"
 
     def __post_init__(self) -> None:
         safe_component(self.receipt_id, "receipt_id")
@@ -338,6 +340,8 @@ class EligibilityReceipt:
                 "failure_evidence_path": self.failure_evidence_path,
                 "failure_evidence_sha256": self.failure_evidence_sha256,
                 "reproduction_command": self.reproduction_command,
+                "verifier_metadata_path": self.verifier_metadata_path,
+                "verifier_metadata_sha256": self.verifier_metadata_sha256,
             }
         )
 
@@ -405,6 +409,12 @@ class EligibilityReceipt:
             reproduction_command=str(
                 data.get("reproduction_command") or "unavailable"
             ),
+            verifier_metadata_path=str(
+                data.get("verifier_metadata_path") or "unavailable"
+            ),
+            verifier_metadata_sha256=str(
+                data.get("verifier_metadata_sha256") or "unavailable"
+            ),
         )
 
     @classmethod
@@ -453,6 +463,8 @@ class EligibilityReceipt:
             failure_evidence_path="unavailable",
             failure_evidence_sha256="unavailable",
             reproduction_command="unavailable",
+            verifier_metadata_path="unavailable",
+            verifier_metadata_sha256="unavailable",
         )
 
 

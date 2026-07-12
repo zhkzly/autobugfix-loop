@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -31,7 +32,9 @@ from autobugfix.eval.benchmarks.authority import (
 )
 from autobugfix.eval.benchmarks.runtime import run_command
 from autobugfix.eval.benchmarks.verify import (
+    Defects4JVerifierContract,
     cleanup_test_artifacts,
+    run_official_verifier,
     unexpected_failures,
     validate_changed_paths,
 )
@@ -268,6 +271,12 @@ def test_eligible_receipt_revalidates_gold_issue_snapshot_and_command_logs(tmp_p
     gold = trusted / "preflight/gold.patch"
     gold.write_text("diff --git a/A.java b/A.java\n", encoding="utf-8")
     gold.chmod(0o600)
+    metadata = trusted / "preflight/defects4j.build.properties"
+    metadata.write_text(
+        "d4j.project.id=Lang\nd4j.bug.id=1\n",
+        encoding="utf-8",
+    )
+    metadata.chmod(0o600)
     command = run_command(
         ["/bin/sh", "-c", "printf command-evidence"],
         cwd=tmp_path,
@@ -312,12 +321,21 @@ def test_eligible_receipt_revalidates_gold_issue_snapshot_and_command_logs(tmp_p
         status="eligible",
         reason="",
         created_at=utc_now(),
+        verifier_metadata_path=str(metadata),
+        verifier_metadata_sha256=digest_file(metadata),
     )
     path = store.write_receipt(receipt)
     assert store.read_receipt(path) == receipt
 
     gold.write_text("tampered\n", encoding="utf-8")
     with pytest.raises(BenchmarkContractError, match="gold patch digest mismatch"):
+        store.read_receipt(path)
+    gold.write_text("diff --git a/A.java b/A.java\n", encoding="utf-8")
+    metadata.write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(
+        BenchmarkContractError,
+        match="verifier metadata digest mismatch",
+    ):
         store.read_receipt(path)
 
 
@@ -363,6 +381,47 @@ def test_defects4j_container_contract_forces_utf8_locale(tmp_path):
     assert argv[-2:] == ["java", "-version"]
 
 
+def test_defects4j_checkout_uses_host_user_and_ephemeral_safe_git(
+    tmp_path, monkeypatch
+):
+    project_root, _ = make_service_project(tmp_path)
+    runtime = Defects4JRuntime(load_config(project_root).eval.benchmarks)
+    calls = []
+    evidence = SimpleNamespace(passed=True)
+
+    monkeypatch.setattr(runtime, "_current_user", lambda: (123, 456))
+
+    def fake_run_container(command, **kwargs):
+        calls.append((command, kwargs))
+        return evidence
+
+    monkeypatch.setattr(runtime, "_run_container", fake_run_container)
+    commands = []
+    runtime._checkout(
+        "Jsoup",
+        "2b",
+        tmp_path / "checkouts/buggy",
+        artifact_root=tmp_path / "artifacts",
+        name="checkout-buggy",
+        commands=commands,
+    )
+
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert kwargs["user"] == (123, 456)
+    assert kwargs.get("capabilities", ()) == ()
+    assert command[:3] == ["/bin/sh", "-eu", "-c"]
+    assert "safe.directory '*'" in command[3]
+    assert '"$1"' in command[3] and '"$2"' in command[3] and '"$3"' in command[3]
+    assert command[4:] == [
+        "autobugfix-checkout",
+        "Jsoup",
+        "2b",
+        "/workspace/buggy",
+    ]
+    assert commands == [evidence]
+
+
 def test_verifier_image_removes_gold_hints_but_keeps_test_runtime_metadata():
     dockerfile = (
         Path(__file__).parents[1] / "containers/defects4j/Dockerfile"
@@ -378,6 +437,9 @@ def test_verifier_image_removes_gold_hints_but_keeps_test_runtime_metadata():
         assert hidden in dockerfile
     for required in ("active-bugs.csv", "commit-db", "dir-layout.csv"):
         assert f"-name '{required}'" not in dockerfile
+    assert "test -f /defects4j/project_repos/README" in dockerfile
+    assert "! -name README -exec rm -rf {} +" in dockerfile
+    assert "rm -rf /defects4j/.git /defects4j/project_repos" not in dockerfile
 
 
 def test_issue_evidence_fetcher_normalizes_github_without_generated_text(tmp_path, monkeypatch):
@@ -599,6 +661,73 @@ def test_defects4j_verifier_scope_and_cleanup_preserve_writer_changes(tmp_path):
     assert not (repo / "all_tests").exists()
 
 
+def test_official_verifier_injects_digest_bound_metadata_only_during_check(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src/main/java").mkdir(parents=True)
+    (repo / "src/main/java/Main.java").write_text(
+        "class Main {}\n",
+        encoding="utf-8",
+    )
+    run(["git", "init", "--initial-branch=main", str(repo)])
+    run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"])
+    run(["git", "-C", str(repo), "config", "user.name", "Test"])
+    run(["git", "-C", str(repo), "add", "-A"])
+    run(["git", "-C", str(repo), "commit", "-m", "base"])
+    metadata = tmp_path / "trusted/defects4j.build.properties"
+    metadata.parent.mkdir()
+    metadata.write_text(
+        "d4j.project.id=Lang\nd4j.bug.id=1\nd4j.dir.src.classes=src/main/java\n",
+        encoding="utf-8",
+    )
+    contract = Defects4JVerifierContract(
+        image_id="sha256:" + "a" * 64,
+        platform="linux/amd64",
+        framework_revision=DEFECTS4J_FRAMEWORK_REVISION,
+        project="Lang",
+        bug_id=1,
+        eligibility_receipt_digest="b" * 64,
+        source_roots=("src/main/java",),
+        baseline_failing_tests=(),
+        verifier_metadata_path=str(metadata.resolve()),
+        verifier_metadata_sha256=digest_file(metadata),
+        timeout_seconds=60,
+    )
+
+    def fake_verify(_self, worktree, *, artifact_root, name="official-test", image=None):
+        del name, image
+        assert (worktree / ".defects4j.config").read_text(encoding="utf-8") == (
+            "pid=Lang\nvid=1b\n"
+        )
+        assert (worktree / "defects4j.build.properties").read_bytes() == (
+            metadata.read_bytes()
+        )
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        stdout = artifact_root / "stdout.log"
+        stderr = artifact_root / "stderr.log"
+        stdout.write_text("official pass\n", encoding="utf-8")
+        stderr.write_text("", encoding="utf-8")
+        return SimpleNamespace(stdout_path=str(stdout), stderr_path=str(stderr)), ()
+
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.verify.Defects4JRuntime.verify_worktree",
+        fake_verify,
+    )
+    passed, failures, _, _, exit_code = run_official_verifier(
+        repo,
+        contract,
+        tmp_path / "artifacts",
+    )
+
+    assert passed is True
+    assert failures == ()
+    assert exit_code == 0
+    assert not (repo / ".defects4j.config").exists()
+    assert not (repo / "defects4j.build.properties").exists()
+
+
 def test_visible_defects4j_case_uses_managed_verifier_without_oracle_paths(
     tmp_path,
 ):
@@ -620,6 +749,11 @@ def test_visible_defects4j_case_uses_managed_verifier_without_oracle_paths(
     failure = tmp_path / "buggy-failing-tests"
     failure.write_text(
         "--- example.ParserTest::regression\njava.lang.AssertionError: escaped token\n",
+        encoding="utf-8",
+    )
+    verifier_metadata = tmp_path / "defects4j.build.properties"
+    verifier_metadata.write_text(
+        "d4j.project.id=Gson\nd4j.bug.id=1\n",
         encoding="utf-8",
     )
     manifest = BenchmarkSeedManifest.from_dict(seed_data())
@@ -653,6 +787,8 @@ def test_visible_defects4j_case_uses_managed_verifier_without_oracle_paths(
         failure_evidence_path=str(failure),
         failure_evidence_sha256=digest_file(failure),
         reproduction_command="defects4j test -w /workspace",
+        verifier_metadata_path=str(verifier_metadata.resolve()),
+        verifier_metadata_sha256=digest_file(verifier_metadata),
     )
     row = EvalBenchmarkService(project_root)._visible_case_row(receipt)
     encoded = yaml.safe_dump(row, sort_keys=False)
@@ -663,6 +799,7 @@ def test_visible_defects4j_case_uses_managed_verifier_without_oracle_paths(
     assert str(config.eval.benchmarks.trusted_case_root) not in encoded
     assert "fixed-secret" not in encoded
     assert "gold.patch" not in encoded
+    assert str(verifier_metadata) not in encoded
     assert "secret.EnvironmentTest" not in encoded
     assert "java.lang.AssertionError: escaped token" in row["task"]["problem_statement"]
     assert "defects4j test -w /workspace" in row["task"]["problem_statement"]
@@ -718,6 +855,17 @@ def test_seal_encrypts_holdout_authority_and_deidentifies_visible_projection(
             artifact_root.mkdir(parents=True, exist_ok=True)
             source = self.config.cache_root / "fake-cases" / case.case_id
             source.mkdir(parents=True, exist_ok=True)
+            metadata = (
+                self.config.trusted_case_root
+                / "fake-cases"
+                / case.case_id
+                / "defects4j.build.properties"
+            )
+            metadata.parent.mkdir(parents=True, exist_ok=True)
+            metadata.write_text(
+                f"d4j.project.id={case.project}\nd4j.bug.id={case.bug_id}\n",
+                encoding="utf-8",
+            )
             return EligibilityReceipt(
                 receipt_id=f"{case.case_id}-receipt",
                 manifest_digest=manifest.manifest_digest,
@@ -747,6 +895,8 @@ def test_seal_encrypts_holdout_authority_and_deidentifies_visible_projection(
                 status="eligible",
                 reason="",
                 created_at=utc_now(),
+                verifier_metadata_path=str(metadata.resolve()),
+                verifier_metadata_sha256=digest_file(metadata),
             )
 
     monkeypatch.setattr(

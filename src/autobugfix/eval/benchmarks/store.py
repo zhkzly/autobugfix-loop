@@ -144,6 +144,18 @@ class BenchmarkStore:
                 raise BenchmarkContractError(
                     "receipt failure evidence requires a reproduction command"
                 )
+        metadata = Path(receipt.verifier_metadata_path)
+        if receipt.verifier_metadata_path == "unavailable":
+            raise BenchmarkContractError("eligible receipt has no verifier metadata")
+        if metadata.is_symlink():
+            raise BenchmarkContractError("receipt verifier metadata must not be a symlink")
+        metadata = metadata.resolve()
+        if not metadata.is_relative_to(self.trusted_root) or not metadata.is_file():
+            raise BenchmarkContractError(
+                "receipt verifier metadata is outside trusted root or missing"
+            )
+        if digest_file(metadata) != receipt.verifier_metadata_sha256:
+            raise BenchmarkContractError("receipt verifier metadata digest mismatch")
         if self.cache_root is None or not snapshot.is_relative_to(self.cache_root):
             raise BenchmarkContractError("receipt sanitized repository is outside cache root")
         if not (snapshot / ".git").exists():
