@@ -8,6 +8,8 @@ import yaml
 
 from autobugfix.dataset import build_raw_dataset
 from autobugfix.eval.models import EvalCase, EvalCaseError
+from autobugfix.eval.benchmarks.models import record_with_digest, verify_record
+from autobugfix.eval.reporting import write_evaluation_report
 from autobugfix.eval.runner import EvalRunnerError, run_eval
 from autobugfix.service import AutobugfixService
 from tests.helpers import FakeCodexBackend, make_service_project, run
@@ -64,6 +66,44 @@ def test_dataset_and_eval_call_execution_loop_in_isolated_repo(tmp_path):
     assert "evaluator:" in resolved_roles
     assert "autobugfix-writer" in resolved_roles
     assert isolated_config["codex"]["role_runtime"]["codex_bin"] == str(Path("/usr/bin/true").resolve())
+
+
+def test_formal_evaluation_report_derives_loop_and_noninterference_metrics(tmp_path):
+    project_root, row, problem = prepare_historical_case(tmp_path)
+    run_dir = run_eval(
+        project_root,
+        problem,
+        tmp_path / "eval-runs",
+        run_id="formal-report",
+        backend=FakeCodexBackend(),
+        test_command="python3 -m unittest discover",
+    )
+    subject = record_with_digest(
+        {
+            "schema": "autobugfix-evaluation-subject-noninterference-v1",
+            "prepared_manifest_digest": "a" * 64,
+            "unchanged": True,
+            "expected": {"subject_sha": "test"},
+            "observed": {"subject_sha": "test"},
+            "checked_at": "2026-07-12T00:00:00Z",
+        }
+    )
+    (run_dir / "subject-noninterference.yaml").write_text(
+        yaml.safe_dump(subject, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    report_path = write_evaluation_report(run_dir)
+    report = yaml.safe_load(report_path.read_text(encoding="utf-8"))
+    verify_record(report)
+
+    assert report["case_count"] == 1
+    assert report["passed_count"] == 1
+    assert report["first_attempt_passed_count"] == 1
+    assert report["loop_rescued_count"] == 0
+    assert report["verifier_oracle_agreement_count"] == 1
+    assert report["noninterference_passed_count"] == 1
+    assert report["cases"][0]["case_id"] == row["raw_id"]
 
 
 @pytest.mark.parametrize("run_id", ("../escape", "nested/run", "nested\\run", ".", ".."))

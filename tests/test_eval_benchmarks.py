@@ -682,6 +682,16 @@ def test_run_evaluation_consumes_trusted_prepared_receipts_once(
         "autobugfix.eval.benchmarks.service.run_eval",
         fake_run_eval,
     )
+    report_path = project_root / ".autobugfix/eval-runs/h0-one/evaluation-report.yaml"
+
+    def fake_write_report(run_dir):
+        report_path.write_text("schema: test-report\n", encoding="utf-8")
+        return report_path
+
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.service.write_evaluation_report",
+        fake_write_report,
+    )
     result = service.run_evaluation(
         prepared_path,
         out_root=project_root / ".autobugfix/eval-runs",
@@ -694,6 +704,7 @@ def test_run_evaluation_consumes_trusted_prepared_receipts_once(
     assert observed["max_attempts"] == 2
     assert observed["verifier_backends"] == {receipt.case_id: verifier}
     assert observed["official_evaluators"] == {receipt.case_id: evaluator}
+    assert result["evaluation_report"] == str(report_path)
     assert yaml.safe_load(
         (Path(result["run_dir"]) / "subject-noninterference.yaml").read_text(
             encoding="utf-8"

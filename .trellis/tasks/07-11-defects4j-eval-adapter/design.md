@@ -166,6 +166,7 @@ autobugfix eval benchmark run-case --manifest <evaluation-seed> --case <id>
 autobugfix eval benchmark prepare-evaluation --manifest <evaluation-seed>
 autobugfix eval benchmark run-evaluation --manifest <prepared-manifest>
   --run-id <id>
+autobugfix eval benchmark report-evaluation --run-dir <completed-run>
 ```
 
 CLI handlers parse arguments and call the Eval benchmark service. They do not
@@ -178,6 +179,10 @@ writes subject-level noninterference evidence. The repository retains generic
 sealed-Holdout and Operator Study commands for future treatment experiments.
 Experiment 1 does not call them: its 16 case identities are pre-registered as
 `evaluation`, and H0 is never changed.
+
+`report-evaluation` reads only completed case artifacts. It verifies submission
+and noninterference digests, reconciles case decisions with `summary.yaml`, and
+writes a digest-bound aggregate. It cannot rerun Execution or a scorer.
 
 ## Failure Semantics
 

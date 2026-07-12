@@ -50,6 +50,7 @@ suite through the service-owned commands:
 autobugfix eval benchmark prepare-evaluation --manifest <evaluation-seed>
 autobugfix eval benchmark run-evaluation --manifest <prepared-manifest>
   --out .autobugfix/eval-runs --run-id <id>
+autobugfix eval benchmark report-evaluation --run-dir <completed-run>
 
 # Separate Operator treatment studies only:
 autobugfix eval benchmark seal --manifest <treatment-seed>
@@ -63,6 +64,8 @@ formal generation starts. It freezes H0 Git/tree, config, roles, skills,
 Memory, model, budget, and receipt digests. `run-evaluation` accepts the
 prepared manifest only; a repair failure is a measured result and cannot cause
 an extra case run. Only harness failure makes the command fail.
+`report-evaluation` is deterministic postprocessing over frozen artifacts; it
+must never invoke Writer, verifier, or official scorer again.
 
 `seal` and `guard-run` are human Guard actions for treatment studies, not the
 Experiment 1 H0 measurement. When used, they must execute from a clean control

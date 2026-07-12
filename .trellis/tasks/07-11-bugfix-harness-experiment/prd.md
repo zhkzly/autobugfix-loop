@@ -31,20 +31,20 @@ patch that passes the dataset's independent official evaluator?
 
 ## Acceptance Criteria
 
-- [ ] H0 and the 16-case manifest are immutable and digest-complete before the
+- [x] H0 and the 16-case manifest are immutable and digest-complete before the
       formal run begins.
-- [ ] All production role calls use `gpt-5.4-mini`; no fake or model fallback
+- [x] All production role calls use `gpt-5.4-mini`; no fake or model fallback
       is present.
-- [ ] Each case has exactly one final frozen submission and one later official
+- [x] Each case has exactly one final frozen submission and one later official
       score, with bounded internal Execution attempts only.
-- [ ] Official evaluator output cannot change the patch, task state, trace, or
+- [x] Official evaluator output cannot change the patch, task state, trace, or
       attempt count and cannot trigger another Writer call.
-- [ ] Target main checkouts remain unchanged; all Writer edits occur in task
+- [x] Target main checkouts remain unchanged; all Writer edits occur in task
       worktrees and official scoring occurs in separate clean checkouts.
-- [ ] The report separates repaired, unrepaired, harness error, first-attempt,
+- [x] The report separates repaired, unrepaired, harness error, first-attempt,
       loop-rescued, runtime/cost, verifier/oracle agreement, and artifact
       completeness metrics.
-- [ ] Every launched case retains real SDK logs, Execution events, generated
+- [x] Every launched case retains real SDK logs, Execution events, generated
       diff, visible verifier evidence, official evaluator output, and a
       noninterference receipt.
 

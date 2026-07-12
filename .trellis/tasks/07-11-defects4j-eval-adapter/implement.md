@@ -49,15 +49,29 @@ Experiment 1.
 
 - [x] Freeze one source-controlled schema-v3 seed containing 16 pre-registered `evaluation`
       cases selected independently of model outcomes.
-- [ ] Freeze H0 code/config/model/skills/Memory/budget identities.
-- [ ] Run every case exactly once at concurrency one; internal retries are
+- [x] Freeze H0 code/config/model/skills/Memory/budget identities. Prepared
+      manifest digest:
+      `564b8d095dbdf04730ed816133e3e8ac447f7d588ada223a5dc8f690d8c68e5e`.
+- [x] Run every case exactly once at concurrency one; internal retries are
       limited to the common frozen Execution budget.
-- [ ] Publish aggregate and case-level descriptive results only after all
+- [x] Publish aggregate and case-level descriptive results only after all
       launched submissions have been independently scored.
+
+Formal H0 result for subject `f529f09de53183d7ddbf9e05b31a9d3b3fbde008`:
+
+- 16 cases, 14 official passes, 2 official failures, 0 harness errors;
+- final pass rate 87.5% (95% Wilson interval 63.98%-96.50%);
+- first-attempt pass rate 75%; two loop rescues add 12.5 percentage points;
+- 19 Writer attempts, 34 production SDK calls, 15/16 verifier/oracle agreement;
+- 16/16 oracle noninterference and artifact completeness 1.0;
+- failures: `d4j-time-2` at official oracle and `d4j-jsoup-5` at the visible
+  Execution verifier after two attempts;
+- aggregate report digest:
+  `46bc91b819bf1eef300ff3c436fc83abb45b912bd8bbdf46d39811391186c89d`.
 
 ## Phase 6: Project Gates And Review
 
-- [x] Run `uv run pytest -q` (`179 passed`).
+- [x] Run `uv run pytest -q` (`180 passed`).
 - [x] Run `uv run python -m compileall -q src tests scripts`.
 - [x] Run `git diff --check` and role-skill validation.
 - [x] Complete sequential Execution, Memory, Eval, Codex runtime,
