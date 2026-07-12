@@ -25,6 +25,62 @@ feedback. Both use only `gpt-5.4-mini`, human-granted `3 -> 8 -> 16` waves,
 concurrency one, and no fallback. Holdout manifests/gold/results remain outside
 Operator roots; only aggregate final metrics may be registered.
 
+Defects4J uses two images built from one pinned Dockerfile: the materializer
+contains checkout/oracle metadata, while the verifier image removes gold
+patches and localization hints. The Writer edits a local task worktree;
+Docker only materializes the official buggy revision and runs official tests.
+Never add or request host Java, Perl, SVN, cpanm, Defects4J, `PERL5LIB`, or
+library-path configuration. Before opening a governed wave, qualify each
+suite through the service-owned commands:
+
+```text
+autobugfix eval benchmark seal --manifest <seed>
+autobugfix eval benchmark run-case --manifest <seed> --case <visible-id>
+  --out .autobugfix/eval-runs --run-id <id>
+  --model gpt-5.4-mini --max-attempts 2
+```
+
+`seal` and `guard-run` are human Guard actions. They must execute from a clean
+control checkout at `eval.benchmarks.guard.trusted_ref`; the encrypted bundle,
+public manifest, and aggregate metric bind that Git tree, machine constitution,
+and harness digest. Never run either action from an Operator candidate.
+
+For a governed Study, use this aggregate flow:
+
+```text
+autobugfix operator study guard-binding --study-id <study> --kind BASELINE|CANDIDATE
+autobugfix eval benchmark guard-run ... --study-binding <binding.yaml>
+autobugfix operator study import-guard-metric --study-id <study>
+  --kind BASELINE|CANDIDATE --metric <signed-metric.yaml>
+```
+
+The first command derives current Study/line/budget facts; it grants nothing.
+The second signs only aggregate metrics with the human-held Guard secret. The
+third re-verifies the signature, frozen harness/policy, Study binding, and
+numeric success contract before the Operator service records metric authority.
+Do not type aggregate values into a substitute receipt.
+
+The current direct Guard runner measures only the clean trusted checkout and
+therefore produces H0/Baseline authority. It must reject a binding whose
+`subject_sha` differs from that checkout. Do not claim a CANDIDATE metric until
+the experiment task provides a trusted isolated subject broker that reports
+the exact experiment-line SHA; changing a YAML binding is not execution.
+
+Do not interpret every fixed-revision failure as a benchmark failure.
+Defects4J qualification deterministically requires a stable fixed failure
+baseline and a buggy delta equal to official triggering tests. Generated
+patches must eliminate all failures outside that baseline. Never move this
+decision into Writer/Evaluator prose or expose Holdout identity maps to the
+Operator.
+
+Every Execution verifier attempt must retain worktree-external Docker raw
+logs. A missing verifier artifact path, SDK timeout event, Docker client hang,
+or unstable fixed baseline is a harness diagnosis, not another Writer retry.
+
+Classify import failures, Docker failures, generated build-artifact pollution,
+and non-idempotent verifier results as Eval harness defects. They are not model
+repair failures and must not be fed to another Writer attempt until fixed.
+
 ## Required Workflow
 
 1. Read real artifacts and diagnose the owning layer. Do not jump directly to
@@ -42,17 +98,23 @@ Operator roots; only aggregate final metrics may be registered.
    - cross-layer/medium: independent reviewer, never the request creator;
    - constitutional: OpenSSH-signed human scope approval or allowlisted GitHub
      review evidence.
-6. Run `operator workspace-create`. Patch only the returned real Git worktree.
-7. Run postflight. If actual paths elevate risk, obtain the new approval; never
-   lower requested risk to fit the patch.
-8. Commit the candidate and run the same experiment profile. Guard derives a
-   patch-bound metric receipt from observed commands and logs.
-9. Run trusted validation profiles and compare the experiment receipt with the
-   baseline. Do not inject shell commands or numeric metrics into a request.
-10. Constitutional work requires merge approval bound to patch digest or PR
-   HEAD, then `finalize`.
-11. Export the authorization bundle and let the base-version GitHub check rerun
-   policy and validation before merge.
+6. Request `operator start`; only the trusted service may create and register
+   the real non-main candidate worktree.
+7. Request `operator writer-start`. The Operator controls the run but does not
+   patch candidate files itself. The Writer receives only its service-owned
+   read view, effective scope, and feedback.
+8. Request `operator verify --mode fast`. If checks fail, consume the resulting
+   FeedbackPacket and request `writer-retry`; never turn a harness/policy error
+   into another repair attempt.
+9. If evidence proves another layer/path is needed, request `scope-change`,
+   obtain authority for that exact scope version, and activate it before the
+   next Writer run. Never lower risk to fit an existing patch.
+10. Request `candidate-commit`, run the same experiment profile, then request
+    `verify --mode full`. Guard derives patch-bound evidence from observed
+    commands and logs; caller-supplied numeric metrics have no authority.
+11. Promote only the current VERIFIED patch through `promotion-prepare`,
+    `promotion-open-pr`, trusted-base CI, `promotion-observe-merge`, and canary.
+    Constitutional scope and merge approval remain separate human authorities.
 
 ## Commands
 
@@ -69,14 +131,20 @@ autobugfix operator approval-payload <id> --stage scope|merge ...
 autobugfix operator approve-signed <id> --payload <json> --signature <sig>
 autobugfix operator approve-github <id> --repository <owner/repo> --pull-request <n> --review-id <n>
 autobugfix operator preflight --request-id <id>
-autobugfix operator workspace-create --request-id <id>
-autobugfix operator postflight --request-id <id>
+autobugfix operator start --request-id <id>
+autobugfix operator writer-start --request-id <id>
+autobugfix operator verify --request-id <id> --mode fast
+autobugfix operator writer-retry --request-id <id>
+autobugfix operator scope-change --request-id <id> ...
+autobugfix operator scope-activate --request-id <id> --revision-id <revision>
+autobugfix operator candidate-commit --request-id <id> --message <message>
 autobugfix operator experiment-run --request-id <id> --profile <profile> [--value key=value]
-autobugfix operator validate --request-id <id>
+autobugfix operator verify --request-id <id> --mode full
 autobugfix operator integrate --request-id <id> --grant-id <grant>
 autobugfix operator checkpoint create --line-id <line> --name H_bug|H_general --metric-receipt-id <metric-id>
 autobugfix operator line rollback --line-id <line> --checkpoint-id <checkpoint> --reason <reason>
-autobugfix operator finalize --request-id <id>
+autobugfix operator promotion-prepare --request-id <id>
+autobugfix operator promotion-open-pr --promotion-id <id> ...
 autobugfix operator export-bundle --request-id <id>
 ```
 

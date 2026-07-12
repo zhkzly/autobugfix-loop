@@ -68,6 +68,29 @@ same Request lifecycle:
 7. Roll back by creating a new history-preserving commit with the selected
    checkpoint tree. Never reset or force-push the line.
 
+The benchmark metric transition is deliberately split across trust domains:
+
+1. `operator study guard-binding` derives a digest-bound projection of the
+   current Study, subject SHA, line, grant, wave, manifest, and success
+   contract. It is not approval or a metric.
+2. A human runs `eval benchmark guard-run` from the clean configured trusted
+   control ref. Guard authenticates its encrypted Holdout bundle, revalidates
+   Docker image IDs, executes cases, encrypts case-level evidence, and signs
+   only the aggregate plus the Study binding.
+3. `operator study import-guard-metric` requires an interactive human secret,
+   verifies the signature and frozen Guard Git/constitution/harness identity,
+   compares the binding to current service state, and deterministically checks
+   numeric success-contract conditions. Only then can the service create a
+   `StudyMetricRecord`.
+
+An Operator Writer may request these transitions but cannot run the human
+secret steps, edit their SQLite result, or substitute a YAML claim.
+
+The direct Defects4J Guard runner currently authorizes H0 only. Candidate
+registration must additionally prove `executed_subject_sha == line.head_sha`;
+until an isolated subject broker exists, the service must fail closed instead
+of signing current-main results under a candidate binding.
+
 The two studies share one named H0 cohort but no treatment: Experiment 1 uses
 Defects4J with 10 visible Optimization cases and 6 sealed unseen-repository
 Holdout cases to produce `H_bug`; Experiment 2 uses 10 SWE-bench Verified

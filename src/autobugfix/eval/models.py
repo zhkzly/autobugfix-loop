@@ -12,6 +12,7 @@ class EvalCaseError(ValueError):
 TaskType = Literal["bugfix", "feature", "maintenance", "unknown"]
 OracleStatus = Literal["passed", "failed", "error"]
 OracleVisibility = Literal["hidden", "diagnostic", "public"]
+ExperimentRole = Literal["optimization", "sealed_holdout"]
 
 
 def _required(value: object, name: str) -> str:
@@ -44,6 +45,60 @@ class EvalCaseSource:
             revision=_required(data.get("revision") or "local", "source.revision"),
             split=_required(data.get("split") or "local", "source.split"),
             instance_id=_required(data.get("instance_id") or case_id, "source.instance_id"),
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class EvalBenchmarkSpec:
+    framework_revision: str
+    dataset_revision: str
+    runtime_id: str
+    eligibility_receipt_digest: str
+    visible_evidence_digest: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EvalBenchmarkSpec":
+        return cls(
+            framework_revision=_required(
+                data.get("framework_revision"), "benchmark.framework_revision"
+            ),
+            dataset_revision=_required(
+                data.get("dataset_revision"), "benchmark.dataset_revision"
+            ),
+            runtime_id=_required(data.get("runtime_id"), "benchmark.runtime_id"),
+            eligibility_receipt_digest=_required(
+                data.get("eligibility_receipt_digest"),
+                "benchmark.eligibility_receipt_digest",
+            ),
+            visible_evidence_digest=_required(
+                data.get("visible_evidence_digest"),
+                "benchmark.visible_evidence_digest",
+            ),
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class EvalExperimentSpec:
+    role: ExperimentRole
+    first_wave: int
+    repository_group: str
+    case_token: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EvalExperimentSpec":
+        role = str(data.get("role") or "")
+        if role not in {"optimization", "sealed_holdout"}:
+            raise EvalCaseError(f"unsupported experiment role: {role!r}")
+        first_wave = int(data.get("first_wave") or 0)
+        if first_wave not in {3, 8, 16}:
+            raise EvalCaseError("experiment.first_wave must be 3, 8, or 16")
+        return cls(
+            role=role,  # type: ignore[arg-type]
+            first_wave=first_wave,
+            repository_group=_required(
+                data.get("repository_group"), "experiment.repository_group"
+            ),
+            case_token=_required(data.get("case_token"), "experiment.case_token"),
         )
 
 
@@ -190,6 +245,8 @@ class EvalCase:
     environment: EvalEnvironmentSpec
     execution: EvalExecutionSpec
     oracle: EvalOracleSpec
+    benchmark: EvalBenchmarkSpec | None = None
+    experiment: EvalExperimentSpec | None = None
     raw: dict[str, Any] | None = None
 
     @classmethod
@@ -206,6 +263,8 @@ class EvalCase:
             environment_data = row.get("environment") or {}
             execution_data = row.get("execution") or {}
             oracle_data = row.get("oracle") or {}
+            benchmark_data = row.get("benchmark")
+            experiment_data = row.get("experiment")
             if not isinstance(task_data, Mapping) or not isinstance(repository_data, Mapping):
                 raise EvalCaseError("canonical case requires task and repository mappings")
             if (
@@ -214,6 +273,10 @@ class EvalCase:
                 or not isinstance(oracle_data, Mapping)
             ):
                 raise EvalCaseError("environment, execution, and oracle must be mappings")
+            if benchmark_data is not None and not isinstance(benchmark_data, Mapping):
+                raise EvalCaseError("benchmark must be a mapping")
+            if experiment_data is not None and not isinstance(experiment_data, Mapping):
+                raise EvalCaseError("experiment must be a mapping")
         else:
             source_data = {
                 "adapter": "local-git",
@@ -250,6 +313,8 @@ class EvalCase:
                 "visibility": row.get("oracle_visibility") or "hidden",
                 "patch_source": row.get("oracle_patch_source"),
             }
+            benchmark_data = None
+            experiment_data = None
 
         return cls(
             schema_version=schema_version,
@@ -260,6 +325,16 @@ class EvalCase:
             environment=EvalEnvironmentSpec.from_dict(environment_data),
             execution=EvalExecutionSpec.from_dict(execution_data),
             oracle=EvalOracleSpec.from_dict(oracle_data),
+            benchmark=(
+                EvalBenchmarkSpec.from_dict(benchmark_data)
+                if benchmark_data is not None
+                else None
+            ),
+            experiment=(
+                EvalExperimentSpec.from_dict(experiment_data)
+                if experiment_data is not None
+                else None
+            ),
             raw=row,
         )
 
@@ -302,7 +377,7 @@ class EvalCase:
         return self.oracle.command or override or self.execution.test_command
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        encoded: dict[str, Any] = {
             "schema_version": self.schema_version,
             "case_id": self.case_id,
             "source": {
@@ -354,6 +429,24 @@ class EvalCase:
                 "patch_source": self.oracle.patch_source,
             },
         }
+        if self.benchmark is not None:
+            encoded["benchmark"] = {
+                "framework_revision": self.benchmark.framework_revision,
+                "dataset_revision": self.benchmark.dataset_revision,
+                "runtime_id": self.benchmark.runtime_id,
+                "eligibility_receipt_digest": (
+                    self.benchmark.eligibility_receipt_digest
+                ),
+                "visible_evidence_digest": self.benchmark.visible_evidence_digest,
+            }
+        if self.experiment is not None:
+            encoded["experiment"] = {
+                "role": self.experiment.role,
+                "first_wave": self.experiment.first_wave,
+                "repository_group": self.experiment.repository_group,
+                "case_token": self.experiment.case_token,
+            }
+        return encoded
 
 
 @dataclass(slots=True, frozen=True)

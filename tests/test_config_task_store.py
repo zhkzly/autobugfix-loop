@@ -28,6 +28,24 @@ def test_config_defaults_and_task_store_round_trip(tmp_path):
     assert cfg.operator.budgets.max_calls_by_wave == {3: 30, 8: 80, 16: 160}
     assert cfg.operator.budgets.default_case_concurrency == 1
     assert not cfg.operator.budgets.allow_model_fallback
+    assert cfg.eval.benchmarks.cache_root == project_root / ".autobugfix/benchmark-cache"
+    assert cfg.eval.benchmarks.trusted_case_root == (
+        project_root / ".autobugfix/trusted-eval-cases"
+    )
+    assert cfg.eval.benchmarks.visible_manifest_root == (
+        project_root / ".autobugfix/eval-manifests"
+    )
+    assert cfg.eval.benchmarks.defects4j.image == "autobugfix/defects4j:3.0.1"
+    assert (
+        cfg.eval.benchmarks.defects4j.verifier_image
+        == "autobugfix/defects4j-verifier:3.0.1"
+    )
+    assert cfg.eval.benchmarks.defects4j.platform == "linux/amd64"
+    assert cfg.eval.benchmarks.defects4j.preflight_repetitions == 2
+    assert cfg.eval.benchmarks.defects4j.memory_limit == "8g"
+    assert cfg.eval.benchmarks.defects4j.cpu_limit == 4.0
+    assert cfg.eval.benchmarks.defects4j.pids_limit == 1024
+    assert cfg.eval.benchmarks.guard.trusted_ref == "origin/main"
     store = TaskStore(project_root, cfg.task_root)
     record = TaskRecord(task_id="t1", repo_id="toy_repo", title="title", body="body", state="ready")
     store.create(record)
@@ -80,6 +98,23 @@ def test_config_rejects_disabling_isolated_codex_role_runtime(tmp_path):
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(ConfigError, match="isolated CODEX_HOME"):
+        load_config(project_root)
+
+
+def test_config_rejects_benchmark_roots_in_source_or_target_repo(tmp_path):
+    project_root, main = make_service_project(tmp_path)
+    path = project_root / ".autobugfix/config.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data.setdefault("eval", {}).setdefault("benchmarks", {})["cache_root"] = (
+        "src/bench-cache"
+    )
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ConfigError, match="gitignored .autobugfix"):
+        load_config(project_root)
+
+    data["eval"]["benchmarks"]["cache_root"] = str(main)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ConfigError, match="repo.toy_repo.main_checkout"):
         load_config(project_root)
 
 
@@ -155,4 +190,68 @@ def test_config_rejects_experiment_line_template_without_study_identity(tmp_path
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(ConfigError, match="must contain.*study_id"):
+        load_config(project_root)
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "message"),
+    [
+        (
+            ("defects4j", "framework_revision"),
+            "floating-main",
+            "framework_revision must remain pinned",
+        ),
+        (
+            ("defects4j", "timezone"),
+            "UTC",
+            "timezone must remain America/Los_Angeles",
+        ),
+        ((None, "command_timeout_seconds"), 0, "command_timeout_seconds must be positive"),
+        (("defects4j", "preflight_repetitions"), 0, "preflight_repetitions must be positive"),
+    ],
+)
+def test_config_rejects_weakened_defects4j_contract(tmp_path, path, value, message):
+    project_root, _ = make_service_project(tmp_path)
+    config_path = project_root / ".autobugfix/config.yaml"
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    benchmarks = data.setdefault("eval", {}).setdefault("benchmarks", {})
+    section, key = path
+    target = benchmarks.setdefault(section, {}) if section else benchmarks
+    target[key] = value
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(project_root)
+
+
+def test_config_rejects_legacy_defects4j_host_runtime_and_authority_overlap(tmp_path):
+    project_root, _ = make_service_project(tmp_path)
+    config_path = project_root / ".autobugfix/config.yaml"
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    benchmarks = data.setdefault("eval", {}).setdefault("benchmarks", {})
+    defects4j = benchmarks.setdefault("defects4j", {})
+    defects4j["java_home"] = ".autobugfix/host-tools/java"
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ConfigError, match="host runtime fields are unsupported"):
+        load_config(project_root)
+
+    defects4j.pop("java_home")
+    data["eval"]["benchmarks"]["trusted_case_root"] = (
+        ".autobugfix/operator-worktrees/trusted-cases"
+    )
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ConfigError, match="must not overlap Operator runtime roots"):
+        load_config(project_root)
+
+
+def test_config_rejects_unpinned_defects4j_platform(tmp_path):
+    project_root, _ = make_service_project(tmp_path)
+    config_path = project_root / ".autobugfix/config.yaml"
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data.setdefault("eval", {}).setdefault("benchmarks", {}).setdefault(
+        "defects4j", {}
+    )["platform"] = "linux/arm64"
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="platform must remain linux/amd64"):
         load_config(project_root)

@@ -16,6 +16,28 @@ codex:
     bridge_auth: true
     skill_guard: true
     strict_skill_guard: true
+eval:
+  model_mode: codex
+  roles: {}
+  benchmarks:
+    cache_root: .autobugfix/benchmark-cache
+    trusted_case_root: .autobugfix/trusted-eval-cases
+    visible_manifest_root: .autobugfix/eval-manifests
+    command_timeout_seconds: 1800
+    issue_timeout_seconds: 60
+    min_free_disk_gb: 10
+    guard:
+      trusted_ref: origin/main
+    defects4j:
+      image: autobugfix/defects4j:3.0.1
+      verifier_image: autobugfix/defects4j-verifier:3.0.1
+      platform: linux/amd64
+      framework_revision: 6d54320e0db5a357f9ab38a8e4d2e5aead7e1c09
+      timezone: America/Los_Angeles
+      preflight_repetitions: 2
+      memory_limit: 8g
+      cpu_limit: 4.0
+      pids_limit: 1024
 operator:
   experiment_lines:
     root: .autobugfix/operator-line-worktrees

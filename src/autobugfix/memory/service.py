@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Mapping
 
 from autobugfix.codex_backend import CodexBackend
 from autobugfix.codex_sdk import CodexSDKBackend
@@ -20,6 +21,33 @@ from autobugfix.task_store import TaskStore
 
 class MemoryServiceError(RuntimeError):
     pass
+
+
+def _require_memory_eligible_task(task: Mapping[str, Any], task_id: str) -> None:
+    metadata = task.get("metadata") or {}
+    if not isinstance(metadata, Mapping):
+        raise MemoryServiceError(f"task {task_id} has invalid provenance metadata")
+    if metadata.get("memory_eligible") is False or metadata.get("origin") == "eval":
+        raise MemoryServiceError(
+            f"memory may not collect Eval or benchmark task evidence: {task_id}"
+        )
+    state = str(task.get("state") or "")
+    archived_result = task.get("archived_result")
+    accepted = state == "accepted" or (
+        state == "archived" and archived_result == "accepted"
+    )
+    if not accepted:
+        raise MemoryServiceError(
+            f"memory may collect only accepted execution evidence: "
+            f"task {task_id} is {state} with result {archived_result or 'none'}"
+        )
+
+
+def _require_memory_eligible_packet(packet: Mapping[str, Any], task_id: str) -> None:
+    task = packet.get("task")
+    if not isinstance(task, Mapping):
+        raise MemoryServiceError(f"memory packet has no valid task provenance: {task_id}")
+    _require_memory_eligible_task(task, task_id)
 
 
 class MemoryService:
@@ -43,14 +71,7 @@ class MemoryService:
         execution_config = load_config(self.project_root)
         task_store = TaskStore(self.project_root, execution_config.task_root)
         task = task_store.load(task_id)
-        accepted = task.state == "accepted" or (
-            task.state == "archived" and task.archived_result == "accepted"
-        )
-        if not accepted:
-            raise MemoryServiceError(
-                f"memory may collect only accepted execution evidence: "
-                f"task {task_id} is {task.state} with result {task.archived_result or 'none'}"
-            )
+        _require_memory_eligible_task(task.to_dict(), task_id)
         packet = collect_task_packet(task_store, task_id)
         raw_dir = self.store.raw_task_dir(task_id)
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -60,6 +81,7 @@ class MemoryService:
     def digest(self, task_id: str) -> Path:
         self.store.init()
         packet = self.store.read_yaml(self.store.raw_task_dir(task_id) / "packet.yaml")
+        _require_memory_eligible_packet(packet, task_id)
         digest = render_digest(packet)
         path = self.store.digest_path(task_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +91,8 @@ class MemoryService:
 
     def maintain(self, task_id: str) -> Path:
         self.store.init()
+        packet = self.store.read_yaml(self.store.raw_task_dir(task_id) / "packet.yaml")
+        _require_memory_eligible_packet(packet, task_id)
         digest_path = self.store.digest_path(task_id)
         if not digest_path.exists():
             raise MemoryServiceError(f"missing digest for task {task_id}")

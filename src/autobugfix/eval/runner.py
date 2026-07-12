@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -17,6 +17,7 @@ from autobugfix.eval.scorers import normalize_diff, score_case, score_observatio
 from autobugfix.models import AutobugfixConfig, RoleConfig, utc_now
 from autobugfix.role_config import resolve_role
 from autobugfix.service import AutobugfixService
+from autobugfix.verifier import ExecutionVerifierBackend
 
 
 class EvalRunnerError(RuntimeError):
@@ -52,6 +53,9 @@ def _apply_role_overrides(cfg: dict[str, object], source_config: AutobugfixConfi
         return
     codex["default_model"] = source_config.codex.default_model
     codex["default_timeout_seconds"] = source_config.codex.default_timeout_seconds
+    codex["reasoning_effort"] = source_config.codex.reasoning_effort
+    codex["service_tier"] = source_config.codex.service_tier
+    codex["disable_response_storage"] = source_config.codex.disable_response_storage
     runtime = source_config.codex.role_runtime
     codex["role_runtime"] = {
         "enabled": runtime.enabled,
@@ -76,14 +80,31 @@ def _apply_role_overrides(cfg: dict[str, object], source_config: AutobugfixConfi
         )
 
 
+def _apply_model_override(cfg: dict[str, object], model: str | None) -> None:
+    if model is None:
+        return
+    codex = cfg.get("codex")
+    if not isinstance(codex, dict):
+        return
+    roles = codex.get("roles")
+    if not isinstance(roles, dict):
+        return
+    for role_name in ("writer", "evaluator"):
+        role = roles.get(role_name)
+        if isinstance(role, dict):
+            role["model"] = model
+
+
 def _config_for_case(
     repo_id: str,
     main_checkout: Path,
     test_command: str,
     source_config: AutobugfixConfig,
+    model: str | None,
 ) -> dict[str, object]:
     cfg = default_config_dict()
     _apply_role_overrides(cfg, source_config)
+    _apply_model_override(cfg, model)
     cfg["repos"] = {
         repo_id: {
             "main_checkout": str(main_checkout),
@@ -164,7 +185,11 @@ def _run_case(
     codex_timeout_seconds: int | None,
     writer_timeout_seconds: int | None,
     evaluator_timeout_seconds: int | None,
+    model: str | None,
+    max_attempts: int,
     backend: CodexBackend | None,
+    verifier_backend: ExecutionVerifierBackend | None,
+    sdk_hidden_paths: tuple[Path, ...],
 ) -> dict[str, Any]:
     write_yaml(case_dir / "case.yaml", case.to_dict())
     task_id: str | None = None
@@ -173,6 +198,7 @@ def _run_case(
     execution_verifier_passed: bool | None = None
     oracle_diff: str | None = None
     oracle_result: OracleResult | None = None
+    service: AutobugfixService | None = None
     try:
         adapter = get_adapter(case.source.adapter)
         execution_command = case.resolved_test_command(test_command_override)
@@ -186,6 +212,7 @@ def _run_case(
             materialized.main_checkout,
             execution_command,
             source_config,
+            model,
         )
         if not copied_skills:
             codex_cfg = cfg.get("codex")
@@ -224,16 +251,49 @@ def _run_case(
             },
         )
 
-        service = AutobugfixService(control_root, backend=backend)
+        service = AutobugfixService(
+            control_root,
+            backend=backend,
+            verifier_backend=verifier_backend,
+            sdk_hidden_paths=sdk_hidden_paths,
+        )
         task = service.create_task(
             case.repo,
             f"eval {case.case_id}",
             case.agent_prompt or case.problem_statement,
+            metadata={
+                "origin": "eval",
+                "memory_eligible": False,
+                "eval_case_id": case.case_id,
+                "eval_adapter": case.source.adapter,
+                "experiment_role": (
+                    case.experiment.role if case.experiment is not None else "unassigned"
+                ),
+            },
         )
         task_id = task.task_id
         for kind, content in _attachment_context(case):
             service.add_context(task_id, kind, content)
-        service.run_task(task_id)
+        while True:
+            service.run_task(task_id)
+            current = service.store.load(task_id)
+            if current.state != "writer_rework_required":
+                break
+            if current.iterations >= max_attempts:
+                break
+            task_dir = service.store.find_task_dir(task_id)
+            test_result = task_dir / "artifacts/test-result.md"
+            feedback = [
+                f"Attempt {current.iterations} did not satisfy the repair contract.",
+                f"State reason: {current.block_reason}",
+            ]
+            if test_result.is_file():
+                feedback.extend(("", test_result.read_text(encoding="utf-8")))
+            service.add_feedback(
+                task_id,
+                "retry",
+                "\n".join(feedback),
+            )
         current = service.store.load(task_id)
         execution_state = current.state
         execution_verifier_passed = _last_execution_verifier_result(service, task_id)
@@ -256,6 +316,7 @@ def _run_case(
             Path(current.worktree_path),
             case_dir / "oracle",
             command_override=test_command_override,
+            verifier_backend=verifier_backend,
         )
         write_yaml(case_dir / "oracle-result.yaml", oracle_result.to_dict())
         equals = (
@@ -277,10 +338,46 @@ def _run_case(
         )
         return _write_case_report(case_dir, case, observation, task_id=task_id)
     except Exception as exc:
+        if task_id is not None and service is not None:
+            try:
+                current = service.store.load(task_id)
+                execution_state = current.state
+                execution_verifier_passed = _last_execution_verifier_result(
+                    service,
+                    task_id,
+                )
+                task_dir = service.store.find_task_dir(task_id)
+                generated_path = task_dir / "artifacts/diff.patch"
+                if generated_path.is_file():
+                    generated = generated_path.read_text(encoding="utf-8")
+            except Exception as state_exc:
+                write_text(
+                    case_dir / "execution-state-error.txt",
+                    f"{type(state_exc).__name__}: {state_exc}\n",
+                )
         write_text(case_dir / "harness-error.txt", f"{type(exc).__name__}: {exc}\n")
         if not (case_dir / "generated.diff").exists():
             write_text(case_dir / "generated.diff", generated)
         if oracle_result is not None and not (case_dir / "oracle-result.yaml").exists():
+            write_yaml(case_dir / "oracle-result.yaml", oracle_result.to_dict())
+        if oracle_result is None:
+            oracle_dir = case_dir / "oracle"
+            write_text(oracle_dir / "stdout.log", "")
+            write_text(
+                oracle_dir / "stderr.log",
+                f"Oracle not run because the harness failed: {type(exc).__name__}: {exc}\n",
+            )
+            oracle_result = OracleResult(
+                status="error",
+                oracle_type=case.oracle.oracle_type,
+                command=None,
+                exit_code=None,
+                stdout_path=str(oracle_dir / "stdout.log"),
+                stderr_path=str(oracle_dir / "stderr.log"),
+                started_at=utc_now(),
+                finished_at=utc_now(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
             write_yaml(case_dir / "oracle-result.yaml", oracle_result.to_dict())
         observation = EvalObservation(
             case_id=case.case_id,
@@ -339,14 +436,25 @@ def run_eval(
     codex_timeout_seconds: int | None = None,
     writer_timeout_seconds: int | None = None,
     evaluator_timeout_seconds: int | None = None,
+    model: str | None = None,
+    max_attempts: int = 1,
     backend: CodexBackend | None = None,
+    verifier_backends: Mapping[str, ExecutionVerifierBackend] | None = None,
+    sdk_hidden_paths: tuple[Path, ...] = (),
 ) -> Path:
+    if max_attempts < 1:
+        raise EvalRunnerError("max_attempts must be positive")
+    if run_id in {"", ".", ".."} or Path(run_id).name != run_id or "/" in run_id or "\\" in run_id:
+        raise EvalRunnerError("run_id must be a safe path component")
     source_config = load_config(project_root)
     requested_mode = model_mode or source_config.eval.model_mode
     if backend is None and requested_mode != "codex":
         raise EvalRunnerError("production Eval supports only the real Codex backend")
     observed_mode = "injected-test-backend" if backend is not None else "codex"
-    run_dir = out / run_id
+    output_root = out.resolve()
+    run_dir = (output_root / run_id).resolve()
+    if not run_dir.is_relative_to(output_root):
+        raise EvalRunnerError("Eval run directory escapes configured output root")
     if run_dir.exists() and any(run_dir.iterdir()):
         raise EvalRunnerError(f"Eval run directory is not empty: {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -379,6 +487,45 @@ def run_eval(
         ]
     if not cases and not reports:
         raise EvalRunnerError("no eval cases selected")
+    resolved_verifiers = dict(verifier_backends or {})
+    for case in cases:
+        if case.source.adapter != "defects4j" or case.case_id in resolved_verifiers:
+            continue
+        if case.benchmark is None:
+            raise EvalRunnerError(
+                f"Defects4J case {case.case_id} has no benchmark receipt binding"
+            )
+        from autobugfix.eval.benchmarks.store import BenchmarkStore
+        from autobugfix.eval.benchmarks.verify import managed_verifier_for_receipt
+
+        benchmark_config = source_config.eval.benchmarks
+        benchmark_store = BenchmarkStore(
+            benchmark_config.trusted_case_root,
+            benchmark_config.visible_manifest_root,
+            benchmark_config.cache_root,
+        )
+        try:
+            receipt = benchmark_store.read_receipt(
+                benchmark_store.receipt_path(
+                    case.case_id,
+                    case.benchmark.eligibility_receipt_digest,
+                )
+            )
+        except Exception as exc:
+            raise EvalRunnerError(
+                f"Defects4J case {case.case_id} has no valid trusted receipt: {exc}"
+            ) from exc
+        managed = managed_verifier_for_receipt(receipt, benchmark_config)
+        if (
+            receipt.role != "optimization"
+            or case.execution.test_command != managed.command_id
+            or case.environment.image != receipt.verifier_runtime_id
+            or case.repository.base_commit != receipt.sanitized_base_sha
+        ):
+            raise EvalRunnerError(
+                f"Defects4J case {case.case_id} disagrees with its trusted receipt"
+            )
+        resolved_verifiers[case.case_id] = managed
     write_yaml(
         run_dir / "resolved-config.yaml",
         {
@@ -389,6 +536,8 @@ def run_eval(
             "codex_timeout_seconds": codex_timeout_seconds,
             "writer_timeout_seconds": writer_timeout_seconds,
             "evaluator_timeout_seconds": evaluator_timeout_seconds,
+            "model": model,
+            "max_attempts": max_attempts,
             "roles": {
                 role: resolve_role(source_config, role).to_dict(source_config.project_root)
                 for role in source_config.codex.roles
@@ -405,7 +554,11 @@ def run_eval(
             codex_timeout_seconds=codex_timeout_seconds,
             writer_timeout_seconds=writer_timeout_seconds,
             evaluator_timeout_seconds=evaluator_timeout_seconds,
+            model=model,
+            max_attempts=max_attempts,
             backend=backend,
+            verifier_backend=resolved_verifiers.get(case.case_id),
+            sdk_hidden_paths=sdk_hidden_paths,
         )
         for case in cases
     )

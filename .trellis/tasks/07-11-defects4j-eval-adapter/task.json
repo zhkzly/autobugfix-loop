@@ -3,7 +3,7 @@
   "name": "defects4j-eval-adapter",
   "title": "Implement Defects4J Eval adapter",
   "description": "Pin Defects4J, materialize real cases, preserve evidence, run official oracle preflight, and build the 16-case manifest.",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

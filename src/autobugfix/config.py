@@ -8,7 +8,14 @@ import yaml
 from autobugfix.models import (
     AutobugfixConfig,
     CodexConfig,
+    DEFECTS4J_DOCKER_IMAGE,
+    DEFECTS4J_DOCKER_PLATFORM,
+    DEFECTS4J_FRAMEWORK_REVISION,
+    DEFECTS4J_VERIFIER_IMAGE,
+    Defects4JBenchmarkConfig,
+    EvalBenchmarkConfig,
     EvalConfig,
+    EvalGuardConfig,
     OperatorArtifactConfig,
     OperatorBudgetConfig,
     OperatorConfig,
@@ -33,6 +40,12 @@ class ConfigError(RuntimeError):
     pass
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    left = left.resolve()
+    right = right.resolve()
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "task_root": ".autobugfix/tasks",
     "scheduler": {
@@ -46,6 +59,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "codex": {
         "default_model": None,
         "default_timeout_seconds": None,
+        "reasoning_effort": "medium",
+        "service_tier": None,
+        "disable_response_storage": True,
         "writer_model": None,
         "evaluator_model": None,
         "controller_model": None,
@@ -182,6 +198,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "eval": {
         "model_mode": "codex",
         "roles": {},
+        "benchmarks": {
+            "cache_root": ".autobugfix/benchmark-cache",
+            "trusted_case_root": ".autobugfix/trusted-eval-cases",
+            "visible_manifest_root": ".autobugfix/eval-manifests",
+            "command_timeout_seconds": 1800,
+            "issue_timeout_seconds": 60,
+            "min_free_disk_gb": 10,
+            "guard": {"trusted_ref": "origin/main"},
+            "defects4j": {
+                "image": "autobugfix/defects4j:3.0.1",
+                "verifier_image": "autobugfix/defects4j-verifier:3.0.1",
+                "platform": "linux/amd64",
+                "framework_revision": "6d54320e0db5a357f9ab38a8e4d2e5aead7e1c09",
+                "timezone": "America/Los_Angeles",
+                "preflight_repetitions": 2,
+                "memory_limit": "8g",
+                "cpu_limit": 4.0,
+                "pids_limit": 1024,
+            },
+        },
     },
     "operator": {
         "state": {
@@ -424,12 +460,25 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
     codex = CodexConfig(
         default_model=codex_raw.get("default_model"),
         default_timeout_seconds=_optional_int(codex_raw.get("default_timeout_seconds")),
+        reasoning_effort=str(codex_raw.get("reasoning_effort", "medium")),
+        service_tier=(
+            str(codex_raw["service_tier"])
+            if codex_raw.get("service_tier") is not None
+            else None
+        ),
+        disable_response_storage=bool(
+            codex_raw.get("disable_response_storage", True)
+        ),
         writer_model=codex_raw.get("writer_model"),
         evaluator_model=codex_raw.get("evaluator_model"),
         controller_model=codex_raw.get("controller_model"),
         role_runtime=role_runtime,
         roles=roles,
     )
+    if codex.reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+        raise ConfigError("codex.reasoning_effort must be low, medium, high, or xhigh")
+    if not codex.disable_response_storage:
+        raise ConfigError("codex.disable_response_storage must remain true")
 
     worker_raw = _as_mapping(merged.get("worker"), "worker")
     worker = WorkerConfig(
@@ -442,9 +491,74 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
         heartbeat_interval_seconds=int(memory_worker_raw.get("heartbeat_interval_seconds", 10)),
     )
     eval_raw = _as_mapping(merged.get("eval"), "eval")
+    benchmark_raw = _as_mapping(eval_raw.get("benchmarks"), "eval.benchmarks")
+    guard_raw = _as_mapping(benchmark_raw.get("guard"), "eval.benchmarks.guard")
+    defects4j_raw = _as_mapping(
+        benchmark_raw.get("defects4j"), "eval.benchmarks.defects4j"
+    )
+    unsupported_defects4j_fields = sorted(
+        set(defects4j_raw)
+        & {
+            "framework_root",
+            "java_home",
+            "git_bin",
+            "svn_bin",
+            "perl_bin",
+            "cpanm_bin",
+            "perl5lib",
+            "library_path",
+        }
+    )
+    if unsupported_defects4j_fields:
+        raise ConfigError(
+            "eval.benchmarks.defects4j host runtime fields are unsupported in "
+            "Docker-only mode: "
+            + ", ".join(unsupported_defects4j_fields)
+        )
     eval_config = EvalConfig(
         model_mode=str(eval_raw.get("model_mode", "codex")),
         roles=_parse_roles(eval_raw.get("roles"), "eval.roles"),
+        benchmarks=EvalBenchmarkConfig(
+            cache_root=_resolve(root, benchmark_raw.get("cache_root"))
+            or (root / ".autobugfix/benchmark-cache"),
+            trusted_case_root=_resolve(root, benchmark_raw.get("trusted_case_root"))
+            or (root / ".autobugfix/trusted-eval-cases"),
+            visible_manifest_root=_resolve(
+                root, benchmark_raw.get("visible_manifest_root")
+            )
+            or (root / ".autobugfix/eval-manifests"),
+            command_timeout_seconds=int(
+                benchmark_raw.get("command_timeout_seconds", 1800)
+            ),
+            issue_timeout_seconds=int(benchmark_raw.get("issue_timeout_seconds", 60)),
+            min_free_disk_gb=int(benchmark_raw.get("min_free_disk_gb", 10)),
+            guard=EvalGuardConfig(
+                trusted_ref=str(guard_raw.get("trusted_ref", "origin/main")),
+            ),
+            defects4j=Defects4JBenchmarkConfig(
+                image=str(defects4j_raw.get("image", DEFECTS4J_DOCKER_IMAGE)),
+                verifier_image=str(
+                    defects4j_raw.get("verifier_image", DEFECTS4J_VERIFIER_IMAGE)
+                ),
+                platform=str(
+                    defects4j_raw.get("platform", DEFECTS4J_DOCKER_PLATFORM)
+                ),
+                framework_revision=str(
+                    defects4j_raw.get(
+                        "framework_revision", DEFECTS4J_FRAMEWORK_REVISION
+                    )
+                ),
+                timezone=str(
+                    defects4j_raw.get("timezone", "America/Los_Angeles")
+                ),
+                preflight_repetitions=int(
+                    defects4j_raw.get("preflight_repetitions", 2)
+                ),
+                memory_limit=str(defects4j_raw.get("memory_limit", "8g")),
+                cpu_limit=float(defects4j_raw.get("cpu_limit", 4.0)),
+                pids_limit=int(defects4j_raw.get("pids_limit", 1024)),
+            ),
+        ),
     )
 
     operator_raw = _as_mapping(merged.get("operator"), "operator")
@@ -659,6 +773,48 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
         raise ConfigError("operator.budgets.allow_model_fallback must remain false")
     if operator_config.promotion.require_canary and not operator_config.promotion.canary_profiles:
         raise ConfigError("operator.promotion.canary_profiles must not be empty when canary is required")
+    benchmark_config = eval_config.benchmarks
+    for value, field in (
+        (benchmark_config.command_timeout_seconds, "command_timeout_seconds"),
+        (benchmark_config.issue_timeout_seconds, "issue_timeout_seconds"),
+        (benchmark_config.min_free_disk_gb, "min_free_disk_gb"),
+        (
+            benchmark_config.defects4j.preflight_repetitions,
+            "defects4j.preflight_repetitions",
+        ),
+    ):
+        if value < 1:
+            raise ConfigError(f"eval.benchmarks.{field} must be positive")
+    if benchmark_config.defects4j.framework_revision != DEFECTS4J_FRAMEWORK_REVISION:
+        raise ConfigError(
+            "eval.benchmarks.defects4j.framework_revision must remain pinned to "
+            f"{DEFECTS4J_FRAMEWORK_REVISION}"
+        )
+    if benchmark_config.defects4j.timezone != "America/Los_Angeles":
+        raise ConfigError(
+            "eval.benchmarks.defects4j.timezone must remain America/Los_Angeles"
+        )
+    if not benchmark_config.defects4j.image.strip():
+        raise ConfigError("eval.benchmarks.defects4j.image must not be empty")
+    if not benchmark_config.guard.trusted_ref.strip():
+        raise ConfigError("eval.benchmarks.guard.trusted_ref must not be empty")
+    if not benchmark_config.defects4j.verifier_image.strip():
+        raise ConfigError(
+            "eval.benchmarks.defects4j.verifier_image must not be empty"
+        )
+    if not benchmark_config.defects4j.memory_limit.strip():
+        raise ConfigError("eval.benchmarks.defects4j.memory_limit must not be empty")
+    if benchmark_config.defects4j.cpu_limit <= 0:
+        raise ConfigError("eval.benchmarks.defects4j.cpu_limit must be positive")
+    if benchmark_config.defects4j.pids_limit < 64:
+        raise ConfigError(
+            "eval.benchmarks.defects4j.pids_limit must be at least 64"
+        )
+    if benchmark_config.defects4j.platform != DEFECTS4J_DOCKER_PLATFORM:
+        raise ConfigError(
+            "eval.benchmarks.defects4j.platform must remain "
+            f"{DEFECTS4J_DOCKER_PLATFORM}"
+        )
     runtime_roots = {
         "state": operator_config.state.root.resolve(),
         "artifacts": operator_config.artifacts.root.resolve(),
@@ -671,13 +827,37 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
         for right_name, right_root in runtime_roots.items():
             if left_name >= right_name:
                 continue
-            if left_root == right_root or left_root.is_relative_to(
-                right_root
-            ) or right_root.is_relative_to(left_root):
+            if _paths_overlap(left_root, right_root):
                 raise ConfigError(
                     "operator runtime roots must not overlap: "
                     f"{left_name}={left_root}, {right_name}={right_root}"
                 )
+    benchmark_roots = {
+        "benchmark_cache": benchmark_config.cache_root.resolve(),
+        "trusted_cases": benchmark_config.trusted_case_root.resolve(),
+        "visible_manifests": benchmark_config.visible_manifest_root.resolve(),
+    }
+    memory_root = (root / ".autobugfix-memory").resolve()
+    for left_name, left_root in benchmark_roots.items():
+        for right_name, right_root in benchmark_roots.items():
+            if left_name >= right_name:
+                continue
+            if _paths_overlap(left_root, right_root):
+                raise ConfigError(
+                    "Eval benchmark roots must not overlap: "
+                    f"{left_name}={left_root}, {right_name}={right_root}"
+                )
+        for operator_name, operator_root in runtime_roots.items():
+            if _paths_overlap(left_root, operator_root):
+                raise ConfigError(
+                    "Eval benchmark roots must not overlap Operator runtime roots: "
+                    f"{left_name}={left_root}, {operator_name}={operator_root}"
+                )
+        if _paths_overlap(left_root, memory_root):
+            raise ConfigError(
+                "Eval benchmark roots must not overlap Memory runtime root: "
+                f"{left_name}={left_root}, memory={memory_root}"
+            )
 
     repos: dict[str, RepoProfile] = {}
     for repo_id, repo_raw_any in _as_mapping(merged.get("repos"), "repos").items():
@@ -707,6 +887,44 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
             ),
             codex_roles=_parse_roles(repo_codex_raw.get("roles"), f"repos.{repo_id}.codex.roles"),
         )
+
+    project_runtime_root = (root / ".autobugfix").resolve()
+    configured_task_root = Path(str(merged.get("task_root", ".autobugfix/tasks")))
+    protected_data_roots = {
+        "project_git": (root / ".git").resolve(),
+        "project_source": (root / "src").resolve(),
+        "project_tests": (root / "tests").resolve(),
+        "execution_tasks": (
+            (root / configured_task_root)
+            if not configured_task_root.is_absolute()
+            else configured_task_root
+        ).resolve(),
+        "execution_archive": (root / ".autobugfix/archive").resolve(),
+        "codex_runtime": (
+            (root / role_runtime.runtime_root)
+            if not role_runtime.runtime_root.is_absolute()
+            else role_runtime.runtime_root
+        ).resolve(),
+    }
+    for repo_id, repo in repos.items():
+        protected_data_roots[f"repo.{repo_id}.main_checkout"] = repo.main_checkout.resolve()
+        if repo.worktree_root is not None:
+            protected_data_roots[f"repo.{repo_id}.worktrees"] = repo.worktree_root.resolve()
+    for benchmark_name, benchmark_root in benchmark_roots.items():
+        if benchmark_root.is_relative_to(root) and not benchmark_root.is_relative_to(
+            project_runtime_root
+        ):
+            raise ConfigError(
+                "Eval benchmark roots inside the project must live under the gitignored "
+                f".autobugfix runtime root: {benchmark_name}={benchmark_root}"
+            )
+        for protected_name, protected_root in protected_data_roots.items():
+            if _paths_overlap(benchmark_root, protected_root):
+                raise ConfigError(
+                    "Eval benchmark root overlaps protected data plane: "
+                    f"{benchmark_name}={benchmark_root}, "
+                    f"{protected_name}={protected_root}"
+                )
 
     return AutobugfixConfig(
         project_root=root,

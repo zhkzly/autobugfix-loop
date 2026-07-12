@@ -66,6 +66,76 @@ def test_dataset_and_eval_call_execution_loop_in_isolated_repo(tmp_path):
     assert isolated_config["codex"]["role_runtime"]["codex_bin"] == str(Path("/usr/bin/true").resolve())
 
 
+@pytest.mark.parametrize("run_id", ("../escape", "nested/run", "nested\\run", ".", ".."))
+def test_eval_rejects_unsafe_run_id_before_creating_output(tmp_path, run_id):
+    project_root, _, problem = prepare_historical_case(tmp_path)
+    out = tmp_path / "eval-runs"
+
+    with pytest.raises(EvalRunnerError, match="safe path component"):
+        run_eval(
+            project_root,
+            problem,
+            out,
+            run_id=run_id,
+            backend=FakeCodexBackend(),
+        )
+
+    assert not out.exists()
+
+
+def test_eval_retries_writer_with_real_verifier_feedback_and_model_override(tmp_path):
+    class RetryOnceBackend(FakeCodexBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.writer_calls = 0
+
+        def run(self, request):
+            if request.role != "writer":
+                return super().run(request)
+            self.writer_calls += 1
+            if self.writer_calls != 1:
+                return super().run(request)
+            edit = self.edit
+            self.edit = False
+            try:
+                return super().run(request)
+            finally:
+                self.edit = edit
+
+    project_root, row, problem = prepare_historical_case(tmp_path)
+    backend = RetryOnceBackend()
+    run_dir = run_eval(
+        project_root,
+        problem,
+        tmp_path / "eval-runs",
+        run_id="retry",
+        backend=backend,
+        model="gpt-5.4-mini",
+        max_attempts=2,
+        test_command="python3 -m unittest discover",
+    )
+
+    case_dir = run_dir / str(row["raw_id"])
+    report = yaml.safe_load((case_dir / "report.yaml").read_text(encoding="utf-8"))
+    feedback_files = list((case_dir / "control/.autobugfix/tasks").glob("*/feedback/*.md"))
+    attempt_dirs = list(
+        (case_dir / "control/.autobugfix/tasks").glob("*/artifacts/attempts/*")
+    )
+    writer_requests = [request for request in backend.calls if request.role == "writer"]
+
+    assert report["decision"] == "pass"
+    assert backend.writer_calls == 2
+    assert len(writer_requests) == 2
+    assert all(request.model == "gpt-5.4-mini" for request in writer_requests)
+    assert len(feedback_files) == 1
+    assert len(attempt_dirs) == 2
+    assert all((path / "diff.patch").is_file() for path in attempt_dirs)
+    assert all((path / "test-result.md").is_file() for path in attempt_dirs)
+    assert "did not satisfy the repair contract" in feedback_files[0].read_text(
+        encoding="utf-8"
+    )
+
+
 def test_eval_accepts_behaviorally_correct_patch_that_differs_from_oracle(tmp_path):
     project_root, row, problem = prepare_historical_case(tmp_path)
     backend = FakeCodexBackend(
@@ -195,6 +265,19 @@ def test_canonical_case_preserves_benchmark_environment_attachment_and_hidden_or
             "require_patch": True,
             "timeout_seconds": 900,
         },
+        "benchmark": {
+            "framework_revision": "framework-sha",
+            "dataset_revision": "dataset-sha",
+            "runtime_id": "runtime-sha",
+            "eligibility_receipt_digest": "receipt-sha",
+            "visible_evidence_digest": "evidence-sha",
+        },
+        "experiment": {
+            "role": "optimization",
+            "first_wave": 3,
+            "repository_group": "owner/repo",
+            "case_token": "visible-upstream-123",
+        },
     }
 
     case = EvalCase.from_row(row)
@@ -205,7 +288,57 @@ def test_canonical_case_preserves_benchmark_environment_attachment_and_hidden_or
     assert case.task.attachments[0].media_type == "image/png"
     assert case.oracle.visibility == "hidden"
     assert case.oracle.patch_source == "dataset://gold_patch"
+    assert case.benchmark is not None
+    assert case.benchmark.framework_revision == "framework-sha"
+    assert case.experiment is not None
+    assert case.experiment.role == "optimization"
     assert EvalCase.from_row(encoded).to_dict() == encoded
+
+
+@pytest.mark.parametrize(
+    ("experiment", "message"),
+    [
+        (
+            {
+                "role": "training",
+                "first_wave": 3,
+                "repository_group": "repo",
+                "case_token": "case",
+            },
+            "unsupported experiment role",
+        ),
+        (
+            {
+                "role": "optimization",
+                "first_wave": 4,
+                "repository_group": "repo",
+                "case_token": "case",
+            },
+            "first_wave must be 3, 8, or 16",
+        ),
+    ],
+)
+def test_canonical_case_rejects_invalid_experiment_contract(experiment, message):
+    row = {
+        "schema_version": 1,
+        "case_id": "case",
+        "source": {
+            "adapter": "future",
+            "benchmark": "future",
+            "revision": "v1",
+            "split": "optimization",
+            "instance_id": "case",
+        },
+        "task": {"type": "bugfix", "problem_statement": "Fix it"},
+        "repository": {
+            "repo_id": "repo",
+            "url": "https://example.invalid/repo.git",
+            "base_commit": "base",
+        },
+        "experiment": experiment,
+    }
+    with pytest.raises(EvalCaseError, match=message):
+        EvalCase.from_row(row)
 
 
 def test_case_schema_rejects_unknown_version_and_local_adapter_environment(tmp_path):

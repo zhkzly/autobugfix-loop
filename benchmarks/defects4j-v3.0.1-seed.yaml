@@ -1,0 +1,47 @@
+schema_version: 2
+manifest_id: defects4j-v3.0.1-bugfix
+benchmark: defects4j
+framework_revision: 6d54320e0db5a357f9ab38a8e4d2e5aead7e1c09
+dataset_revision: defects4j-v3.0.1
+optimization_cases:
+  - case_id: d4j-jsoup-2
+    project: Jsoup
+    bug_id: 2
+    first_wave: 3
+  - case_id: d4j-gson-2
+    project: Gson
+    bug_id: 2
+    first_wave: 3
+  - case_id: d4j-mockito-1
+    project: Mockito
+    bug_id: 1
+    first_wave: 8
+  - case_id: d4j-time-1
+    project: Time
+    bug_id: 1
+    first_wave: 8
+  - case_id: d4j-gson-3
+    project: Gson
+    bug_id: 3
+    first_wave: 8
+  - case_id: d4j-jsoup-1
+    project: Jsoup
+    bug_id: 1
+    first_wave: 16
+  - case_id: d4j-mockito-2
+    project: Mockito
+    bug_id: 2
+    first_wave: 16
+  - case_id: d4j-time-2
+    project: Time
+    bug_id: 2
+    first_wave: 16
+  - case_id: d4j-gson-5
+    project: Gson
+    bug_id: 5
+    first_wave: 16
+  - case_id: d4j-jsoup-5
+    project: Jsoup
+    bug_id: 5
+    first_wave: 16
+holdout_count: 6

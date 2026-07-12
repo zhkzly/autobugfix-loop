@@ -25,6 +25,13 @@ TaskState = Literal[
     "blocked",
 ]
 
+VerifierOutcome = Literal[
+    "passed",
+    "repair_failure",
+    "harness_error",
+    "policy_violation",
+]
+
 RUNNABLE_STATES: set[str] = {"ready", "feedback_available", "writer_rework_required"}
 TERMINAL_STATES: set[str] = {"accepted", "abandoned", "archived"}
 
@@ -133,6 +140,9 @@ class RoleRuntimeConfig:
 class CodexConfig:
     default_model: str | None = None
     default_timeout_seconds: int | None = None
+    reasoning_effort: str = "medium"
+    service_tier: str | None = None
+    disable_response_storage: bool = True
     writer_model: str | None = None
     evaluator_model: str | None = None
     controller_model: str | None = None
@@ -146,10 +156,47 @@ class WorkerConfig:
     heartbeat_interval_seconds: int = 5
 
 
+DEFECTS4J_FRAMEWORK_REVISION = "6d54320e0db5a357f9ab38a8e4d2e5aead7e1c09"
+DEFECTS4J_DOCKER_IMAGE = "autobugfix/defects4j:3.0.1"
+DEFECTS4J_VERIFIER_IMAGE = "autobugfix/defects4j-verifier:3.0.1"
+DEFECTS4J_DOCKER_PLATFORM = "linux/amd64"
+
+
+@dataclass(slots=True)
+class Defects4JBenchmarkConfig:
+    image: str = DEFECTS4J_DOCKER_IMAGE
+    verifier_image: str = DEFECTS4J_VERIFIER_IMAGE
+    platform: str = DEFECTS4J_DOCKER_PLATFORM
+    framework_revision: str = DEFECTS4J_FRAMEWORK_REVISION
+    timezone: str = "America/Los_Angeles"
+    preflight_repetitions: int = 2
+    memory_limit: str = "8g"
+    cpu_limit: float = 4.0
+    pids_limit: int = 1024
+
+
+@dataclass(slots=True)
+class EvalGuardConfig:
+    trusted_ref: str = "origin/main"
+
+
+@dataclass(slots=True)
+class EvalBenchmarkConfig:
+    cache_root: Path = Path(".autobugfix/benchmark-cache")
+    trusted_case_root: Path = Path(".autobugfix/trusted-eval-cases")
+    visible_manifest_root: Path = Path(".autobugfix/eval-manifests")
+    command_timeout_seconds: int = 1800
+    issue_timeout_seconds: int = 60
+    min_free_disk_gb: int = 10
+    guard: EvalGuardConfig = field(default_factory=EvalGuardConfig)
+    defects4j: Defects4JBenchmarkConfig = field(default_factory=Defects4JBenchmarkConfig)
+
+
 @dataclass(slots=True)
 class EvalConfig:
     model_mode: str = "codex"
     roles: dict[str, RoleConfig] = field(default_factory=dict)
+    benchmarks: EvalBenchmarkConfig = field(default_factory=EvalBenchmarkConfig)
 
 
 @dataclass(slots=True)
@@ -338,6 +385,7 @@ class CodexRequest:
     role: str
     prompt: str
     cwd: Path
+    control_root: Path
     sandbox: str
     model: str | None
     timeout_seconds: int | None
@@ -345,6 +393,10 @@ class CodexRequest:
     raw_log_path: Path
     stderr_log_path: Path
     approval_mode: str | None = None
+    hidden_paths: tuple[Path, ...] = ()
+    readable_paths: tuple[Path, ...] = ()
+    writable_paths: tuple[Path, ...] = ()
+    require_process_isolation: bool = True
 
 
 @dataclass(slots=True)
@@ -362,7 +414,8 @@ class VerifierResult:
     stderr: str
     started_at: str
     finished_at: str
+    outcome: VerifierOutcome
 
     @property
     def passed(self) -> bool:
-        return self.exit_code == 0
+        return self.outcome == "passed"

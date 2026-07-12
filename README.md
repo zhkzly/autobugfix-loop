@@ -21,14 +21,19 @@ uv sync --prerelease allow
 uv run autobugfix doctor
 ```
 
-Authoritative Operator checks require an OS process sandbox. The current
-adapter uses Bubblewrap (`bwrap`) on Linux; install it before running Operator
-verification. The requirement cannot be disabled by project config while the
-trusted machine constitution requires it.
+All production Codex roles and authoritative Operator checks require an OS
+process sandbox. The current adapter uses Bubblewrap (`bwrap`) on Linux/WSL;
+install it before running Execution, Memory, Eval, or Operator SDK nodes. The
+role process sees an empty host home, a read-only trusted Python runtime, and
+only its explicit control/worktree/log/Git-metadata mounts. This requirement
+cannot be disabled by project config while the trusted machine constitution
+requires it.
 
 The production runtime uses the local preview Python Codex SDK package
 `openai-codex`. It does not use `codex exec` and it does not fall back to a
-fake backend for `autobugfix run`.
+fake backend for `autobugfix run`. Each SDK call runs in an isolated Python
+worker process so the parent service can enforce the configured timeout and
+retain request/result/stdout/stderr artifacts.
 
 ## Configure A Target Repo
 
@@ -205,6 +210,83 @@ uv run autobugfix memory maintain <task-id>
 uv run autobugfix dataset build-raw --repo target_repo --out raw.jsonl
 uv run autobugfix eval run --dataset problem_prompts.jsonl --out .autobugfix-evals/runs
 ```
+
+### Defects4J Cases
+
+Defects4J is a Case source; Docker is the pinned materialization and official
+test environment. The Codex Writer still edits an ordinary local task
+worktree. Host Java, Perl, SVN, cpanm, and Defects4J installations are neither
+required nor configurable.
+
+Build the two pinned roles from the same Dockerfile once. The materializer has
+official checkout/oracle metadata; the verifier removes gold patches and
+localization hints while retaining metadata required by `defects4j test`:
+
+```bash
+docker build --target materializer \
+  -t autobugfix/defects4j:3.0.1 \
+  -f containers/defects4j/Dockerfile .
+docker build --target verifier \
+  -t autobugfix/defects4j-verifier:3.0.1 \
+  -f containers/defects4j/Dockerfile .
+```
+
+Then run a real case through Docker preflight, production Python Codex SDK
+Execution, and an independent official oracle:
+
+```bash
+uv run autobugfix eval benchmark doctor --adapter defects4j
+
+uv run autobugfix eval benchmark seal \
+  --manifest benchmarks/defects4j-v3.0.1-seed.yaml
+
+uv run autobugfix eval benchmark run-case \
+  --manifest benchmarks/defects4j-v3.0.1-seed.yaml \
+  --case d4j-jsoup-2 \
+  --out .autobugfix/eval-runs \
+  --run-id h0-jsoup-2 \
+  --model gpt-5.4-mini \
+  --max-attempts 2
+```
+
+`AUTOBUGFIX_DOCKER_BIN` may select an installed Docker executable for one
+process. The configured image tag is inspected first; all case commands bind
+to the resulting immutable image ID. Runtime cases, receipts, SDK logs,
+events, diffs, and official-test artifacts remain gitignored below
+`.autobugfix/`.
+
+`seal` performs real repeated tests for all 10 visible Optimization cases and
+six repository-disjoint Holdout cases. Holdout identities and preflight
+artifacts are authenticated AES-GCM envelopes; the public projection contains
+only Optimization identities, opaque wave tokens, counts, and the trusted
+Guard code identity. Seal and Holdout execution fail unless the control
+checkout is clean and exactly matches `eval.benchmarks.guard.trusted_ref`.
+Qualification
+uses fail-to-pass plus pass-to-pass semantics: fixed-revision failures must be
+stable, buggy failures must equal that baseline plus triggering tests, and a
+generated patch may have no failure outside the fixed baseline.
+
+For an Operator Study, derive a binding, run the encrypted Holdout, and import
+the signed aggregate through service-owned transitions:
+
+```bash
+uv run autobugfix operator study guard-binding \
+  --study-id bugfix-study --kind BASELINE > /tmp/h0-binding.yaml
+
+uv run autobugfix eval benchmark guard-run \
+  --manifest .autobugfix/eval-manifests/<manifest>/manifest.yaml \
+  --wave-token <opaque-token> \
+  --study-binding /tmp/h0-binding.yaml \
+  --run-id h0-holdout --out .autobugfix/guard-results
+
+uv run autobugfix operator study import-guard-metric \
+  --study-id bugfix-study --kind BASELINE \
+  --metric .autobugfix/guard-results/h0-holdout.metric.yaml
+```
+
+The binding grants no authority. Import re-verifies the human-held Guard
+secret, current Study/line/budget binding, frozen harness and constitution,
+and aggregate-only metric schema before writing Operator state.
 
 ## Operator Governance
 

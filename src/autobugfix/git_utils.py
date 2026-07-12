@@ -58,6 +58,22 @@ def rev_parse(path: Path, ref: str) -> str:
     return run_git(path, ["rev-parse", ref], check=True).stdout.strip()
 
 
+def _resolved_git_path(path: Path, argument: str) -> Path:
+    value = run_git(path, ["rev-parse", argument], check=True).stdout.strip()
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = path / candidate
+    return candidate.resolve()
+
+
+def git_common_dir(path: Path) -> Path:
+    return _resolved_git_path(path, "--git-common-dir")
+
+
+def git_dir(path: Path) -> Path:
+    return _resolved_git_path(path, "--git-dir")
+
+
 def diff_against(path: Path, base_ref: str, extra_args: list[str] | None = None) -> str:
     args = ["diff", "--binary", base_ref]
     if extra_args:
