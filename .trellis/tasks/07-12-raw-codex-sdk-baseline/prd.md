@@ -117,36 +117,37 @@ arm; it does not redefine or replace Execution, Memory, Eval, or Operator.
 
 ## Acceptance Criteria
 
-- [ ] The baseline generator is a separately locked uv project and an automated
+- [x] The baseline generator is a separately locked uv project and an automated
       import check proves it does not import `autobugfix`.
-- [ ] Production generation calls `openai_codex.Codex` directly with SDK
+- [x] Production generation calls `openai_codex.Codex` directly with SDK
       version `0.1.0b3`; no `codex exec` or fake fallback exists.
-- [ ] The model, prompt, SDK, runner, environment, budget, case, H0 report, and
+- [x] The model, prompt, SDK, runner, environment, budget, case, H0 report, and
       official-scorer identities are frozen in a digest-verified prepared
       manifest before formal generation.
-- [ ] A process-isolation test proves Raw Codex cannot read Autobugfix source,
+- [x] A process-isolation test proves Raw Codex cannot read Autobugfix source,
       Memory, trusted receipts, official artifacts, Docker authority, previous
       case output, or host Codex hooks/skills.
-- [ ] A real exposed pilot case completes direct SDK generation, trusted patch
+- [x] A real exposed pilot case completes direct SDK generation, trusted patch
       freeze, clean-checkout application, official Defects4J scoring, and
       noninterference verification.
-- [ ] Target repository main snapshots remain unchanged; all model edits occur
+- [x] Target repository main snapshots remain unchanged; all model edits occur
       in per-case baseline worktrees.
-- [ ] All 16 formal Raw cases run once from one frozen manifest, or the entire
+- [x] All 16 formal Raw cases run once from one frozen manifest, or the entire
       run is explicitly marked invalid and restarted under a new manifest after
       a harness defect.
-- [ ] The official evaluator never appends Raw SDK input, starts another turn,
+- [x] The official evaluator never appends Raw SDK input, starts another turn,
       or changes a frozen submission.
-- [ ] Raw SDK requests, streamed events, final response, stderr, timing, usage,
-      Git diff, changed paths, submission, oracle output, and receipts are
-      retained for every case.
-- [ ] A deterministic report compares Raw SDK with the existing H0 report and
+- [x] Raw SDK requests, streamed events, stderr, timing, Git diff, changed
+      paths, submission, oracle output, and receipts are retained for every
+      case. Final response and usage are retained when produced; a hard timeout
+      records their explicit absence without synthesizing model output.
+- [x] A deterministic report compares Raw SDK with the existing H0 report and
       separates the 13-case primary cohort from the three exposed cases.
-- [ ] `uv run --cache-dir /tmp/uv-cache pytest -q` passes.
-- [ ] The standalone baseline project's tests and compile checks pass.
-- [ ] `uv run --cache-dir /tmp/uv-cache python -m compileall -q src tests scripts`
+- [x] `uv run --cache-dir /tmp/uv-cache pytest -q` passes.
+- [x] The standalone baseline project's tests and compile checks pass.
+- [x] `uv run --cache-dir /tmp/uv-cache python -m compileall -q src tests scripts`
       and `git diff --check` pass.
-- [ ] Role-skill validation passes even though the Raw treatment itself loads no
+- [x] Role-skill validation passes even though the Raw treatment itself loads no
       role skills.
 
 ## Out Of Scope
