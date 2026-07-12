@@ -68,3 +68,40 @@ def test_memory_collect_rejects_unaccepted_execution_evidence(tmp_path):
 
     assert execution.store.load(task.task_id).state == "ready"
     assert not memory.store.raw_task_dir(task.task_id).exists()
+
+
+def test_memory_rejects_eval_provenance_even_if_task_was_accepted(tmp_path):
+    project_root, _ = make_service_project(tmp_path)
+    execution = AutobugfixService(project_root, backend=FakeCodexBackend())
+    task = execution.create_task(
+        "toy_repo",
+        "eval-origin task",
+        "Bug",
+        metadata={"origin": "eval", "memory_eligible": False},
+    )
+    execution.run_task(task.task_id)
+    execution.apply_gate(task.task_id, "accepted")
+    memory = MemoryService(project_root, backend=FakeMaintainerBackend())
+
+    with pytest.raises(MemoryServiceError, match="Eval or benchmark"):
+        memory.collect(task.task_id)
+
+    assert not memory.store.raw_task_dir(task.task_id).exists()
+
+
+def test_memory_revalidates_packet_provenance_before_digest_and_maintain(tmp_path):
+    project_root, _ = make_service_project(tmp_path)
+    execution = AutobugfixService(project_root, backend=FakeCodexBackend())
+    task = execution.create_task("toy_repo", "accepted task", "Bug")
+    execution.run_task(task.task_id)
+    execution.apply_gate(task.task_id, "accepted")
+    memory = MemoryService(project_root, backend=FakeMaintainerBackend())
+    packet_path = memory.collect(task.task_id)
+    packet = yaml.safe_load(packet_path.read_text(encoding="utf-8"))
+    packet["task"]["metadata"] = {"origin": "eval", "memory_eligible": False}
+    packet_path.write_text(yaml.safe_dump(packet, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(MemoryServiceError, match="Eval or benchmark"):
+        memory.digest(task.task_id)
+    with pytest.raises(MemoryServiceError, match="Eval or benchmark"):
+        memory.maintain(task.task_id)

@@ -136,6 +136,12 @@ hook_assignments:
     hooks_enabled: false
     authority: service_sandbox_git_verifier_and_external_gates
   invariant: Operator host hooks must never be injected into an isolated SDK role.
+  filesystem_invariant: >-
+    Isolated SDK roles receive an empty host home, explicit read-only trusted
+    runtime mounts, role-appropriate cwd permissions, and only service-owned
+    linked-worktree Git metadata mounts. A workspace-write role cannot use the
+    trusted control root. Reopening one allowed child below a hidden authority
+    root must not expose sibling authority state.
 
 transition_contract:
   request_phases: [REQUESTED, ACTIVE, VERIFIED, CLOSED]
@@ -310,11 +316,14 @@ layers:
       - tests/test_memory_gradio_app.py
   eval:
     paths:
+      - benchmarks/**
+      - containers/**
       - src/autobugfix/dataset.py
       - src/autobugfix/eval/**
       - .agents/role-skills/eval/**
       - tests/test_dataset.py
       - tests/test_eval.py
+      - tests/test_eval_benchmarks.py
   operator:
     paths:
       - .autobugfix-governance/**
@@ -436,7 +445,7 @@ validation_profiles:
     timeout_seconds: 240
     commands:
       - name: eval-tests
-        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_eval.py, tests/test_dataset.py]
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_eval.py, tests/test_eval_benchmarks.py, tests/test_dataset.py]
   shared_runtime:
     timeout_seconds: 240
     commands:
@@ -517,6 +526,11 @@ static_invariants:
   production_sdk_requires:
     - hooks = false
     - multi_agent = false
+    - module_names = ("openai_codex",)
+    - default_hidden.append(home)
+    - request.sandbox == "read-only"
+    - workspace-write Codex role cannot use the trusted control root
+    - Codex path cannot be both hidden and mounted
   eval_forbidden_calls:
     - apply_gate
     - deploy_ppe

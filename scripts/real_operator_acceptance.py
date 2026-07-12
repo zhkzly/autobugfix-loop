@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,20 @@ def run(
 def write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def remove_acceptance_tree(path: Path) -> None:
+    def restore_owner_write(function, raw_path, _exc_info) -> None:
+        failed = Path(raw_path)
+        for candidate in (failed, failed.parent):
+            try:
+                mode = candidate.stat().st_mode
+                candidate.chmod(mode | stat.S_IWUSR | stat.S_IXUSR)
+            except FileNotFoundError:
+                continue
+        function(raw_path)
+
+    shutil.rmtree(path, onerror=restore_owner_write)
 
 
 def acceptance_commands() -> list[dict[str, object]]:
@@ -104,7 +119,7 @@ def register_guard_metric(
 
 def build_repo(source_root: Path, root: Path) -> Path:
     if root.exists():
-        shutil.rmtree(root)
+        remove_acceptance_tree(root)
     root.mkdir(parents=True)
     run(["git", "init", "-b", "main"], root)
     run(["git", "config", "user.email", "operator@example.com"], root)
@@ -181,7 +196,7 @@ def write_config(source_root: Path, root: Path, model: str) -> None:
                     "role_runtime": {
                         "enabled": True,
                         "runtime_root": ".autobugfix/runtime/codex-sdk",
-                        "codex_bin": shutil.which("codex"),
+                        "codex_bin": None,
                         "bridge_auth": True,
                         "skill_guard": True,
                         "strict_skill_guard": True,

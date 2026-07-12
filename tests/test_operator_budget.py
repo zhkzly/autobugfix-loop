@@ -10,6 +10,8 @@ import yaml
 
 from autobugfix.models import CodexRequest, CodexResult
 from autobugfix.cli import main
+from autobugfix.eval.benchmarks.authority import GuardCodeIdentity
+from autobugfix.eval.benchmarks.guard import metric_payload, signed_metric
 from autobugfix.operator.models import digest_payload
 from autobugfix.operator.service import OperatorGovernanceError
 from autobugfix.operator.store import OperatorStoreError
@@ -90,6 +92,72 @@ def initialized_study(tmp_path: Path):
     return root, service
 
 
+def test_signed_guard_metric_is_bound_to_study_harness_and_initializes_h0(
+    tmp_path: Path,
+):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    manifest = root / "guard-manifest.yaml"
+    manifest.write_text("cases: [case-1, case-2, case-3]\n", encoding="utf-8")
+    study = service.create_study(
+        study_id="signed-guard-study",
+        purpose="Prove signed Guard-to-Operator metric flow",
+        manifest_path=manifest,
+        success_contract={"pass_rate_delta": ">=0"},
+        base_ref="main",
+    )
+    binding = service.guard_study_binding(study.study_id, kind="BASELINE")
+    identity = GuardCodeIdentity(
+        trusted_ref="main",
+        trusted_commit=study.harness_sha,
+        source_tree=run(
+            ["git", "rev-parse", f"{study.harness_sha}^{{tree}}"], cwd=root
+        ).stdout.strip(),
+        machine_constitution_digest=study.policy_digest,
+        harness_digest="a" * 64,
+    )
+    secret = "signed guard authority secret"
+    signed = signed_metric(
+        metric_payload(
+            guard_id="guard-signed-study",
+            run_id="h0-wave-3",
+            wave=3,
+            case_count=1,
+            passed_count=0,
+            failed_count=1,
+            harness_error_count=0,
+            encrypted_artifact_sha256="b" * 64,
+            public_manifest_digest="c" * 64,
+            code_identity=identity,
+            study_binding=binding,
+        ),
+        secret,
+    )
+    metric_path = root / "signed-guard.metric.yaml"
+    metric_path.write_text(yaml.safe_dump(signed, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(OperatorGovernanceError, match="authentication failed"):
+        service.register_signed_guard_metric(
+            study.study_id,
+            metric_path=metric_path,
+            kind="BASELINE",
+            guard_secret="wrong guard authority secret",
+        )
+
+    metric = service.register_signed_guard_metric(
+        study.study_id,
+        metric_path=metric_path,
+        kind="BASELINE",
+        guard_secret=secret,
+    )
+    assert metric.producer == "benchmark_guard"
+    initialized = service.initialize_experiment_line(
+        study.study_id,
+        metric_receipt_id=metric.metric_id,
+    )
+    assert initialized["checkpoint"]["name"] == "H0"
+
+
 def grant_wave_three(service, *, max_calls: int = 30):
     request = service.create_budget_request(
         "budget-study",
@@ -113,6 +181,7 @@ def codex_request(root: Path, *, role: str, model: str = "gpt-5.4-mini") -> Code
         role=role,
         prompt="Run one bounded study node",
         cwd=root,
+        control_root=root,
         sandbox="workspace-write" if role.endswith("writer") or role == "writer" else "read-only",
         model=model,
         timeout_seconds=30,

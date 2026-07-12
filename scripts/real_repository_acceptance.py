@@ -165,7 +165,7 @@ def write_control_config(
             "role_runtime": {
                 "enabled": True,
                 "runtime_root": ".autobugfix/runtime/codex-sdk",
-                "codex_bin": shutil.which("codex"),
+                "codex_bin": None,
                 "bridge_auth": True,
                 "skill_guard": True,
                 "strict_skill_guard": True,

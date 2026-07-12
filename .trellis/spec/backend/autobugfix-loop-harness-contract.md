@@ -34,6 +34,8 @@
 - Eval entrypoints:
   - `run_eval(project_root, dataset, out, ...) -> Path`
   - `score_path(path) -> Path`
+  - `EvalBenchmarkService.seal(manifest_path) -> projection`
+  - `EvalBenchmarkService.run_case(...) -> report`
 - Operator/adapter entrypoints:
   - CLI commands must call services or projections.
   - Gradio/UI/controller code must not mutate task, memory, branch, or eval
@@ -116,6 +118,31 @@
     Holdout case IDs, gold data, and case-level reports remain outside Operator
     storage under the Eval/Guard authority plane; Operator receives aggregate
     final metrics only.
+  - Defects4J uses one Docker-based authority split into pinned materializer
+    and verifier images. The verifier image retains only framework metadata
+    needed by `defects4j test` and removes gold patches and localization hints.
+    Qualification binds both image IDs, framework revision, source roots,
+    stable fixed-revision failure baseline, triggering tests, and raw commands
+    into immutable receipts. Generated patches pass only when no failure
+    outside that baseline remains.
+  - Holdout identity and case-level evidence are authenticated encrypted Guard
+    artifacts. Seal and Guard execution require a clean checkout at the
+    configured trusted ref and bind its Git tree, machine constitution, and
+    harness digest. Operator may import only a human-secret-signed aggregate
+    whose Study/line/budget binding matches current service state.
+  - Production Codex SDK nodes run in bounded Python worker processes. The
+    parent service enforces timeouts and retains request/result/stdout/stderr;
+    no production path may replace this with `codex exec` or an in-process
+    unbounded call.
+  - Production SDK processes run in Bubblewrap with an empty host home. The
+    trusted source/venv/Python runtime are read-only; role cwd permissions,
+    authority hiding, and linked-worktree Git metadata are explicit
+    service-owned mounts. A read-only role must be read-only at both the Codex
+    sandbox and OS mount layers. A workspace-write role must fail closed when
+    its cwd is the trusted control root. When an allowed log or Git metadata
+    child is nested below a hidden authority root, mount order is broad
+    ancestor, hidden authority, then exact allowed child; sibling authority
+    state must remain absent.
 
 ### 4. Validation & Error Matrix
 
@@ -125,13 +152,22 @@
 - Production CLI defaulting to fake backend -> invalid production behavior.
 - Missing verifier command -> invalid repo profile.
 - No raw logs/events/artifacts for a run -> invalid observability.
+- Official verifier output stored only in a temporary directory -> invalid
+  benchmark observability.
 - Memory auto-approves its own proposal -> invalid memory loop behavior.
 - Memory collects an unaccepted/failed/active task -> invalid memory input.
 - Eval creates a second task state machine -> invalid eval loop behavior.
 - Operator changes main directly -> invalid operator loop behavior.
+- Workspace-write Codex role targets the trusted control root -> fail before
+  worker launch.
+- Reopening one role log directory exposes sibling authority records ->
+  invalid SDK filesystem isolation.
 - Operator or Writer edits line/budget/checkpoint authority directly, reuses a
   grant across studies, or transfers treatment between `H_bug` and
   `H_general` -> invalid operator experiment behavior.
+- Guard decrypts Holdout state before validating its trusted code identity, or
+  Operator accepts an unsigned/self-authored benchmark metric -> invalid Guard
+  behavior.
 - New task starts without restating this baseline -> process violation.
 
 ### 5. Good/Base/Bad Cases
@@ -155,6 +191,8 @@
   task or memory files directly.
 - Unit tests for role/config resolution before Codex requests.
 - Integration tests for worktree isolation and verifier command execution.
+- Bubblewrap tests for OS-level read-only cwd, writable task worktree, linked
+  Git metadata, hidden host home, and exact-child authority reopening.
 - Memory tests for collect/digest/maintain/proposal/approve separation.
 - Eval tests that call real execution-loop surfaces with a fake backend only in
   tests, then write generated/oracle artifacts and reports.

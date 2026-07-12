@@ -67,6 +67,7 @@ def make_toy_repo(root: Path) -> Path:
     run(["git", "-C", str(seed), "config", "user.email", "toy@example.com"])
     run(["git", "-C", str(seed), "config", "user.name", "Toy User"])
     (seed / "calc.py").write_text("def add(a, b):\n    return a + b + 1\n", encoding="utf-8")
+    (seed / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
     (seed / "test_calc.py").write_text(
         "import unittest\nfrom calc import add\n\nclass CalcTest(unittest.TestCase):\n"
         "    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n",
@@ -76,6 +77,7 @@ def make_toy_repo(root: Path) -> Path:
     run(["git", "-C", str(seed), "commit", "-m", "base bug"])
     run(["git", "-C", str(seed), "remote", "add", "origin", str(remote)])
     run(["git", "-C", str(seed), "push", "-u", "origin", "main"])
+    run(["git", "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"])
     run(["git", "clone", str(remote), str(main)])
     run(["git", "-C", str(main), "config", "user.email", "toy@example.com"])
     run(["git", "-C", str(main), "config", "user.name", "Toy User"])

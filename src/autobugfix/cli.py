@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import importlib.metadata
 import json
 import sys
@@ -15,6 +16,7 @@ from autobugfix.dataset import build_raw_dataset
 from autobugfix.eval.diagnosis import diagnose_run
 from autobugfix.eval.improvements import list_improvements, show_improvement, update_improvement
 from autobugfix.eval.runner import run_eval, score_path
+from autobugfix.eval.benchmarks.service import EvalBenchmarkService
 from autobugfix.eval.supervision import supervision_note
 from autobugfix.gradio_app import launch as launch_ui
 from autobugfix.memory.service import MemoryService
@@ -269,7 +271,84 @@ def command_dataset(args: argparse.Namespace) -> int:
 
 def command_eval(args: argparse.Namespace) -> int:
     action = args.eval_action
-    if action == "run":
+    if action == "benchmark":
+        service = EvalBenchmarkService(Path.cwd())
+        if args.benchmark_action == "doctor":
+            report = service.doctor(args.adapter)
+            _print_yaml(report)
+            return 0 if report["passed"] else 1
+        if args.benchmark_action == "preflight":
+            report = service.preflight(Path(args.manifest), case_selector=args.case)
+            _print_yaml(report)
+            return 0 if report["failed_count"] == 0 else 1
+        if args.benchmark_action == "seal":
+            if not sys.stdin.isatty():
+                raise RuntimeError(
+                    "Guard sealing requires an interactive trusted human terminal"
+                )
+            service.guard_authority()
+            secret = getpass.getpass(
+                "Guard secret (at least 16 bytes; never stored): "
+            )
+            confirmation = getpass.getpass("Confirm Guard secret: ")
+            if secret != confirmation:
+                raise RuntimeError("Guard secret confirmation did not match")
+            projects = tuple(
+                item.strip()
+                for item in getpass.getpass(
+                    "Private Holdout project pool (comma-separated; input is hidden): "
+                ).split(",")
+                if item.strip()
+            )
+            _print_yaml(
+                service.seal(
+                    Path(args.manifest),
+                    guard_secret=secret,
+                    holdout_projects=projects,
+                )
+            )
+            return 0
+        if args.benchmark_action == "guard-run":
+            if not sys.stdin.isatty():
+                raise RuntimeError(
+                    "Guard Holdout execution requires an interactive trusted human terminal"
+                )
+            service.guard_authority()
+            secret = getpass.getpass("Guard secret: ")
+            study_binding = (
+                _read_yaml_mapping(args.study_binding, "Guard Study binding")
+                if args.study_binding
+                else None
+            )
+            report = service.guard_run(
+                Path(args.manifest),
+                wave_token=args.wave_token,
+                out_root=Path(args.out),
+                run_id=args.run_id,
+                guard_secret=secret,
+                model=args.model,
+                max_attempts=args.max_attempts,
+                study_binding=study_binding,
+            )
+            _print_yaml(report)
+            return (
+                0
+                if report["failed_count"] == 0
+                and report["harness_error_count"] == 0
+                else 1
+            )
+        if args.benchmark_action == "run-case":
+            report = service.run_case(
+                Path(args.manifest),
+                case_selector=args.case,
+                out_root=Path(args.out),
+                run_id=args.run_id,
+                model=args.model,
+                max_attempts=args.max_attempts,
+            )
+            _print_yaml(report)
+            return 0 if report["report"].get("decision") == "pass" else 1
+    elif action == "run":
         run_dir = run_eval(
             Path.cwd(),
             Path(args.dataset),
@@ -281,6 +360,8 @@ def command_eval(args: argparse.Namespace) -> int:
             codex_timeout_seconds=args.codex_timeout_seconds,
             writer_timeout_seconds=args.writer_timeout_seconds,
             evaluator_timeout_seconds=args.evaluator_timeout_seconds,
+            model=args.model,
+            max_attempts=args.max_attempts,
         )
         print(run_dir)
         summary = yaml.safe_load((run_dir / "summary.yaml").read_text(encoding="utf-8")) or {}
@@ -377,6 +458,26 @@ def command_operator(args: argparse.Namespace) -> int:
             _print_yaml(service.study_status(args.study_id))
         elif args.study_action == "list":
             _print_yaml({"studies": service.list_studies()})
+        elif args.study_action == "guard-binding":
+            _print_yaml(
+                service.guard_study_binding(
+                    args.study_id,
+                    kind=args.kind,
+                )
+            )
+        elif args.study_action == "import-guard-metric":
+            if not sys.stdin.isatty():
+                raise RuntimeError(
+                    "Guard metric import requires an interactive trusted human terminal"
+                )
+            secret = getpass.getpass("Guard secret: ")
+            metric = service.register_signed_guard_metric(
+                args.study_id,
+                metric_path=args.metric,
+                kind=args.kind,
+                guard_secret=secret,
+            )
+            _print_yaml(service.study_metric_projection(metric))
     elif action == "line":
         if args.line_action == "init":
             _print_yaml(
@@ -802,6 +903,38 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_parser = sub.add_parser("eval")
     eval_sub = eval_parser.add_subparsers(dest="eval_action", required=True)
+    benchmark = eval_sub.add_parser("benchmark")
+    benchmark_sub = benchmark.add_subparsers(dest="benchmark_action", required=True)
+    benchmark_doctor = benchmark_sub.add_parser("doctor")
+    benchmark_doctor.add_argument("--adapter", default="defects4j", choices=["defects4j"])
+    benchmark_doctor.set_defaults(func=command_eval)
+    benchmark_preflight = benchmark_sub.add_parser("preflight")
+    benchmark_preflight.add_argument("--manifest", required=True)
+    benchmark_preflight.add_argument("--case")
+    benchmark_preflight.set_defaults(func=command_eval)
+    benchmark_seal = benchmark_sub.add_parser("seal")
+    benchmark_seal.add_argument("--manifest", required=True)
+    benchmark_seal.set_defaults(func=command_eval)
+    benchmark_guard_run = benchmark_sub.add_parser("guard-run")
+    benchmark_guard_run.add_argument("--manifest", required=True)
+    benchmark_guard_run.add_argument("--wave-token", required=True)
+    benchmark_guard_run.add_argument("--out", default=".autobugfix/guard-results")
+    benchmark_guard_run.add_argument("--run-id", required=True)
+    benchmark_guard_run.add_argument("--model", default="gpt-5.4-mini")
+    benchmark_guard_run.add_argument("--max-attempts", type=int, default=2)
+    benchmark_guard_run.add_argument(
+        "--study-binding",
+        help="Operator-derived Study binding YAML to include in the signed aggregate",
+    )
+    benchmark_guard_run.set_defaults(func=command_eval)
+    benchmark_run_case = benchmark_sub.add_parser("run-case")
+    benchmark_run_case.add_argument("--manifest", required=True)
+    benchmark_run_case.add_argument("--case", required=True)
+    benchmark_run_case.add_argument("--out", default=".autobugfix/eval-runs")
+    benchmark_run_case.add_argument("--run-id", required=True)
+    benchmark_run_case.add_argument("--model", default="gpt-5.4-mini")
+    benchmark_run_case.add_argument("--max-attempts", type=int, default=2)
+    benchmark_run_case.set_defaults(func=command_eval)
     erun = eval_sub.add_parser("run")
     erun.add_argument("--dataset", required=True)
     erun.add_argument("--case")
@@ -812,6 +945,8 @@ def build_parser() -> argparse.ArgumentParser:
     erun.add_argument("--codex-timeout-seconds", type=int)
     erun.add_argument("--writer-timeout-seconds", type=int)
     erun.add_argument("--evaluator-timeout-seconds", type=int)
+    erun.add_argument("--model")
+    erun.add_argument("--max-attempts", type=int, default=1)
     erun.set_defaults(func=command_eval)
     escore = eval_sub.add_parser("score")
     escore.add_argument("path")
@@ -888,6 +1023,21 @@ def build_parser() -> argparse.ArgumentParser:
     study_list = study_sub.add_parser("list")
     governance_options(study_list)
     study_list.set_defaults(func=command_operator)
+    study_guard_binding = study_sub.add_parser("guard-binding")
+    governance_options(study_guard_binding)
+    study_guard_binding.add_argument("--study-id", required=True)
+    study_guard_binding.add_argument(
+        "--kind", choices=["BASELINE", "CANDIDATE"], required=True
+    )
+    study_guard_binding.set_defaults(func=command_operator)
+    study_import_guard = study_sub.add_parser("import-guard-metric")
+    governance_options(study_import_guard)
+    study_import_guard.add_argument("--study-id", required=True)
+    study_import_guard.add_argument("--metric", required=True)
+    study_import_guard.add_argument(
+        "--kind", choices=["BASELINE", "CANDIDATE"], required=True
+    )
+    study_import_guard.set_defaults(func=command_operator)
 
     line = operator_sub.add_parser("line")
     line_sub = line.add_subparsers(dest="line_action", required=True)

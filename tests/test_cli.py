@@ -50,3 +50,55 @@ def test_eval_cli_does_not_expose_a_production_fake_backend():
                 "fake",
             ]
         )
+
+
+def test_defects4j_run_case_cli_forwards_bounded_production_options(
+    tmp_path, monkeypatch, capsys
+):
+    project_root, _ = make_service_project(tmp_path)
+    manifest = project_root / "seed.yaml"
+    manifest.write_text("schema_version: 1\n", encoding="utf-8")
+    captured = {}
+
+    def fake_run_case(self, manifest_path, **kwargs):
+        del self
+        captured["manifest"] = manifest_path
+        captured.update(kwargs)
+        return {"report": {"decision": "pass"}, "run_dir": "/tmp/eval-run"}
+
+    monkeypatch.setattr(
+        "autobugfix.cli.EvalBenchmarkService.run_case",
+        fake_run_case,
+    )
+    monkeypatch.chdir(project_root)
+
+    exit_code = main(
+        [
+            "eval",
+            "benchmark",
+            "run-case",
+            "--manifest",
+            str(manifest),
+            "--case",
+            "d4j-jsoup-2",
+            "--out",
+            ".autobugfix/eval-runs",
+            "--run-id",
+            "h0-jsoup-2",
+            "--model",
+            "gpt-5.4-mini",
+            "--max-attempts",
+            "2",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured == {
+        "manifest": manifest,
+        "case_selector": "d4j-jsoup-2",
+        "out_root": Path(".autobugfix/eval-runs"),
+        "run_id": "h0-jsoup-2",
+        "model": "gpt-5.4-mini",
+        "max_attempts": 2,
+    }
+    assert "decision: pass" in capsys.readouterr().out

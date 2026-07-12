@@ -5,12 +5,13 @@ from pathlib import Path
 from autobugfix.codex_backend import CodexBackend
 from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.config import load_config
-from autobugfix.git_utils import ensure_git_repo
+from autobugfix.git_utils import ensure_git_repo, rev_parse
 from autobugfix.models import RUNNABLE_STATES, AutobugfixConfig, TaskRecord
 from autobugfix.ppe import deploy_ppe as run_ppe_deploy
 from autobugfix.runner import TaskRunner
 from autobugfix.task_store import TaskStore
-from autobugfix.worktree import create_task_worktree
+from autobugfix.verifier import ExecutionVerifierBackend
+from autobugfix.worktree import create_task_worktree, ignored_paths
 
 
 class ServiceError(RuntimeError):
@@ -23,17 +24,38 @@ class AutobugfixService:
         project_root: Path | str = ".",
         config: AutobugfixConfig | None = None,
         backend: CodexBackend | None = None,
+        verifier_backend: ExecutionVerifierBackend | None = None,
+        sdk_hidden_paths: tuple[Path, ...] = (),
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.config = config or load_config(self.project_root)
         self.store = TaskStore(self.project_root, self.config.task_root)
         self.backend = backend or CodexSDKBackend()
+        self.verifier_backend = verifier_backend
+        self.sdk_hidden_paths = tuple(path.resolve() for path in sdk_hidden_paths)
 
-    def create_task(self, repo_id: str, title: str, body: str) -> TaskRecord:
+    def create_task(
+        self,
+        repo_id: str,
+        title: str,
+        body: str,
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> TaskRecord:
         repo = self.config.repo(repo_id)
         ensure_git_repo(repo.main_checkout)
         task_id = self.store.new_task_id(title)
         branch, worktree_path = create_task_worktree(repo, task_id, title)
+        task_metadata = dict(metadata or {})
+        task_metadata.setdefault("origin", "execution")
+        task_metadata.setdefault(
+            "memory_eligible",
+            task_metadata["origin"] == "execution",
+        )
+        if task_metadata["origin"] == "eval":
+            task_metadata["memory_eligible"] = False
+        task_metadata["base_commit"] = rev_parse(worktree_path, "HEAD")
+        task_metadata["initial_ignored_paths"] = list(ignored_paths(worktree_path))
         record = TaskRecord(
             task_id=task_id,
             repo_id=repo_id,
@@ -43,6 +65,7 @@ class AutobugfixService:
             branch=branch,
             worktree_path=str(worktree_path),
             main_checkout=str(repo.main_checkout),
+            metadata=task_metadata,
         )
         self.store.create(record)
         self.store.append_event(task_id, "worktree_created", {"branch": branch, "path": str(worktree_path)})
@@ -65,7 +88,13 @@ class AutobugfixService:
         record = self.store.load(task_id)
         if record.state not in RUNNABLE_STATES:
             raise ServiceError(f"task {task_id} is not runnable from state {record.state}")
-        return TaskRunner(self.config, self.store, self.backend).run(task_id)
+        return TaskRunner(
+            self.config,
+            self.store,
+            self.backend,
+            verifier_backend=self.verifier_backend,
+            sdk_hidden_paths=self.sdk_hidden_paths,
+        ).run(task_id)
 
     def apply_gate(self, task_id: str, action: str) -> TaskRecord:
         record = self.store.load(task_id)

@@ -4,6 +4,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -19,10 +20,14 @@ import yaml
 
 from autobugfix.codex_backend import CodexBackend
 from autobugfix.codex_runtime import build_codex_request
-from autobugfix.codex_sdk import CodexSDKBackend
+from autobugfix.codex_sdk import (
+    CodexSDKBackend,
+    private_text_writer,
+    write_private_text,
+)
 from autobugfix.config import load_config
 from autobugfix.evaluator import parse_evaluator_decision
-from autobugfix.git_utils import GitError, rev_parse, run_git
+from autobugfix.git_utils import GitError, git_common_dir, rev_parse, run_git
 from autobugfix.models import utc_now
 from autobugfix.models import CodexRequest, CodexResult
 from autobugfix.operator.approvals import (
@@ -90,6 +95,36 @@ from autobugfix.role_config import resolve_role
 
 class OperatorGovernanceError(RuntimeError):
     pass
+
+
+_METRIC_CONDITION = re.compile(r"^(<=|>=|==|!=|<|>)\s*(-?(?:\d+(?:\.\d*)?|\.\d+))$")
+
+
+def _metric_condition_passes(actual: bool | int | float, expected: Any) -> bool:
+    if isinstance(expected, bool):
+        return actual is expected
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        return float(actual) == float(expected)
+    if not isinstance(expected, str):
+        raise OperatorGovernanceError(
+            "success contract values must be booleans, numbers, or numeric comparisons"
+        )
+    match = _METRIC_CONDITION.fullmatch(expected.strip())
+    if match is None:
+        raise OperatorGovernanceError(
+            f"unsupported success contract comparison: {expected!r}"
+        )
+    operator, raw_threshold = match.groups()
+    observed = float(actual)
+    threshold = float(raw_threshold)
+    return {
+        "<": observed < threshold,
+        "<=": observed <= threshold,
+        "==": observed == threshold,
+        "!=": observed != threshold,
+        ">=": observed >= threshold,
+        ">": observed > threshold,
+    }[operator]
 
 
 def _default_expiry(hours: int = 24) -> str:
@@ -497,6 +532,9 @@ class OperatorGovernanceService:
         data.pop("artifact_path", None)
         return data
 
+    def study_metric_projection(self, metric: StudyMetricRecord) -> dict[str, Any]:
+        return self._metric_projection(metric)
+
     @staticmethod
     def _load_study_metric_receipt(content: bytes) -> dict[str, Any]:
         try:
@@ -688,6 +726,249 @@ class OperatorGovernanceService:
         )
         self.store.write_study_metric(metric)
         return metric
+
+    def guard_study_binding(
+        self,
+        study_id: str,
+        *,
+        kind: str,
+    ) -> dict[str, Any]:
+        """Derive the non-authoritative binding that an external Guard signs."""
+
+        if kind not in {"BASELINE", "CANDIDATE"}:
+            raise OperatorGovernanceError(
+                "Guard study binding kind must be BASELINE or CANDIDATE"
+            )
+        study = self.store.read_study(study_id)
+        self._validated_study_memory_snapshot(study)
+        self._validated_study_manifest_snapshot(study)
+        payload: dict[str, Any] = {
+            "schema": "autobugfix-guard-study-binding-v1",
+            "kind": kind,
+            "study_id": study.study_id,
+            "line_id": study.line_id,
+            "subject_sha": study.base_subject_sha,
+            "manifest_digest": study.manifest_digest,
+            "success_contract_digest": digest_payload(study.success_contract),
+            "budget_grant_id": None,
+            "budget_digest": None,
+            "wave": None,
+        }
+        if kind == "BASELINE":
+            if self.store.read_experiment_lines(study.study_id):
+                raise OperatorGovernanceError(
+                    "H0 Guard binding must be created before line initialization"
+                )
+        else:
+            line = self.store.read_experiment_line(study.line_id)
+            integrations = self.store.read_integrations(line.line_id)
+            if (
+                not integrations
+                or integrations[-1].kind != "CANDIDATE"
+                or integrations[-1].result_head_sha != line.head_sha
+            ):
+                raise OperatorGovernanceError(
+                    "candidate Guard binding requires the current candidate integration"
+                )
+            grants = self.store.read_budget_grants(study.study_id)
+            if not grants:
+                raise OperatorGovernanceError(
+                    "candidate Guard binding requires a study budget grant"
+                )
+            grant = grants[-1]
+            payload.update(
+                {
+                    "subject_sha": line.head_sha,
+                    "budget_grant_id": grant.grant_id,
+                    "budget_digest": grant.grant_digest,
+                    "wave": grant.wave,
+                }
+            )
+        return {**payload, "record_digest": digest_payload(payload)}
+
+    def register_signed_guard_metric(
+        self,
+        study_id: str,
+        *,
+        metric_path: Path | str,
+        kind: str,
+        guard_secret: str | bytes,
+    ) -> StudyMetricRecord:
+        """Verify a real Guard HMAC and import its aggregate as Study authority."""
+
+        from autobugfix.eval.benchmarks.authority import GuardCodeIdentity
+        from autobugfix.eval.benchmarks.guard import verify_signed_metric
+        from autobugfix.eval.benchmarks.models import BenchmarkContractError
+
+        source = Path(metric_path)
+        if not source.is_absolute():
+            source = self.project_root / source
+        source = source.resolve()
+        if not source.is_file():
+            raise OperatorGovernanceError(
+                f"signed Guard metric does not exist: {source}"
+            )
+        try:
+            raw = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise OperatorGovernanceError(
+                "signed Guard metric is not valid YAML"
+            ) from exc
+        if not isinstance(raw, Mapping):
+            raise OperatorGovernanceError("signed Guard metric must be a mapping")
+        try:
+            verify_signed_metric(raw, guard_secret)
+        except BenchmarkContractError as exc:
+            raise OperatorGovernanceError(
+                f"signed Guard metric authentication failed: {exc}"
+            ) from exc
+        if raw.get("schema") != "autobugfix-guard-metric-v2":
+            raise OperatorGovernanceError("unsupported signed Guard metric schema")
+        binding = raw.get("study_binding")
+        if not isinstance(binding, Mapping):
+            raise OperatorGovernanceError(
+                "signed Guard metric is missing its Study binding"
+            )
+        expected_binding = self.guard_study_binding(study_id, kind=kind)
+        if dict(binding) != expected_binding:
+            raise OperatorGovernanceError(
+                "signed Guard metric does not match current Study/line/budget authority"
+            )
+        study = self.store.read_study(study_id)
+        raw_identity = raw.get("guard_code_identity")
+        if not isinstance(raw_identity, Mapping):
+            raise OperatorGovernanceError(
+                "signed Guard metric is missing its control-plane identity"
+            )
+        try:
+            code_identity = GuardCodeIdentity.from_dict(raw_identity)
+        except BenchmarkContractError as exc:
+            raise OperatorGovernanceError(
+                f"signed Guard code identity is invalid: {exc}"
+            ) from exc
+        if (
+            code_identity.trusted_commit != study.harness_sha
+            or code_identity.machine_constitution_digest != study.policy_digest
+        ):
+            raise OperatorGovernanceError(
+                "signed Guard metric was not produced by the frozen Study harness/policy"
+            )
+        if raw.get("executed_subject_sha") != expected_binding["subject_sha"]:
+            raise OperatorGovernanceError(
+                "signed Guard metric did not execute the bound Study subject SHA"
+            )
+        raw_metrics = raw.get("metrics")
+        if not isinstance(raw_metrics, Mapping) or not raw_metrics:
+            raise OperatorGovernanceError(
+                "signed Guard metric requires aggregate scalar metrics"
+            )
+        metrics: dict[str, bool | int | float | None] = {}
+        for key, value in raw_metrics.items():
+            name = str(key).strip()
+            if not name or not isinstance(value, (bool, int, float, type(None))):
+                raise OperatorGovernanceError(
+                    "signed Guard metrics must contain aggregate scalar values"
+                )
+            metrics[name] = value
+
+        success: bool | None = None
+        if kind == "CANDIDATE":
+            baseline_records = [
+                item
+                for item in self.store.read_study_metrics(study.study_id)
+                if item.kind == "BASELINE"
+            ]
+            if not baseline_records:
+                raise OperatorGovernanceError(
+                    "candidate Guard metric requires a registered H0 metric"
+                )
+            _, baseline_receipt = self._registered_metric_receipt(
+                baseline_records[-1].metric_id
+            )
+            baseline_metrics = baseline_receipt.get("metrics") or {}
+            if not isinstance(baseline_metrics, Mapping):
+                raise OperatorGovernanceError("registered H0 aggregate is invalid")
+            derived = dict(metrics)
+            for key, value in metrics.items():
+                baseline = baseline_metrics.get(key)
+                if (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and isinstance(baseline, (int, float))
+                    and not isinstance(baseline, bool)
+                ):
+                    derived[f"{key}_delta"] = float(value) - float(baseline)
+            failed_conditions = []
+            for key, expected in study.success_contract.items():
+                actual = derived.get(str(key))
+                if not isinstance(actual, (bool, int, float)):
+                    raise OperatorGovernanceError(
+                        f"success contract metric is absent from Guard aggregate: {key}"
+                    )
+                if not _metric_condition_passes(actual, expected):
+                    failed_conditions.append(str(key))
+            if failed_conditions:
+                raise OperatorGovernanceError(
+                    "signed Guard metric does not satisfy the Study success contract: "
+                    + ", ".join(sorted(failed_conditions))
+                )
+            metrics = derived
+            success = True
+
+        normalized: dict[str, Any] = {
+            "schema": (
+                "autobugfix-study-baseline-v1"
+                if kind == "BASELINE"
+                else "autobugfix-study-metric-v1"
+            ),
+            "study_id": expected_binding["study_id"],
+            "line_id": expected_binding["line_id"],
+            "subject_sha": expected_binding["subject_sha"],
+            "manifest_digest": expected_binding["manifest_digest"],
+            "success_contract_digest": expected_binding[
+                "success_contract_digest"
+            ],
+            "metrics": metrics,
+            "guard_run_id": str(raw.get("run_id") or ""),
+            "evidence_digest": str(raw.get("record_digest") or ""),
+        }
+        if kind == "CANDIDATE":
+            normalized.update(
+                {
+                    "wave": expected_binding["wave"],
+                    "budget_grant_id": expected_binding["budget_grant_id"],
+                    "budget_digest": expected_binding["budget_digest"],
+                    "success_contract_passed": success,
+                }
+            )
+        normalized["receipt_digest"] = digest_payload(normalized)
+        temporary = (
+            self.config.operator.artifacts.root
+            / "guard-import"
+            / f"{raw['record_digest']}.yaml"
+        )
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        if temporary.exists():
+            existing = yaml.safe_load(temporary.read_text(encoding="utf-8")) or {}
+            if existing != normalized:
+                raise OperatorGovernanceError(
+                    "content-addressed Guard import path contains different data"
+                )
+        else:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(yaml.safe_dump(normalized, sort_keys=False))
+                stream.flush()
+                os.fsync(stream.fileno())
+        return self.register_guard_metric_receipt(
+            study_id,
+            receipt_path=temporary,
+            kind=kind,
+        )
 
     def _registered_metric_receipt(
         self,
@@ -3082,42 +3363,35 @@ class OperatorGovernanceService:
         root = request.raw_log_path.parent
         request_path = root / "sdk-request.json"
         result_path = root / "sdk-result.json"
-        request_path.write_text(
-            json.dumps(
-                {
-                    "role": request.role,
-                    "prompt": request.prompt,
-                    "cwd": str(request.cwd),
-                    "sandbox": request.sandbox,
-                    "model": request.model,
-                    "timeout_seconds": request.timeout_seconds,
-                    "developer_instructions": request.developer_instructions,
-                    "raw_log_path": str(request.raw_log_path),
-                    "stderr_log_path": str(request.stderr_log_path),
-                    "approval_mode": request.approval_mode,
-                },
-                sort_keys=True,
-            ),
-            encoding="utf-8",
+        if result_path.exists():
+            result_path.unlink()
+        write_private_text(
+            request_path,
+            json.dumps(self.backend.worker_request_payload(request), sort_keys=True),
         )
-        request_path.chmod(0o600)
         worker_stdout = root / "sdk-worker.stdout.log"
         worker_stderr = root / "sdk-worker.stderr.log"
-        request.raw_log_path.touch(exist_ok=True)
-        request.stderr_log_path.touch(exist_ok=True)
-        stdout_handle = worker_stdout.open("w", encoding="utf-8")
-        stderr_handle = worker_stderr.open("w", encoding="utf-8")
+        with private_text_writer(request.raw_log_path, "a"):
+            pass
+        with private_text_writer(request.stderr_log_path, "a"):
+            pass
+        stdout_handle = private_text_writer(worker_stdout)
+        stderr_handle = private_text_writer(worker_stderr)
+        worker_argv = [
+            sys.executable,
+            "-m",
+            "autobugfix.codex_sdk_worker",
+            "--request",
+            str(request_path),
+            "--result",
+            str(result_path),
+        ]
+        if self.backend.module_name:
+            worker_argv.extend(("--module-name", self.backend.module_name))
         process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "autobugfix.codex_sdk_worker",
-                "--request",
-                str(request_path),
-                "--result",
-                str(result_path),
-            ],
+            self.backend.worker_launch_argv(request, worker_argv),
             cwd=self.project_root,
+            env=self.backend.prepare_worker_environment(request),
             text=True,
             stdout=stdout_handle,
             stderr=stderr_handle,
@@ -3128,17 +3402,24 @@ class OperatorGovernanceService:
         def terminate() -> None:
             if process.poll() is not None:
                 return
-            if os.name != "nt":
-                os.killpg(process.pid, signal.SIGTERM)
-            else:
-                process.terminate()
+            try:
+                if os.name != "nt":
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    process.terminate()
+            except ProcessLookupError:
+                return
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                if os.name != "nt":
-                    os.killpg(process.pid, signal.SIGKILL)
-                else:
-                    process.kill()
+                try:
+                    if os.name != "nt":
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
+                except ProcessLookupError:
+                    return
+                process.wait(timeout=10)
 
         stdout = ""
         stderr = ""
@@ -3151,16 +3432,19 @@ class OperatorGovernanceService:
                     terminate()
                     raise TimeoutError(f"WriterRun timed out after {request.timeout_seconds} seconds")
                 time.sleep(0.25)
+        except BaseException:
+            terminate()
+            raise
         finally:
             stdout_handle.close()
             stderr_handle.close()
             stdout = worker_stdout.read_text(encoding="utf-8")
             stderr = worker_stderr.read_text(encoding="utf-8")
             if stdout:
-                with request.raw_log_path.open("a", encoding="utf-8") as handle:
+                with private_text_writer(request.raw_log_path, "a") as handle:
                     handle.write(json.dumps({"kind": "sdk_worker_stdout", "text": stdout}) + "\n")
             if stderr:
-                with request.stderr_log_path.open("a", encoding="utf-8") as handle:
+                with private_text_writer(request.stderr_log_path, "a") as handle:
                     handle.write(stderr)
         if process.returncode != 0 or not result_path.is_file():
             raise OperatorGovernanceError(
@@ -3225,6 +3509,7 @@ class OperatorGovernanceService:
                 raw_log,
                 stderr_log,
                 resolved_role=role,
+                expected_git_common_dir=git_common_dir(self.project_root),
             )
         try:
             result = self._run_operator_role_backend(
@@ -3297,7 +3582,7 @@ class OperatorGovernanceService:
                     request_id, "writer_completed", "trusted-host", {"run_id": run_id}
                 )
                 return completed.to_dict()
-        except Exception as exc:
+        except BaseException as exc:
             with self.store.request_lease(request_id):
                 current = self.store.read_writer_run(run_id)
                 if current.status == "CANCELLED":
@@ -3343,6 +3628,8 @@ class OperatorGovernanceService:
                     "trusted-host",
                     {"feedback_id": feedback.feedback_id},
                 )
+            if not isinstance(exc, Exception):
+                raise
             raise OperatorGovernanceError(f"operator writer failed: {exc}") from exc
 
     def retry_writer(self, request_id: str, *, actor: str | None = None) -> dict[str, Any]:
