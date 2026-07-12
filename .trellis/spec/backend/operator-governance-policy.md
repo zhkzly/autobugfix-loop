@@ -77,9 +77,11 @@ target state.
 - WriterView excludes control-store paths and exposes only task, evidence,
   effective scope, filtered checks, and feedback.
 - Authoritative commands run in a separate detached verification worktree.
-  Bubblewrap mounts the candidate writable, hides authority roots, removes
-  network by default, and binds the trusted runtime venv read-only while
-  `PYTHONPATH` selects candidate source.
+  Bubblewrap mounts the candidate writable, overlays hidden authority roots,
+  then overlays exact writable grants and the trusted runtime venv read-only.
+  A later broad candidate mount must never shadow an authority mask or exact
+  runtime grant. Network is removed by default and `PYTHONPATH` selects
+  candidate source.
 
 #### Roles
 
@@ -101,7 +103,9 @@ Project config may choose model/timeouts but may not weaken permission minima.
 2. `triage`: record evidence-backed diagnosis without granting write scope.
 3. `baseline record`: execute a configured experiment profile on the frozen
    trusted ref and derive an immutable host-observed metric receipt containing
-   the executable profile contract.
+   the executable profile contract. Every configured command must execute and
+   pass; an empty, failed, or timed-out profile retains logs but must not write
+   a publishable baseline receipt.
 4. Baseline publication: a human or trusted CI publisher reviews and commits
    the protected receipt to the trusted base. Operator Writer cannot publish
    it. The measured SHA may differ from the request base only by intervening

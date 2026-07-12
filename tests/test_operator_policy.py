@@ -23,7 +23,11 @@ from autobugfix.operator.models import OperatorModelError, digest_payload
 from autobugfix.operator.service import OperatorGovernanceError, OperatorGovernanceService
 from autobugfix.operator.store import OperatorStoreError
 from autobugfix.operator.trusted import load_trusted_policy
-from autobugfix.operator.validator import OperatorValidationError, _run_command
+from autobugfix.operator.validator import (
+    OperatorValidationError,
+    _run_command,
+    run_command_specs,
+)
 from autobugfix.operator.workspace import create_operator_workspace
 
 
@@ -1284,6 +1288,71 @@ def test_behavior_scope_requires_baseline_and_patch_bound_experiment(tmp_path: P
 
 def test_failed_profile_cannot_be_published_as_trusted_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    monkeypatch.setattr(
+        "autobugfix.operator.service.run_command_specs",
+        lambda *args, **kwargs: [
+            {
+                "name": "failed-real-e2e",
+                "passed": False,
+                "timed_out": False,
+                "exit_code": 1,
+            }
+        ],
+    )
+
+    with pytest.raises(
+        OperatorGovernanceError,
+        match="trusted baseline profile did not pass: failed-real-e2e",
+    ):
+        service.capture_baseline("failed-baseline", profile="smoke")
+
+    assert not (root / ".autobugfix-baselines/failed-baseline.yaml").exists()
+
+
+def test_sandbox_exact_read_only_bind_overlays_candidate_root(tmp_path: Path):
+    if shutil.which("bwrap") is None:
+        pytest.skip("Bubblewrap is required for the Operator sandbox contract")
+    candidate = tmp_path / "candidate"
+    runtime = tmp_path / "trusted-runtime"
+    destination = candidate / ".venv"
+    candidate.mkdir()
+    destination.mkdir()
+    runtime.mkdir()
+    (destination / "marker.txt").write_text("candidate\n", encoding="utf-8")
+    (runtime / "marker.txt").write_text("trusted\n", encoding="utf-8")
+
+    results = run_command_specs(
+        candidate,
+        tmp_path / "logs",
+        [
+            {
+                "name": "read-runtime-overlay",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        f"assert Path({str(destination / 'marker.txt')!r}).read_text() "
+                        "== 'trusted\\n'"
+                    ),
+                ],
+            }
+        ],
+        values={},
+        process_sandbox="bubblewrap",
+        require_process_sandbox=True,
+        read_only_binds=((runtime, destination),),
+    )
+
+    assert results[0]["passed"] is True
+    assert (destination / "marker.txt").read_text(encoding="utf-8") == "candidate\n"
+
+
+def test_failed_profile_cannot_be_published_as_trusted_baseline(
+    tmp_path: Path, monkeypatch
 ):
     root = make_operator_repo(tmp_path)
     service = service_for(root, tmp_path)
