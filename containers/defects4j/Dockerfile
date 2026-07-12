@@ -50,9 +50,13 @@ RUN find /defects4j/framework/projects \
       -o -path '*/failing_tests/*' \
       -o -path '*/dependent_tests/*' \) \
       -type f -delete \
-    && rm -rf /defects4j/.git /defects4j/project_repos \
+    && find /defects4j/project_repos -mindepth 1 -maxdepth 1 \
+      ! -name README -exec rm -rf {} + \
+    && rm -rf /defects4j/.git \
     && test ! -d /defects4j/.git \
-    && test ! -d /defects4j/project_repos \
+    && test -f /defects4j/project_repos/README \
+    && test -z "$(find /defects4j/project_repos -mindepth 1 -maxdepth 1 \
+      ! -name README -print -quit)" \
     && test -z "$(find /defects4j/framework/projects -type f \
       \( -path '*/patches/*' \
       -o -path '*/modified_classes/*' \

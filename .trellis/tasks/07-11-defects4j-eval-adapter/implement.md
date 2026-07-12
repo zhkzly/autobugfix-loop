@@ -37,16 +37,27 @@
 - [x] Hide the host home and authority roots at the OS mount layer; expose only
       role cwd, exact log roots, and service-verified linked-worktree Git
       metadata. Reject workspace-write at the trusted control root.
-- [ ] Re-run final post-hardening Docker E2E after Docker Desktop image inspect
-      recovers; latest doctor fails closed because the materializer cannot be
-      inspected and the verifier image is unavailable. Receipt:
-      `.autobugfix/trusted-eval-cases/doctor/defects4j/425ace3ea754e152c2314a1bf12e2e8d1f1b3804653228e93cb4b574d7c60240.yaml`.
+- [x] Re-run the post-hardening Docker doctor with native WSL Docker. Both
+      immutable roles, Java 11, verifier sanitization, framework initialization,
+      and disk checks passed; doctor receipt digest:
+      `1bab311007163b648206ef0769ffb526577ab6c02ebd7123dd7cfdeea425fbc6`.
+- [x] Fix native bind-mount checkout to run as the host UID/GID with ephemeral
+      in-container Git safety configuration; no privileged ownership repair.
+- [x] Retain digest-bound checkout metadata in the trusted Eval root and inject
+      it only into the isolated verifier copy. Reject candidate-authored or
+      changed verifier metadata and clean the injected copy after every check.
+- [x] Run final real `d4j-jsoup-2` E2E with the production Python Codex SDK and
+      `gpt-5.4-mini`. Three bounded Writer attempts consumed real official-test
+      feedback; the final official suite and independent oracle passed, the
+      read-only evaluator passed, target main stayed clean, the task stopped at
+      `waiting_human_ppe_approval`, `gold_diff_equal` was false, and the run
+      reported `harness_error_count: 0` plus artifact completeness `1.0`.
 
 ## Phase 5: project gates and review
 
 - [x] Update README, example config, role skill, task design, and constitution.
-- [x] Run full unit suite (`165 passed` after the final explicit control-root
-      regression test).
+- [x] Run full unit suite (`167 passed` after native-checkout and trusted
+      verifier-metadata regressions were added).
 - [x] Run compileall, diff check, and role validator. Operator policy CLI still
       requires a real request/bundle rather than a context-free invocation.
 - [x] Run the production `gpt-5.4-mini` public-repository E2E: isolated
@@ -59,6 +70,9 @@
       portability/privacy, and acceptance reviewer passes using six real
       subagents; address their Guard/runtime findings in the main session.
 - [x] Re-run all static gates after runtime and authority edits.
+- [ ] Seal and qualify the final 10 Optimization + 6 Holdout case suite; the
+      successful single-case E2E proves the direct path but is not the complete
+      Experiment 1 dataset.
 - [ ] Commit and push the adapter branch after all available gates pass.
 
 ## Rollback Points

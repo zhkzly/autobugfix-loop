@@ -447,7 +447,9 @@ class Defects4JRuntime:
                     "/bin/sh",
                     "-c",
                     "test ! -d /defects4j/.git "
-                    "&& test ! -d /defects4j/project_repos "
+                    "&& test -f /defects4j/project_repos/README "
+                    "&& test -z \"$(find /defects4j/project_repos -mindepth 1 "
+                    "-maxdepth 1 ! -name README -print -quit)\" "
                     "&& test -z \"$(find /defects4j/framework/projects -type f "
                     "\\( -path '*/patches/*' -o -path '*/modified_classes/*' "
                     "-o -path '*/loaded_classes/*' -o -path '*/relevant_tests/*' "
@@ -464,9 +466,26 @@ class Defects4JRuntime:
                 self._check(
                     "verifier_sanitization",
                     verifier_sanitized,
-                    expected="no Git history, project repositories, or developer patches",
+                    expected=(
+                        "no Git history, project repository content, or developer patches"
+                    ),
                     predicate=verifier_sanitized.passed,
                     observed=observed_verifier,
+                )
+            )
+            verifier_info = self._run_container(
+                ["defects4j", "info", "-p", "Lang"],
+                artifact_root=artifact_root,
+                name="verifier-framework-info",
+                image=self.verifier_runtime_id,
+                timeout_seconds=120,
+            )
+            checks.append(
+                self._check(
+                    "verifier_framework_info",
+                    verifier_info,
+                    expected="sanitized verifier can initialize Defects4J",
+                    predicate="Lang" in self._output(verifier_info),
                 )
             )
             java = self._run_container(
@@ -644,41 +663,40 @@ class Defects4JRuntime:
                 f"checkout destination already exists: {destination}"
             )
         destination.parent.mkdir(parents=True, exist_ok=True)
-        checkout = self._run_container(
-            [
-                "defects4j",
-                "checkout",
-                "-p",
+        user = self._current_user()
+        destination_path = f"/workspace/{destination.name}"
+        command = [
+            "defects4j",
+            "checkout",
+            "-p",
+            project,
+            "-v",
+            version,
+            "-w",
+            destination_path,
+        ]
+        if user is not None:
+            command = [
+                "/bin/sh",
+                "-eu",
+                "-c",
+                (
+                    "git config --global --add safe.directory '*' "
+                    "&& exec defects4j checkout -p \"$1\" -v \"$2\" -w \"$3\""
+                ),
+                "autobugfix-checkout",
                 project,
-                "-v",
                 version,
-                "-w",
-                f"/workspace/{destination.name}",
-            ],
+                destination_path,
+            ]
+        checkout = self._run_container(
+            command,
             artifact_root=artifact_root,
             name=name,
             mounts=((destination.parent, "/workspace", False),),
+            user=user,
         )
         self._record_success(checkout, name=name, commands=commands)
-        user = self._current_user()
-        if user is not None:
-            ownership = self._run_container(
-                [
-                    "/bin/chown",
-                    "-R",
-                    f"{user[0]}:{user[1]}",
-                    f"/workspace/{destination.name}",
-                ],
-                artifact_root=artifact_root,
-                name=f"{name}-ownership",
-                mounts=((destination.parent, "/workspace", False),),
-                capabilities=("CHOWN", "FOWNER", "DAC_OVERRIDE"),
-            )
-            self._record_success(
-                ownership,
-                name=f"{name}-ownership",
-                commands=commands,
-            )
 
     def _export(
         self,
@@ -876,6 +894,8 @@ class Defects4JRuntime:
         gold_patch_sha256 = "unavailable"
         failure_evidence_path = "unavailable"
         failure_evidence_sha256 = "unavailable"
+        verifier_metadata_path = "unavailable"
+        verifier_metadata_sha256 = "unavailable"
         reproduction_command = "defects4j test -w /workspace"
         status = "harness_error"
         reason = ""
@@ -998,6 +1018,24 @@ class Defects4JRuntime:
                 observed_buggy,
                 observed_fixed,
             )
+            metadata_source = buggy / "defects4j.build.properties"
+            if not metadata_source.is_file() or metadata_source.is_symlink():
+                raise Defects4JEligibilityError(
+                    "Defects4J checkout has no trusted verifier metadata"
+                )
+            retained_metadata = case_root / "verifier/defects4j.build.properties"
+            retained_metadata.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(
+                retained_metadata,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(metadata_source.read_bytes())
+                stream.flush()
+                os.fsync(stream.fileno())
+            verifier_metadata_path = str(retained_metadata.resolve())
+            verifier_metadata_sha256 = digest_file(retained_metadata)
             patch = self._framework_text(
                 f"framework/projects/{case.project}/patches/{case.bug_id}.src.patch",
                 artifact_root=case_root / "commands",
@@ -1060,4 +1098,6 @@ class Defects4JRuntime:
             failure_evidence_path=failure_evidence_path,
             failure_evidence_sha256=failure_evidence_sha256,
             reproduction_command=reproduction_command,
+            verifier_metadata_path=verifier_metadata_path,
+            verifier_metadata_sha256=verifier_metadata_sha256,
         )

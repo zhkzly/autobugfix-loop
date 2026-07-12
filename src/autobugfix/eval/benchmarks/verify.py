@@ -19,6 +19,7 @@ from autobugfix.verifier import (
 from autobugfix.eval.benchmarks.defects4j import Defects4JError, Defects4JRuntime
 from autobugfix.eval.benchmarks.models import (
     BenchmarkContractError,
+    digest_file,
     record_with_digest,
     verify_record,
 )
@@ -38,6 +39,8 @@ class Defects4JVerifierContract:
     eligibility_receipt_digest: str
     source_roots: tuple[str, ...]
     baseline_failing_tests: tuple[str, ...]
+    verifier_metadata_path: str
+    verifier_metadata_sha256: str
     timeout_seconds: int
 
     def __post_init__(self) -> None:
@@ -60,6 +63,13 @@ class Defects4JVerifierContract:
             raise BenchmarkContractError("verifier source roots must not be empty")
         if self.timeout_seconds < 1:
             raise BenchmarkContractError("verifier timeout must be positive")
+        if not Path(self.verifier_metadata_path).is_absolute():
+            raise BenchmarkContractError("verifier metadata path must be absolute")
+        if len(self.verifier_metadata_sha256) != 64 or any(
+            value not in "0123456789abcdef"
+            for value in self.verifier_metadata_sha256
+        ):
+            raise BenchmarkContractError("verifier metadata digest must be sha256")
         for root in self.source_roots:
             path = Path(root)
             if path.is_absolute() or ".." in path.parts:
@@ -70,7 +80,7 @@ class Defects4JVerifierContract:
     def to_dict(self) -> dict[str, Any]:
         return record_with_digest(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "image_id": self.image_id,
                 "platform": self.platform,
                 "framework_revision": self.framework_revision,
@@ -79,6 +89,8 @@ class Defects4JVerifierContract:
                 "eligibility_receipt_digest": self.eligibility_receipt_digest,
                 "source_roots": list(self.source_roots),
                 "baseline_failing_tests": list(self.baseline_failing_tests),
+                "verifier_metadata_path": self.verifier_metadata_path,
+                "verifier_metadata_sha256": self.verifier_metadata_sha256,
                 "timeout_seconds": self.timeout_seconds,
             }
         )
@@ -86,7 +98,7 @@ class Defects4JVerifierContract:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Defects4JVerifierContract":
         verify_record(data)
-        if int(data.get("schema_version") or 0) != 2:
+        if int(data.get("schema_version") or 0) != 3:
             raise BenchmarkContractError("unsupported verifier contract schema")
         roots = data.get("source_roots")
         if not isinstance(roots, Sequence) or isinstance(roots, (str, bytes)):
@@ -103,6 +115,10 @@ class Defects4JVerifierContract:
             source_roots=tuple(str(item) for item in roots),
             baseline_failing_tests=tuple(
                 str(item) for item in data.get("baseline_failing_tests") or []
+            ),
+            verifier_metadata_path=str(data.get("verifier_metadata_path") or ""),
+            verifier_metadata_sha256=str(
+                data.get("verifier_metadata_sha256") or ""
             ),
             timeout_seconds=int(data.get("timeout_seconds") or 0),
         )
@@ -149,6 +165,8 @@ class Defects4JManagedVerifier:
                 eligibility_receipt_digest=self.contract.eligibility_receipt_digest,
                 source_roots=self.contract.source_roots,
                 baseline_failing_tests=self.contract.baseline_failing_tests,
+                verifier_metadata_path=self.contract.verifier_metadata_path,
+                verifier_metadata_sha256=self.contract.verifier_metadata_sha256,
                 timeout_seconds=timeout_seconds,
             )
         else:
@@ -192,6 +210,8 @@ def managed_verifier_for_receipt(
             eligibility_receipt_digest=receipt_digest,
             source_roots=receipt.source_roots,
             baseline_failing_tests=receipt.baseline_failing_tests,
+            verifier_metadata_path=receipt.verifier_metadata_path,
+            verifier_metadata_sha256=receipt.verifier_metadata_sha256,
             timeout_seconds=benchmark_config.command_timeout_seconds,
         )
     )
@@ -342,7 +362,13 @@ def run_official_verifier(
         )
     )
     injected_config = worktree / ".defects4j.config"
-    if injected_config.exists() or injected_config.is_symlink():
+    injected_metadata = worktree / "defects4j.build.properties"
+    if (
+        injected_config.exists()
+        or injected_config.is_symlink()
+        or injected_metadata.exists()
+        or injected_metadata.is_symlink()
+    ):
         return (
             False,
             (),
@@ -351,11 +377,23 @@ def run_official_verifier(
             + " candidate contains service-owned Defects4J metadata\n",
             3,
         )
+    metadata_source = Path(contract.verifier_metadata_path)
+    if metadata_source.is_symlink():
+        raise Defects4JError("trusted verifier metadata must not be a symlink")
+    metadata_source = metadata_source.resolve()
+    if (
+        not metadata_source.is_file()
+        or metadata_source == worktree
+        or metadata_source.is_relative_to(worktree)
+        or digest_file(metadata_source) != contract.verifier_metadata_sha256
+    ):
+        raise Defects4JError("trusted verifier metadata is missing or changed")
     injected_config.write_text(
         f"pid={contract.project}\nvid={contract.bug_id}b\n",
         encoding="utf-8",
     )
     try:
+        shutil.copyfile(metadata_source, injected_metadata)
         evidence, failures = runtime.verify_worktree(
             worktree,
             artifact_root=artifact_dir,

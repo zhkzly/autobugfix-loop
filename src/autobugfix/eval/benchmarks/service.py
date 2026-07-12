@@ -208,6 +208,7 @@ class EvalBenchmarkService:
                 "source_roots": list(receipt.source_roots),
                 "sanitized_base_sha": receipt.sanitized_base_sha,
                 "gold_patch_sha256": receipt.gold_patch_sha256,
+                "verifier_metadata_sha256": receipt.verifier_metadata_sha256,
                 "status": receipt.status,
             }
         )
