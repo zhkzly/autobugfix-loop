@@ -117,7 +117,16 @@ Built and froze an isolated direct openai-codex 0.1.0b3 comparator, ran 16 Defec
 
 ### Main Changes
 
-(Add details)
+- Added a separately locked direct `openai_codex` baseline and an Eval-owned
+  Bubblewrap control plane that freezes real Git diffs before official scoring.
+- Froze commit `9b144bb`, manifest digest `7dc74860255269adda3b3176bbece5f17c477c5802c4ddd9015d2e7005c99bd9`,
+  model `gpt-5.4-mini`, SDK `0.1.0b3`, prompt, timeout, case order, Docker IDs,
+  and the H0 report before formal generation.
+- Ran all 16 cases exactly once: primary H0 `11/13` versus Raw `10/13`;
+  all-case H0 `14/16` versus Raw `12/16`; zero harness errors, two timeouts,
+  and no oracle-to-generator feedback.
+- Retained the digest-bound local evidence under
+  `.autobugfix/raw-codex-baseline/formal-runs/raw-codex-formal-16-9b144bb`.
 
 ### Git Commits
 
@@ -128,7 +137,11 @@ Built and froze an isolated direct openai-codex 0.1.0b3 comparator, ran 16 Defec
 
 ### Testing
 
-- [OK] (Add test results)
+- [OK] Root test suite: `194 passed in 30.91s`
+- [OK] Standalone baseline suite: `6 passed in 0.35s`
+- [OK] Root and standalone `compileall`
+- [OK] `git diff --check`, role-skill validation, and Trellis task validation
+- [OK] 16/16 noninterference receipts passed; temporary auth bridges removed
 
 ### Status
 
@@ -136,4 +149,6 @@ Built and froze an isolated direct openai-codex 0.1.0b3 comparator, ran 16 Defec
 
 ### Next Steps
 
-- None - task complete
+- Keep this result immutable. Any H0 optimization or broader experiment must
+  use a separate branch and a newly frozen protocol rather than rerunning an
+  unfavorable case from this baseline.
