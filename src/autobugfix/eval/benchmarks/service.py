@@ -35,6 +35,10 @@ from autobugfix.eval.benchmarks.models import (
     BenchmarkCaseSeed,
     BenchmarkSeedManifest,
     EligibilityReceipt,
+    EvaluationSeedManifest,
+    PreparedEvaluationCase,
+    PreparedEvaluationManifest,
+    digest_file,
     digest_payload,
     record_with_digest,
     safe_component,
@@ -42,10 +46,15 @@ from autobugfix.eval.benchmarks.models import (
 )
 from autobugfix.eval.artifacts import write_yaml
 from autobugfix.eval.benchmarks.store import BenchmarkStore
-from autobugfix.eval.benchmarks.verify import managed_verifier_for_receipt
+from autobugfix.eval.benchmarks.verify import (
+    managed_verifier_for_receipt,
+    official_oracle_for_receipt,
+)
 from autobugfix.eval.runner import run_eval
 from autobugfix.eval.scorers import normalize_diff
+from autobugfix.git_utils import rev_parse, run_git
 from autobugfix.models import utc_now
+from autobugfix.role_config import resolve_role
 
 
 class EvalBenchmarkServiceError(RuntimeError):
@@ -110,13 +119,304 @@ class EvalBenchmarkService:
             Defects4JRuntime(self.config.eval.benchmarks),
         )
 
+    @staticmethod
+    def _file_set_digest(
+        project_root: Path,
+        roots: Sequence[Path],
+    ) -> str:
+        entries: list[dict[str, str]] = []
+        for root in roots:
+            resolved = root.resolve()
+            if not resolved.exists():
+                entries.append({"path": str(resolved), "state": "missing"})
+                continue
+            files = (resolved,) if resolved.is_file() else tuple(
+                path for path in sorted(resolved.rglob("*")) if path.is_file()
+            )
+            for path in files:
+                try:
+                    display = path.resolve().relative_to(project_root).as_posix()
+                except ValueError:
+                    display = str(path.resolve())
+                entries.append(
+                    {
+                        "path": display,
+                        "sha256": digest_file(path),
+                    }
+                )
+        return digest_payload({"files": entries})
+
+    def _evaluation_subject_fingerprint(self, model: str) -> dict[str, str]:
+        status = run_git(
+            self.project_root,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            check=True,
+        ).stdout
+        if status.strip():
+            raise EvalBenchmarkServiceError(
+                "evaluation subject checkout must be clean before freezing or running"
+            )
+        config = load_config(self.project_root)
+        config_path = self.project_root / ".autobugfix/config.yaml"
+        if not config_path.is_file():
+            raise EvalBenchmarkServiceError(
+                "evaluation subject has no .autobugfix/config.yaml"
+            )
+        roles: dict[str, dict[str, Any]] = {}
+        skill_roots: list[Path] = []
+        for role in ("writer", "evaluator"):
+            resolved = resolve_role(config, role)
+            encoded = resolved.to_dict(self.project_root)
+            encoded["model"] = model
+            roles[role] = encoded
+            skill_roots.extend(resolved.skill_paths)
+        return {
+            "subject_sha": rev_parse(self.project_root, "HEAD"),
+            "subject_tree": rev_parse(self.project_root, "HEAD^{tree}"),
+            "config_digest": digest_file(config_path),
+            "roles_digest": digest_payload({"roles": roles}),
+            "skills_digest": self._file_set_digest(
+                self.project_root,
+                tuple(dict.fromkeys(skill_roots)),
+            ),
+            "memory_digest": self._file_set_digest(
+                self.project_root,
+                (
+                    self.project_root / ".autobugfix-memory/active",
+                    self.project_root / ".autobugfix-memory/skills/approved",
+                ),
+            ),
+        }
+
+    def prepare_evaluation(self, manifest_path: Path) -> dict[str, Any]:
+        manifest = EvaluationSeedManifest.from_yaml(manifest_path.resolve())
+        before = self._evaluation_subject_fingerprint(manifest.model)
+        runtime = Defects4JRuntime(self.config.eval.benchmarks)
+        doctor = self._doctor_runtime("defects4j", runtime)
+        if not doctor["passed"]:
+            raise EvalBenchmarkServiceError(
+                f"Defects4J doctor failed: {doctor['report_digest']}"
+            )
+        run_root = (
+            self.config.eval.benchmarks.trusted_case_root
+            / "preflight-runs"
+            / manifest.manifest_id
+            / uuid.uuid4().hex
+        )
+        prepared_cases: list[PreparedEvaluationCase] = []
+        failures: list[str] = []
+        for case in manifest.cases:
+            receipt = runtime.preflight_case(
+                manifest,
+                case,
+                role="evaluation",
+                first_wave=case.first_wave,
+                artifact_root=run_root,
+            )
+            self.store.write_receipt(receipt)
+            if (
+                receipt.case_id != case.case_id
+                or receipt.project != case.project
+                or receipt.bug_id != case.bug_id
+                or receipt.role != "evaluation"
+                or receipt.first_wave != case.first_wave
+                or receipt.manifest_digest != manifest.manifest_digest
+                or receipt.framework_revision != manifest.framework_revision
+                or receipt.dataset_revision != manifest.dataset_revision
+                or receipt.runtime_id != doctor["runtime_id"]
+                or receipt.verifier_runtime_id != doctor["verifier_runtime_id"]
+            ):
+                raise EvalBenchmarkServiceError(
+                    f"qualification receipt disagrees with case: {case.case_id}"
+                )
+            if receipt.status != "eligible":
+                failures.append(f"{case.case_id}: {receipt.reason}")
+                continue
+            prepared_cases.append(
+                PreparedEvaluationCase(
+                    case_id=receipt.case_id,
+                    project=receipt.project,
+                    bug_id=receipt.bug_id,
+                    receipt_digest=str(receipt.to_dict()["record_digest"]),
+                )
+            )
+        if failures:
+            raise EvalBenchmarkServiceError(
+                "evaluation qualification failed: " + "; ".join(failures)
+            )
+        after = self._evaluation_subject_fingerprint(manifest.model)
+        if after != before:
+            raise EvalBenchmarkServiceError(
+                "evaluation subject changed during no-model qualification"
+            )
+        prepared = PreparedEvaluationManifest(
+            manifest_id=manifest.manifest_id,
+            seed_manifest_digest=manifest.manifest_digest,
+            benchmark=manifest.benchmark,
+            framework_revision=manifest.framework_revision,
+            dataset_revision=manifest.dataset_revision,
+            runtime_id=str(doctor["runtime_id"]),
+            verifier_runtime_id=str(doctor["verifier_runtime_id"]),
+            subject_sha=before["subject_sha"],
+            subject_tree=before["subject_tree"],
+            config_digest=before["config_digest"],
+            roles_digest=before["roles_digest"],
+            skills_digest=before["skills_digest"],
+            memory_digest=before["memory_digest"],
+            model=manifest.model,
+            max_attempts=manifest.max_attempts,
+            expected_case_count=manifest.expected_case_count,
+            cases=tuple(prepared_cases),
+            prepared_at=utc_now(),
+        )
+        data = prepared.to_dict()
+        path = self.store.write_trusted_manifest(
+            manifest.manifest_id,
+            f"evaluation-{data['record_digest']}.yaml",
+            data,
+        )
+        return {
+            "manifest_id": prepared.manifest_id,
+            "prepared_manifest": str(path),
+            "prepared_manifest_digest": data["record_digest"],
+            "subject_sha": prepared.subject_sha,
+            "case_count": len(prepared.cases),
+            "model": prepared.model,
+            "max_attempts": prepared.max_attempts,
+        }
+
+    def run_evaluation(
+        self,
+        prepared_manifest_path: Path,
+        *,
+        out_root: Path,
+        run_id: str,
+    ) -> dict[str, Any]:
+        prepared = self.store.read_prepared_evaluation_manifest(
+            prepared_manifest_path
+        )
+        observed_before = self._evaluation_subject_fingerprint(prepared.model)
+        expected = {
+            "subject_sha": prepared.subject_sha,
+            "subject_tree": prepared.subject_tree,
+            "config_digest": prepared.config_digest,
+            "roles_digest": prepared.roles_digest,
+            "skills_digest": prepared.skills_digest,
+            "memory_digest": prepared.memory_digest,
+        }
+        if observed_before != expected:
+            raise EvalBenchmarkServiceError(
+                "current H0 inputs differ from the prepared evaluation manifest"
+            )
+        receipts: list[EligibilityReceipt] = []
+        rows: list[dict[str, Any]] = []
+        for reference in prepared.cases:
+            receipt = self.store.read_receipt(
+                self.store.receipt_path(
+                    reference.case_id,
+                    reference.receipt_digest,
+                )
+            )
+            if (
+                receipt.status != "eligible"
+                or receipt.role != "evaluation"
+                or receipt.manifest_digest != prepared.seed_manifest_digest
+                or receipt.runtime_id != prepared.runtime_id
+                or receipt.verifier_runtime_id != prepared.verifier_runtime_id
+                or receipt.project != reference.project
+                or receipt.bug_id != reference.bug_id
+                or str(receipt.to_dict()["record_digest"])
+                != reference.receipt_digest
+            ):
+                raise EvalBenchmarkServiceError(
+                    f"prepared evaluation receipt mismatch: {reference.case_id}"
+                )
+            receipts.append(receipt)
+            rows.append(self._visible_case_row(receipt))
+        dataset = self.store.write_visible_jsonl_rows(
+            prepared.manifest_id,
+            f"{safe_component(run_id, 'run_id')}.jsonl",
+            rows,
+        )
+        run_dir = run_eval(
+            self.project_root,
+            dataset,
+            out_root.resolve(),
+            run_id=run_id,
+            model=prepared.model,
+            max_attempts=prepared.max_attempts,
+            verifier_backends={
+                receipt.case_id: managed_verifier_for_receipt(
+                    receipt,
+                    self.config.eval.benchmarks,
+                )
+                for receipt in receipts
+            },
+            official_evaluators={
+                receipt.case_id: official_oracle_for_receipt(
+                    receipt,
+                    self.config.eval.benchmarks,
+                )
+                for receipt in receipts
+            },
+            sdk_hidden_paths=tuple(
+                path.resolve()
+                for path in (
+                    self.config.eval.benchmarks.cache_root,
+                    self.config.eval.benchmarks.trusted_case_root,
+                    self.config.operator.state.root,
+                    self.config.operator.artifacts.root,
+                    self.project_root / ".autobugfix-memory",
+                )
+            ),
+        )
+        observed_after = self._evaluation_subject_fingerprint(prepared.model)
+        unchanged = observed_after == expected
+        write_yaml(
+            run_dir / "subject-noninterference.yaml",
+            record_with_digest(
+                {
+                    "schema": "autobugfix-evaluation-subject-noninterference-v1",
+                    "prepared_manifest_digest": prepared.to_dict()["record_digest"],
+                    "unchanged": unchanged,
+                    "expected": expected,
+                    "observed": observed_after,
+                    "checked_at": utc_now(),
+                }
+            ),
+        )
+        if not unchanged:
+            raise EvalBenchmarkServiceError(
+                "formal evaluation changed the frozen H0 inputs"
+            )
+        summary = yaml.safe_load(
+            (run_dir / "summary.yaml").read_text(encoding="utf-8")
+        ) or {}
+        return {
+            "run_dir": str(run_dir),
+            "prepared_manifest_digest": prepared.to_dict()["record_digest"],
+            "subject_sha": prepared.subject_sha,
+            "summary": summary,
+        }
+
+    @staticmethod
+    def _seed_manifest(
+        manifest_path: Path,
+    ) -> BenchmarkSeedManifest | EvaluationSeedManifest:
+        data = yaml.safe_load(manifest_path.resolve().read_text(encoding="utf-8")) or {}
+        if not isinstance(data, Mapping):
+            raise EvalBenchmarkServiceError("benchmark manifest must be a mapping")
+        if int(data.get("schema_version") or 0) == 3 and "cases" in data:
+            return EvaluationSeedManifest.from_dict(data)
+        return BenchmarkSeedManifest.from_dict(data)
+
     def preflight(
         self,
         manifest_path: Path,
         *,
         case_selector: str | None = None,
     ) -> dict[str, Any]:
-        manifest = BenchmarkSeedManifest.from_yaml(manifest_path.resolve())
+        manifest = self._seed_manifest(manifest_path)
         if manifest.benchmark != "defects4j":
             raise EvalBenchmarkServiceError("preflight manifest is not Defects4J")
         runtime = Defects4JRuntime(self.config.eval.benchmarks)
@@ -125,13 +425,17 @@ class EvalBenchmarkService:
             raise EvalBenchmarkServiceError(
                 f"Defects4J doctor failed: {doctor['report_digest']}"
             )
+        evaluation_mode = isinstance(manifest, EvaluationSeedManifest)
+        source_cases = (
+            manifest.cases if evaluation_mode else manifest.optimization_cases
+        )
         selected = [
             case
-            for case in manifest.optimization_cases
+            for case in source_cases
             if case_selector is None or case.case_id == case_selector
         ]
         if not selected:
-            raise EvalBenchmarkServiceError("no visible Optimization case selected")
+            raise EvalBenchmarkServiceError("no benchmark case selected")
         run_root = (
             self.config.eval.benchmarks.trusted_case_root
             / "preflight-runs"
@@ -144,7 +448,7 @@ class EvalBenchmarkService:
             receipt = runtime.preflight_case(
                 manifest,
                 case,
-                role="optimization",
+                role="evaluation" if evaluation_mode else "optimization",
                 first_wave=case.first_wave,
                 artifact_root=run_root,
             )
@@ -499,7 +803,7 @@ class EvalBenchmarkService:
                     if failure_text
                     else ""
                 ),
-                "Modify production source only. The harness will run the pinned official Defects4J test suite after each attempt.",
+                "Modify production source only. The Execution verifier will run only the declared visible triggering tests.",
             )
             if part.strip()
         )
@@ -537,7 +841,7 @@ class EvalBenchmarkService:
                 "type": "bugfix",
                 "problem_statement": problem,
                 "agent_prompt": problem,
-                "expected_behavior": "The pinned official Defects4J test suite has no failing tests.",
+                "expected_behavior": "The declared visible triggering tests pass after the repair.",
                 "attachments": attachments,
             },
             "repository": {
@@ -620,6 +924,12 @@ class EvalBenchmarkService:
             max_attempts=max_attempts,
             verifier_backends={
                 receipt.case_id: managed_verifier_for_receipt(
+                    receipt,
+                    self.config.eval.benchmarks,
+                )
+            },
+            official_evaluators={
+                receipt.case_id: official_oracle_for_receipt(
                     receipt,
                     self.config.eval.benchmarks,
                 )
@@ -738,7 +1048,16 @@ class EvalBenchmarkService:
                 raise EvalBenchmarkServiceError(
                     f"Defects4J case is not eligible: {case_projection['reason']}"
                 )
-            manifest = BenchmarkSeedManifest.from_yaml(manifest_path.resolve())
+            manifest = self._seed_manifest(manifest_path)
+            if isinstance(manifest, EvaluationSeedManifest):
+                if model != manifest.model:
+                    raise EvalBenchmarkServiceError(
+                        "model differs from the pre-registered evaluation manifest"
+                    )
+                if max_attempts != manifest.max_attempts:
+                    raise EvalBenchmarkServiceError(
+                        "max_attempts differs from the pre-registered evaluation manifest"
+                    )
             receipt_path = Path(str(case_projection["receipt_path"])).resolve()
             receipt = self.store.read_receipt(receipt_path)
             manifest_id = manifest.manifest_id

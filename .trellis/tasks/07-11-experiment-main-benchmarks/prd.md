@@ -2,12 +2,12 @@
 
 ## Goal
 
-Build a real, governed experimental integration line for Autobugfix and use it
-to run two reproducible benchmark experiments without allowing Operator or
-candidate code to mutate the trusted `main` control plane. The program must
-measure whether Operator-guided loop/harness changes improve repository-level
-bug fixing and whether the resulting harness can generalize to broader
-repository issue resolution.
+Build a real benchmark program with two independent experiments. Experiment 1
+measures the frozen bugfix-specialized H0 on repository-level bugs without any
+Operator treatment. Experiment 2 separately uses a governed experimental
+integration line to test whether Operator can evolve the same original H0 into
+a broader repository issue-resolution harness. Neither candidate code nor an
+Operator may mutate the trusted `main` control plane.
 
 ## Background
 
@@ -20,12 +20,10 @@ diagnoses and improves Autobugfix itself through governed non-main experiments.
 LLM roles are bounded nodes; services, Git facts, deterministic checks,
 external approval, and trusted CI own truth.
 
-Current Operator governance creates one candidate branch/worktree per request
-and promotes a verified candidate toward `main`, but it has no long-lived
-experimental integration branch on which multiple verified Operator changes can
-accumulate before final promotion. Current Eval has a canonical case schema and
-a real local-Git execution path, but no Defects4J, SWE-bench, or
-SWE-bench-Live adapter.
+Operator governance provides candidate branches/worktrees and governed
+integration lines for treatment studies. Eval has a canonical Case schema and
+a local-Git path; benchmark adapters must translate Defects4J, SWE-bench, and
+future datasets into the same generate-freeze-score protocol.
 
 ## Requirements
 
@@ -64,11 +62,12 @@ SWE-bench-Live adapter.
 - R9. Keep the existing request phases `REQUESTED`, `ACTIVE`, `VERIFIED`, and
   `CLOSED`. Represent experiment accumulation with immutable integration
   receipts and checkpoints instead of creating another large state machine.
-- R10. Freeze named checkpoints `H0`, `H_bug`, and `H_general`, including code
+- R10. Freeze named checkpoints `H0` and `H_general`, including code
   SHA, parent subject SHA, trusted-policy digest, resolved role configuration,
   model, skills, memory snapshot, benchmark manifest digest, budget, and metric
-  summary. Both `H_bug` and `H_general` must name `H0` as their experimental
-  parent; neither may name the other treatment checkpoint as its parent.
+  summary. `H_general` must name the original `H0` as its experimental parent.
+  The generic `H_bug` checkpoint capability remains available for future
+  studies but Experiment 1 does not create one.
 - R11. Rollback must immediately reactivate the last-known-good immutable
   experiment release and preserve Git history through a revert/integration
   receipt. It must not require force-pushing or rewriting `main` history.
@@ -88,12 +87,12 @@ SWE-bench-Live adapter.
   Writer iterations, Operator revisions, Codex calls, wall time, and retries.
   Exhaustion must stop at a durable state with an explicit reason rather than
   silently dropping cases or changing models.
-- R16. Use staged release of cost independently in each experiment: no-model
-  oracle preflight, then manually approved 3-, 8-, and 16-case Mini waves. The
-  first wave authorizes exactly 2 Optimization and 1 sealed Holdout case, at
-  most 2 Writer attempts per case, and at most 30 primary Mini calls. Later
-  call/time/revision caps are derived from the previous trusted usage receipt.
-  A failed stage blocks automatic expansion.
+- R16. Use no-model qualification before any production SDK run. Experiment 1
+  may run one explicitly labeled protocol-validation pilot, then runs its
+  pre-registered 16-case H0 wave without outcome-based expansion or exclusion.
+  Experiment 2 uses separately approved 3-, 8-, and 16-case treatment waves.
+  Both experiments fix Writer attempts, calls, and wall-time budgets before
+  generation. A valid failed repair does not authorize extra budget.
 - R16a. Execute the pilot serially with model/case concurrency set to one.
   Finish the trusted experiment-line implementation and deterministic adapter
   preflight before any model run. Process one Operator candidate at a time and
@@ -103,9 +102,8 @@ SWE-bench-Live adapter.
   for both experiments may be implemented in one development program. The
   experiments themselves are independent studies with the same frozen `H0`
   subject baseline. They may run sequentially to control quota, and Experiment
-  2 requires its own explicit human start gate, but Experiment 2 must not use
-  `H_bug`, Experiment 1 artifacts, or Experiment 1 Operator changes as its code,
-  skill, memory, or configuration baseline.
+  2 requires its own explicit human start gate, but it must not use Experiment
+  1 outcomes or artifacts as code, skill, memory, or configuration input.
 - R16c. Separate neutral experiment infrastructure from the subject harness
   under study. Infrastructure required to materialize, execute, seal, or score
   cases must not be counted as an Operator capability improvement. Record both
@@ -117,9 +115,10 @@ SWE-bench-Live adapter.
 
 - R17. Keep benchmark source, semantic task type, and experiment role as
   independent dimensions: `source`, `task_type`, and `experiment_role`.
-- R18. Experiment roles are `optimization`, dynamic `regression`, and
-  `sealed_holdout`. A case exposed to Operator can never be reported as sealed
-  holdout afterward.
+- R18. Experiment roles are descriptive `evaluation` plus treatment roles
+  `optimization`, dynamic `regression`, and `sealed_holdout`. Experiment 1 uses
+  only `evaluation`. A case exposed to Operator can never later be reported as
+  sealed holdout.
 - R19. Split sealed holdout by repository, not only by random case, and prevent
   repository-specific memory or artifacts from crossing into unseen-repository
   evaluation.
@@ -132,30 +131,33 @@ SWE-bench-Live adapter.
   Operator views.
 - R22. Official tests or benchmark harness results are the primary correctness
   oracle. Gold-diff equality is diagnostic only.
+- R22a. Every adapter implements the same ordering: materialize
+  `repo@buggy_revision` and visible issue/evidence, run the complete existing
+  Execution loop, freeze its final patch and trace, then invoke the dataset's
+  official evaluator. Official results must not enter Execution feedback.
 
 ### Experiment 1: Bugfix Harness
 
 - R23. Pin Defects4J 3.0.1 and its framework revision, selected project
   revisions, issue evidence, environment, test commands, and case manifest.
-- R24. Reproduce buggy failure and fixed/gold success without an LLM before a
-  Defects4J case becomes eligible for a model run.
-- R24a. Every selected Experiment 1 case, not only Holdout cases, must pass the
-  deterministic buggy-fail/gold-pass eligibility gate before the manifest is
-  frozen.
-- R25. Record `H0`, expose only Optimization cases to Operator, accumulate
-  solved cases into Regression, freeze `H_bug`, and compare `H0` with `H_bug`
-  on the same sealed unseen-repository holdout under identical model and budget
-  settings.
-- R25a. Experiment 1's final manifest contains 16 unique Defects4J cases: 10
-  visible Optimization cases and 6 sealed Holdout cases. Holdout repositories
-  must be absent from the Optimization set.
-- R26. Measure repair success, first-attempt success, loop success, rescue,
-  regression, runtime, model calls, Writer iterations, verifier/oracle
-  agreement, artifact completeness, and governance violations.
-- R26a. H_bug is promotion-eligible only with positive visible net improvement,
-  zero Regression and sealed Holdout regression, zero governance violations,
-  and budget compliance. Holdout rescue is reported as stronger evidence; an
-  unchanged Holdout requires explicit human promotion review.
+- R24. Privately reproduce the official buggy/fixed benchmark behavior without
+  an LLM before a Defects4J case becomes eligible. Qualification evidence is
+  Eval-only and cannot be copied into Writer input.
+- R24a. Every selected Experiment 1 case must pass deterministic qualification
+  before the 16-case manifest is frozen.
+- R25. Freeze one H0 subject definition and pre-register 16 unique Defects4J
+  `evaluation` cases independently of model outcomes. Operator does not observe
+  scores to modify H0, create an experiment line, or produce `H_bug`.
+- R25a. For each case, the complete Execution loop may use only predeclared
+  visible verifier feedback within its fixed budget. Eval freezes the final
+  patch and trace before invoking the official full-suite evaluator in a fresh
+  scoring checkout.
+- R26. Measure repair success, first-attempt success, bounded-loop rescue,
+  runtime, model calls, Writer iterations, visible-verifier/official-evaluator
+  agreement, artifact completeness, and harness errors.
+- R26a. A valid official failure is counted exactly once and cannot trigger an
+  extra Writer attempt, case rerun, H0 modification, Memory update, or case
+  exclusion. Infrastructure failures are reported separately.
 
 ### Experiment 2: General Issue-Resolution Harness
 
@@ -172,13 +174,13 @@ SWE-bench-Live adapter.
   cases. The manifest must deliberately cover bugfix, feature, and maintenance
   issue types, and Holdout repositories must be absent from the Optimization
   set.
-- R29. Compare `H_general` directly with `H0`, not `H_bug`, on identical SWE
+- R29. Compare `H_general` directly with `H0` on identical SWE
   evaluation cases, model, role configuration, memory baseline, call budget,
   and scorer. A Defects4J non-regression check may additionally determine
   whether broader issue-resolution capability preserved the original bugfix
-  specialization, but Experiment 1 treatment artifacts must remain excluded.
-- R30. Report Experiment 1 and Experiment 2 separately; do not combine visible
-  optimization, regression, and sealed holdout into one headline score.
+  specialization, but Experiment 1 measurement artifacts must remain excluded.
+- R30. Report Experiment 1 and Experiment 2 separately. Do not combine the
+  descriptive Defects4J H0 measurement with SWE treatment metrics.
 - R30a. Every selected Experiment 2 case must pass its official gold-patch
   harness before the manifest is frozen. Experiment 2 has its own budget,
   checkpoints, artifacts, and report; it must not consume Experiment 1's
@@ -207,18 +209,20 @@ SWE-bench-Live adapter.
 - [ ] A real `gpt-5.4-mini` Execution run edits only an isolated target
       worktree and produces complete logs, events, diffs, verifier output, and
       oracle artifacts.
-- [ ] Experiment 1 produces frozen `H0` and `H_bug` reports with separated
-      Optimization, Regression, sealed Holdout, and unseen-repository metrics.
+- [ ] Experiment 1 produces one frozen H0 report over 16 pre-registered
+      Defects4J evaluation cases, with every official score occurring only
+      after final submission freeze and no Operator treatment.
 - [ ] Experiment 2 produces a frozen `H_general` report comparing it directly
       with H0 on the independent SWE manifest; any Defects4J non-regression
       result is clearly labeled secondary.
 - [ ] Experiment 2 requires a separate start/budget record and proves its base
-      is the frozen `H0` SHA; no `H_bug` commit, skill, memory, configuration, or
-      case artifact is present in its baseline.
+      is the original frozen `H0` SHA; no Experiment 1 result or case artifact
+      is present in its baseline.
 - [ ] Budget exhaustion is deterministic, observable, and cannot trigger a
       model fallback or unrecorded retry.
-- [ ] The pilot scheduler runs one benchmark case and one Operator candidate at
-      a time; run records prove the base/checkpoint used by every invocation.
+- [ ] The scheduler runs one benchmark case at a time; Experiment 2 additionally
+      runs one Operator candidate at a time. Records prove the subject SHA and
+      budget used by every invocation.
 - [ ] Production CLI rejects fake model mode; test-only injected backends
       remain limited to unit/integration tests.
 - [ ] `uv run pytest -q` passes.
@@ -245,11 +249,12 @@ SWE-bench-Live adapter.
 - `07-11-experiment-integration-lines`: trusted named lines, checkpoints,
   integration receipts, budget/usage authority, rollback, and CLI.
 - `07-11-defects4j-eval-adapter`: pinned Defects4J adapter, eligibility
-  preflight, sealing, and the 16-case Experiment 1 manifest.
+  preflight, generate-freeze-score isolation, and the 16-case Experiment 1
+  evaluation manifest.
 - `07-11-swe-eval-adapters`: official container adapters, eligibility
   preflight, sealing, and the 16-case Experiment 2 manifest.
-- `07-11-bugfix-harness-experiment`: independent H0-to-H_bug 3/8/16 production
-  run and report.
+- `07-11-bugfix-harness-experiment`: frozen H0 16-case Defects4J production
+  measurement and report, with no Operator treatment.
 - `07-11-general-agent-experiment`: independent H0-to-H_general 3/8/16
   production run and report.
 

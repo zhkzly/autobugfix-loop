@@ -2,7 +2,7 @@
   "id": "defects4j-eval-adapter",
   "name": "defects4j-eval-adapter",
   "title": "Implement Defects4J Eval adapter",
-  "description": "Pin Defects4J, materialize real cases, preserve evidence, run official oracle preflight, and build the 16-case manifest.",
+  "description": "Pin Defects4J, materialize real cases, separate visible Execution feedback from post-freeze official scoring, and build the 16-case H0 manifest.",
   "status": "in_progress",
   "dev_type": null,
   "scope": null,

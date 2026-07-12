@@ -41,8 +41,9 @@ trusted service owns state.
 13. Promote only a current VERIFIED patch. PR merge, canary activation, and
     rollback are separate trusted transitions.
 
-For a governed benchmark study, insert these service-owned steps around the
-same Request lifecycle:
+For a governed Operator treatment study, insert these service-owned steps
+around the same Request lifecycle. These steps do not apply to a descriptive
+H0 benchmark measurement in which the system under test must remain frozen:
 
 1. Create a Study from a named cohort and frozen `H0` commit. The service
    freezes harness, policy, role/config/model/skill digests, a read-only Memory
@@ -91,12 +92,15 @@ registration must additionally prove `executed_subject_sha == line.head_sha`;
 until an isolated subject broker exists, the service must fail closed instead
 of signing current-main results under a candidate binding.
 
-The two studies share one named H0 cohort but no treatment: Experiment 1 uses
-Defects4J with 10 visible Optimization cases and 6 sealed unseen-repository
-Holdout cases to produce `H_bug`; Experiment 2 uses 10 SWE-bench Verified
-Optimization cases and 6 SWE-bench-Live sealed unseen-repository Holdout cases
-to produce `H_general`. Experiment 2 must not inherit `H_bug` code, skills,
-Memory, artifacts, results, or case-level feedback.
+The current experiments share only one named H0 definition. Experiment 1 is a
+descriptive 16-case Defects4J evaluation of unchanged H0, so Operator must not
+modify the subject, consume scores as repair feedback, or create `H_bug` in
+that experiment. Experiment 2 independently starts from the original H0 and
+uses visible SWE-bench Verified Optimization cases plus sealed
+SWE-bench-Live Holdout cases to produce `H_general`. It must not inherit
+Experiment 1 outcomes or case-level feedback. The generic `H_bug` checkpoint
+capability remains available for separately authorized future treatment
+studies.
 
 Request phases are only REQUESTED, ACTIVE, VERIFIED, and CLOSED. WriterRun,
 CheckRun, gates, scope revisions, experiments, and promotions are child

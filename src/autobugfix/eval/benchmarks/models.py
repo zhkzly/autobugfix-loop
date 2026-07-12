@@ -16,7 +16,7 @@ class BenchmarkContractError(ValueError):
 
 
 EligibilityStatus = Literal["eligible", "ineligible", "harness_error"]
-ExperimentRole = Literal["optimization", "sealed_holdout"]
+ExperimentRole = Literal["evaluation", "optimization", "sealed_holdout"]
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -90,6 +90,324 @@ class BenchmarkCaseSeed:
             "bug_id": self.bug_id,
             "first_wave": self.first_wave,
         }
+
+
+@dataclass(slots=True, frozen=True)
+class EvaluationCaseSeed:
+    case_id: str
+    project: str
+    bug_id: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EvaluationCaseSeed":
+        bug_id = int(data.get("bug_id") or 0)
+        if bug_id < 1:
+            raise BenchmarkContractError("evaluation case bug_id must be positive")
+        return cls(
+            case_id=safe_component(data.get("case_id"), "case_id"),
+            project=_required(data.get("project"), "project"),
+            bug_id=bug_id,
+        )
+
+    @property
+    def first_wave(self) -> int:
+        # Compatibility with the eligibility receipt. Pure evaluations have no waves.
+        return 16
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "project": self.project,
+            "bug_id": self.bug_id,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class EvaluationSeedManifest:
+    manifest_id: str
+    benchmark: str
+    framework_revision: str
+    dataset_revision: str
+    cases: tuple[EvaluationCaseSeed, ...]
+    expected_case_count: int
+    model: str
+    max_attempts: int
+    schema_version: int = 3
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 3:
+            raise BenchmarkContractError(
+                "unsupported benchmark evaluation seed schema version"
+            )
+        if self.benchmark != "defects4j":
+            raise BenchmarkContractError("evaluation benchmark must be defects4j")
+        if self.framework_revision != DEFECTS4J_FRAMEWORK_REVISION:
+            raise BenchmarkContractError(
+                "Defects4J evaluation framework revision is not pinned"
+            )
+        if self.expected_case_count < 1 or len(self.cases) != self.expected_case_count:
+            raise BenchmarkContractError(
+                "evaluation cases must match expected_case_count"
+            )
+        if len({item.case_id for item in self.cases}) != len(self.cases):
+            raise BenchmarkContractError("evaluation case IDs must be unique")
+        identities = {(item.project, item.bug_id) for item in self.cases}
+        if len(identities) != len(self.cases):
+            raise BenchmarkContractError(
+                "evaluation benchmark identities must be unique"
+            )
+        if self.model != "gpt-5.4-mini":
+            raise BenchmarkContractError(
+                "primary Defects4J evaluation model must be gpt-5.4-mini"
+            )
+        if self.max_attempts < 1:
+            raise BenchmarkContractError("evaluation max_attempts must be positive")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EvaluationSeedManifest":
+        raw_cases = data.get("cases")
+        if not isinstance(raw_cases, Sequence) or isinstance(raw_cases, (str, bytes)):
+            raise BenchmarkContractError("evaluation cases must be a list")
+        if not all(isinstance(item, Mapping) for item in raw_cases):
+            raise BenchmarkContractError("evaluation case must be a mapping")
+        return cls(
+            schema_version=int(data.get("schema_version") or 0),
+            manifest_id=safe_component(data.get("manifest_id"), "manifest_id"),
+            benchmark=_required(data.get("benchmark"), "benchmark"),
+            framework_revision=_required(
+                data.get("framework_revision"), "framework_revision"
+            ),
+            dataset_revision=_required(
+                data.get("dataset_revision"), "dataset_revision"
+            ),
+            cases=tuple(EvaluationCaseSeed.from_dict(item) for item in raw_cases),
+            expected_case_count=int(data.get("expected_case_count") or 0),
+            model=_required(data.get("model"), "model"),
+            max_attempts=int(data.get("max_attempts") or 0),
+        )
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> "EvaluationSeedManifest":
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, Mapping):
+            raise BenchmarkContractError(
+                "benchmark evaluation seed manifest must be a mapping"
+            )
+        return cls.from_dict(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "manifest_id": self.manifest_id,
+            "benchmark": self.benchmark,
+            "framework_revision": self.framework_revision,
+            "dataset_revision": self.dataset_revision,
+            "expected_case_count": self.expected_case_count,
+            "model": self.model,
+            "max_attempts": self.max_attempts,
+            "cases": [item.to_dict() for item in self.cases],
+        }
+
+    @property
+    def manifest_digest(self) -> str:
+        return digest_payload(self.to_dict())
+
+
+@dataclass(slots=True, frozen=True)
+class PreparedEvaluationCase:
+    case_id: str
+    project: str
+    bug_id: int
+    receipt_digest: str
+
+    def __post_init__(self) -> None:
+        safe_component(self.case_id, "case_id")
+        _required(self.project, "project")
+        if self.bug_id < 1:
+            raise BenchmarkContractError("prepared evaluation bug_id must be positive")
+        if len(self.receipt_digest) != 64 or any(
+            value not in "0123456789abcdef" for value in self.receipt_digest
+        ):
+            raise BenchmarkContractError(
+                "prepared evaluation receipt_digest must be sha256"
+            )
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "PreparedEvaluationCase":
+        return cls(
+            case_id=safe_component(data.get("case_id"), "case_id"),
+            project=_required(data.get("project"), "project"),
+            bug_id=int(data.get("bug_id") or 0),
+            receipt_digest=_required(
+                data.get("receipt_digest"), "receipt_digest"
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "project": self.project,
+            "bug_id": self.bug_id,
+            "receipt_digest": self.receipt_digest,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class PreparedEvaluationManifest:
+    manifest_id: str
+    seed_manifest_digest: str
+    benchmark: str
+    framework_revision: str
+    dataset_revision: str
+    runtime_id: str
+    verifier_runtime_id: str
+    subject_sha: str
+    subject_tree: str
+    config_digest: str
+    roles_digest: str
+    skills_digest: str
+    memory_digest: str
+    model: str
+    max_attempts: int
+    expected_case_count: int
+    cases: tuple[PreparedEvaluationCase, ...]
+    prepared_at: str
+    schema_version: int = 4
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 4:
+            raise BenchmarkContractError(
+                "unsupported prepared evaluation manifest schema"
+            )
+        safe_component(self.manifest_id, "manifest_id")
+        if self.benchmark != "defects4j":
+            raise BenchmarkContractError(
+                "prepared evaluation benchmark must be defects4j"
+            )
+        if self.framework_revision != DEFECTS4J_FRAMEWORK_REVISION:
+            raise BenchmarkContractError(
+                "prepared Defects4J framework revision is not pinned"
+            )
+        if self.model != "gpt-5.4-mini":
+            raise BenchmarkContractError(
+                "prepared evaluation model must be gpt-5.4-mini"
+            )
+        if self.max_attempts < 1:
+            raise BenchmarkContractError(
+                "prepared evaluation max_attempts must be positive"
+            )
+        if self.expected_case_count < 1 or len(self.cases) != self.expected_case_count:
+            raise BenchmarkContractError(
+                "prepared evaluation cases must match expected_case_count"
+            )
+        if len({item.case_id for item in self.cases}) != len(self.cases):
+            raise BenchmarkContractError(
+                "prepared evaluation case IDs must be unique"
+            )
+        identities = {(item.project, item.bug_id) for item in self.cases}
+        if len(identities) != len(self.cases):
+            raise BenchmarkContractError(
+                "prepared evaluation benchmark identities must be unique"
+            )
+        for name, value in (
+            ("seed_manifest_digest", self.seed_manifest_digest),
+            ("config_digest", self.config_digest),
+            ("roles_digest", self.roles_digest),
+            ("skills_digest", self.skills_digest),
+            ("memory_digest", self.memory_digest),
+        ):
+            if len(value) != 64 or any(
+                character not in "0123456789abcdef" for character in value
+            ):
+                raise BenchmarkContractError(f"{name} must be sha256")
+        _required(self.dataset_revision, "dataset_revision")
+        for name, value in (
+            ("runtime_id", self.runtime_id),
+            ("verifier_runtime_id", self.verifier_runtime_id),
+        ):
+            if not value.startswith("sha256:") or len(value) != 71:
+                raise BenchmarkContractError(f"{name} must be an immutable image ID")
+        _required(self.subject_sha, "subject_sha")
+        _required(self.subject_tree, "subject_tree")
+        _required(self.prepared_at, "prepared_at")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "PreparedEvaluationManifest":
+        verify_record(data)
+        raw_cases = data.get("cases")
+        if not isinstance(raw_cases, Sequence) or isinstance(
+            raw_cases, (str, bytes)
+        ):
+            raise BenchmarkContractError(
+                "prepared evaluation cases must be a list"
+            )
+        if not all(isinstance(item, Mapping) for item in raw_cases):
+            raise BenchmarkContractError(
+                "prepared evaluation case must be a mapping"
+            )
+        return cls(
+            schema_version=int(data.get("schema_version") or 0),
+            manifest_id=safe_component(data.get("manifest_id"), "manifest_id"),
+            seed_manifest_digest=_required(
+                data.get("seed_manifest_digest"), "seed_manifest_digest"
+            ),
+            benchmark=_required(data.get("benchmark"), "benchmark"),
+            framework_revision=_required(
+                data.get("framework_revision"), "framework_revision"
+            ),
+            dataset_revision=_required(
+                data.get("dataset_revision"), "dataset_revision"
+            ),
+            runtime_id=_required(data.get("runtime_id"), "runtime_id"),
+            verifier_runtime_id=_required(
+                data.get("verifier_runtime_id"), "verifier_runtime_id"
+            ),
+            subject_sha=_required(data.get("subject_sha"), "subject_sha"),
+            subject_tree=_required(data.get("subject_tree"), "subject_tree"),
+            config_digest=_required(data.get("config_digest"), "config_digest"),
+            roles_digest=_required(data.get("roles_digest"), "roles_digest"),
+            skills_digest=_required(data.get("skills_digest"), "skills_digest"),
+            memory_digest=_required(data.get("memory_digest"), "memory_digest"),
+            model=_required(data.get("model"), "model"),
+            max_attempts=int(data.get("max_attempts") or 0),
+            expected_case_count=int(data.get("expected_case_count") or 0),
+            cases=tuple(PreparedEvaluationCase.from_dict(item) for item in raw_cases),
+            prepared_at=_required(data.get("prepared_at"), "prepared_at"),
+        )
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> "PreparedEvaluationManifest":
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, Mapping):
+            raise BenchmarkContractError(
+                "prepared evaluation manifest must be a mapping"
+            )
+        return cls.from_dict(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return record_with_digest(
+            {
+                "schema_version": self.schema_version,
+                "manifest_id": self.manifest_id,
+                "seed_manifest_digest": self.seed_manifest_digest,
+                "benchmark": self.benchmark,
+                "framework_revision": self.framework_revision,
+                "dataset_revision": self.dataset_revision,
+                "runtime_id": self.runtime_id,
+                "verifier_runtime_id": self.verifier_runtime_id,
+                "subject_sha": self.subject_sha,
+                "subject_tree": self.subject_tree,
+                "config_digest": self.config_digest,
+                "roles_digest": self.roles_digest,
+                "skills_digest": self.skills_digest,
+                "memory_digest": self.memory_digest,
+                "model": self.model,
+                "max_attempts": self.max_attempts,
+                "expected_case_count": self.expected_case_count,
+                "cases": [item.to_dict() for item in self.cases],
+                "prepared_at": self.prepared_at,
+            }
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -301,7 +619,7 @@ class EligibilityReceipt:
     def __post_init__(self) -> None:
         safe_component(self.receipt_id, "receipt_id")
         safe_component(self.case_id, "case_id")
-        if self.role not in {"optimization", "sealed_holdout"}:
+        if self.role not in {"evaluation", "optimization", "sealed_holdout"}:
             raise BenchmarkContractError("invalid eligibility role")
         if self.first_wave not in {3, 8, 16}:
             raise BenchmarkContractError("eligibility first_wave must be 3, 8, or 16")

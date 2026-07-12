@@ -1,30 +1,40 @@
-# Design: direct Docker-backed Defects4J Eval
+# Design: common benchmark protocol with a Defects4J adapter
 
 ## Scope And Ownership
 
-This child adds a Defects4J Case source to the existing Eval loop. Eval owns
-case materialization, the immutable Docker runtime, official verification,
-eligibility evidence, and scoring. `AutobugfixService` still owns Execution
-task/worktree state. The Writer sees one ordinary buggy Git worktree and never
-receives Docker authority, a fixed revision, or a developer patch.
-
-The adapter does not create a second task state machine. Its direct path is:
+Autobugfix benchmark evaluation has one protocol:
 
 ```text
-project + bug ID -> Docker checkout <id>b -> history-free Git snapshot
--> real Execution loop -> Docker defects4j test -> independent Eval oracle
--> tests-first report
+Case(repo@buggy_revision, issue/evidence, environment)
+-> existing complete Execution loop
+-> Submission(frozen patch, trace, subject/config digests)
+-> dataset adapter's official evaluator
+-> Result(score, diagnosis, artifacts)
 ```
+
+The Defects4J adapter is responsible only for translating Defects4J into that
+protocol. It materializes a real buggy Java repository, constructs visible
+problem evidence, supplies an Execution-visible verifier contract, and runs
+the official evaluator after submission freeze.
+
+State ownership remains strict:
+
+- `AutobugfixService` owns inner Execution task, worktree, attempts, feedback,
+  and human-gate state.
+- `EvalRunner` owns Case, Submission, official evaluator invocation, score,
+  diagnosis, and benchmark artifacts.
+- Memory is a frozen Execution input where configured; benchmark results do
+  not maintain or approve Memory.
+- Operator is absent from Experiment 1 and cannot optimize H0 from its results.
+
+The adapter does not create a second task state machine.
 
 ## Runtime Configuration
 
-Defects4J has exactly one production runtime family: two roles built from one
-pinned Dockerfile. The materializer contains checkout/oracle metadata. The
-verifier removes gold patches and localization hints but retains
-`active-bugs.csv`, commit databases, layout/build metadata, and other files
-required by the official `defects4j test` implementation. It removes every
-project repository entry while retaining only `project_repos/README`, which
-the pinned Defects4J bootstrap requires before any command can run.
+Defects4J has two roles built from one pinned Dockerfile. The materializer has
+the framework metadata needed for official checkout, private qualification,
+and final scoring. The verifier removes gold patches and localization hints
+while retaining only metadata required to run the visible triggering tests.
 
 ```yaml
 eval:
@@ -33,8 +43,6 @@ eval:
     trusted_case_root: .autobugfix/trusted-eval-cases
     visible_manifest_root: .autobugfix/eval-manifests
     command_timeout_seconds: 1800
-    guard:
-      trusted_ref: origin/main
     defects4j:
       image: autobugfix/defects4j:3.0.1
       verifier_image: autobugfix/defects4j-verifier:3.0.1
@@ -45,139 +53,142 @@ eval:
 ```
 
 Host Java, Defects4J, Perl, SVN, cpanm, `PERL5LIB`, and library paths are not
-configuration surfaces. Legacy host-runtime keys fail config loading. The host
-requires only Python/uv, Git, the Codex Python SDK, and a Docker client/daemon.
-`AUTOBUGFIX_DOCKER_BIN` may select an already-installed Docker executable for
-the current process without committing a host path.
+configuration surfaces. The host requires Python/uv, Git, the Codex Python
+SDK, and a Docker client/daemon. `AUTOBUGFIX_DOCKER_BIN` may select an installed
+Docker executable for one process without committing a host path.
 
-Doctor resolves the configured image tag to an immutable image ID and verifies
-the Docker daemon, both roles, platform, image revision/role labels,
-in-container framework HEAD, Java 11, verifier sanitization, `defects4j info`,
-and available disk. Every case command uses the resolved immutable role ID.
+Doctor resolves image tags to immutable image IDs and checks the daemon,
+platform, labels, framework revision, Java 11, verifier sanitization,
+`defects4j info`, and disk capacity. Every case command uses those IDs.
 
-## Case Materialization
+## Case Qualification And Materialization
 
-For a visible seed case, `EvalBenchmarkService` performs:
+Before model execution, trusted Eval may privately checkout `<id>b` and
+`<id>f`, repeat official tests, and reject an unstable or unrunnable case.
+Qualification proves benchmark validity; it is not Writer feedback. Fixed
+source, developer patch, fixed-revision failures, hidden metadata, and private
+raw output stay under the trusted Eval root.
 
-1. Read `active-bugs.csv` from the pinned image.
-2. Optionally enrich visible input from the upstream issue; tracker failure
-   does not replace or invalidate official triggering-test evidence.
-3. Checkout `<id>b`, `<id>f`, and a fresh `<id>b` snapshot through the official
-   CLI. The container runs as the current host UID/GID so bind-mounted output
-   is writable without a privileged ownership-repair phase. An ephemeral
-   container-only Git config marks checkout repositories safe; it never
-   changes the host Git configuration.
-4. Export `tests.trigger` and `dir.src.classes`.
-5. Repeat official full tests. Fixed failures must be identical across runs;
-   buggy failures must be exactly that stable baseline plus every trigger.
-6. Store fixed checkout, developer patch, command evidence, and receipt below
-   the trusted root.
-7. Strip VCS history from the fresh buggy checkout and create a deterministic
-   one-commit Git repository below the benchmark cache data plane.
+For Execution, Eval creates a fresh `<id>b` checkout, removes its VCS history,
+and creates a one-snapshot Git repository. The visible Case contains:
 
-The visible Eval row contains only the buggy repository, issue/failure input,
-triggering tests, production source roots, immutable runtime identity, and a
-digest-bound verifier contract. It contains no fixed revision, gold path,
-trusted receipt path, or trusted-root-adjacent path.
+- issue title/body when available;
+- official triggering-test names and visible reproduction command;
+- visible buggy failure evidence;
+- production source roots;
+- immutable runtime identity and a digest-bound visible verifier contract.
 
-## Execution And Verification
+It contains no fixed revision, developer patch, modified-class hint, private
+baseline, trusted receipt path, official score, or scorer diagnosis.
 
-`autobugfix eval benchmark run-case` writes one visible canonical `EvalCase`,
-then calls the existing `run_eval` and `AutobugfixService` surfaces. Production
-uses only the Python Codex SDK and defaults the experiment model to
+## Execution-Visible Verification
+
+`autobugfix eval benchmark run-case` converts the visible benchmark Case to the
+canonical `EvalCase`, then invokes the existing `run_eval` and
+`AutobugfixService` surfaces. Production uses the Python Codex SDK and
 `gpt-5.4-mini`.
 
-The deterministic verifier:
+For each bounded Writer attempt, the managed verifier:
 
-- derives complete tracked and untracked Git changes;
-- rejects changes outside exported production source roots;
-- mounts the task worktree into the immutable image;
-- injects the digest-bound `defects4j.build.properties` retained under the
-  trusted Eval root into an isolated verification copy only;
-- runs `defects4j test` and reads the official `failing_tests` file;
-- accepts only failures present in the digest-bound fixed-revision baseline;
-- removes only build/test artifacts created by that invocation while
-  preserving all pre-existing Writer changes, including untracked source, and
-  removes the injected service metadata before returning;
-- writes raw command logs to a persistent worktree-external artifact root;
-- returns success only when the command executes and no failure outside the
-  stable baseline remains.
+1. derives all tracked and untracked changes;
+2. rejects changes outside declared production source roots;
+3. copies the task worktree to an isolated verification directory;
+4. injects only digest-bound build metadata required by Defects4J;
+5. runs the predeclared official triggering tests in the immutable verifier
+   image;
+6. stores raw stdout, stderr, exit status, and failing-test evidence outside
+   the worktree;
+7. removes the verification copy without changing the Writer worktree.
 
-Execution may retry a failed Writer attempt within an explicit maximum. The
-real verifier result becomes the next feedback packet. Eval never approves
-PPE, archives the task, or writes Memory. After the read-only evaluator reaches
-the human gate, the Defects4J adapter independently repeats the official
-verifier from a clean artifact state. Official tests are the score; gold diff
-equality is diagnostic only.
+This result is ordinary Execution feedback. A visible compile or triggering
+test failure may drive another Writer attempt within the frozen attempt
+budget. It does not know the fixed revision or final official score.
+
+## Submission Freeze And Official Evaluation
+
+When the complete Execution loop terminates, Eval computes and stores:
+
+- final generated patch and SHA-256;
+- task YAML and event-stream digests;
+- Execution task ID, state, and iteration count;
+- measured Autobugfix subject SHA;
+- resolved model/config/skill/Memory identities;
+- freeze timestamp.
+
+Only then does the Defects4J adapter create a fresh clean buggy checkout, apply
+the frozen patch, and invoke the official full-suite evaluator in the trusted
+materializer image. The official evaluator may use private fixed-revision
+baseline semantics required by the pinned benchmark. Its output is Eval-only.
+
+After scoring, Eval recomputes the patch, task, events, and iteration count. A
+change is a harness violation, not a repair result. The
+`oracle-noninterference.yaml` receipt records this comparison. No official
+result can call Writer, append Execution feedback, or advance Execution state.
+
+Official tests are the correctness score. Gold-diff equality is diagnostic
+only; an alternative patch is valid when the official evaluator accepts it.
 
 ## Storage Boundary
 
 ```text
 .autobugfix/benchmark-cache/
   cases/                 buggy-only history-free repositories
-  verifier-contracts/    visible-safe deterministic contracts
-  verifier-evidence/     per-attempt official stdout/stderr/failing_tests
+  verifier-contracts/    visible-safe contracts
+  verifier-evidence/     per-attempt visible command evidence
 
 .autobugfix/trusted-eval-cases/
-  doctor/                digest-bound runtime reports
-  preflight-runs/        fixed checkout, gold, raw commands, issue raw data
+  doctor/                runtime reports
+  preflight-runs/        private fixed/buggy qualification evidence
   receipts/              immutable eligibility authority
-  guard/<guard-id>/      AES-GCM Holdout bundle and preflight archive
 
-.autobugfix/eval-manifests/
-  <manifest>/            visible Optimization JSONL only
-
-.autobugfix/eval-runs/
-  <run>/                 Execution control root, worktree, raw SDK logs,
-                         events, generated diff, oracle logs, report, summary
+.autobugfix/eval-runs/<run>/
+  control/               inner Execution service state
+  cases/<case>/
+    raw/                 SDK and adapter logs
+    generated.patch      frozen final patch
+    submission.yaml      pre-oracle submission identity
+    oracle/              independent official evaluation checkout/output
+    oracle-noninterference.yaml
+    report.yaml
+  summary.yaml
 ```
 
-These roots are pairwise disjoint and outside Operator authority roots.
+Runtime roots are gitignored. Candidate-authored files cannot substitute for
+service-generated receipts.
 
-## Direct CLI
+## CLI
 
 ```text
 autobugfix eval benchmark doctor --adapter defects4j
-autobugfix eval benchmark preflight --manifest <seed> --case <visible-id>
-autobugfix eval benchmark seal --manifest <seed>
-autobugfix eval benchmark run-case --manifest <seed> --case <visible-id>
+autobugfix eval benchmark preflight --manifest <evaluation-seed> --case <id>
+autobugfix eval benchmark run-case --manifest <evaluation-seed> --case <id>
   --run-id <id> --model gpt-5.4-mini --max-attempts 2
+autobugfix eval benchmark prepare-evaluation --manifest <evaluation-seed>
+autobugfix eval benchmark run-evaluation --manifest <prepared-manifest>
+  --run-id <id>
 ```
 
-`seal` writes an authenticated encrypted Holdout identity bundle and preflight
-archive plus a deidentified public projection with cumulative 3/8/16 waves.
-The encryption AAD binds the seed and trusted Guard code identity. Seal and
-`guard-run` fail unless the control checkout is clean and exactly equals
-`eval.benchmarks.guard.trusted_ref`. Holdout paths, issue data, gold data, and
-case-level results never enter Operator roots.
+CLI handlers parse arguments and call the Eval benchmark service. They do not
+write task, receipt, submission, or score files directly.
 
-For governed studies, Operator derives a digest-bound Study/line/budget
-projection. Guard signs that projection together with aggregate metrics and
-its code identity. An interactive Operator service transition verifies the
-human-held Guard secret, frozen harness/policy, current binding, aggregate-only
-schema, and numeric success contract before creating `StudyMetricRecord`.
+`prepare-evaluation` qualifies every pre-registered case before model use and
+freezes H0 Git/tree, config, roles, skills, Memory, model, budget, and receipt
+digests. `run-evaluation` rejects drift, runs the complete suite serially, and
+writes subject-level noninterference evidence. The repository retains generic
+sealed-Holdout and Operator Study commands for future treatment experiments.
+Experiment 1 does not call them: its 16 case identities are pre-registered as
+`evaluation`, and H0 is never changed.
 
-Production Codex calls execute in `autobugfix.codex_sdk_worker`, still through
-the Python SDK. The parent process owns the wall-clock timeout and terminates
-the worker process group on expiry; request/result/stdout/stderr remain raw
-artifacts. No path invokes `codex exec`.
+## Failure Semantics
 
-Before Bubblewrap hides the host home, the trusted parent creates a private
-per-call Codex home. The role then sees only read-only Autobugfix/Python
-runtime mounts, its role-appropriate cwd, its own logs, and service-validated
-linked-worktree Git metadata. Read-only roles receive a read-only cwd mount;
-Writer roles cannot see Guard, benchmark authority, Operator state, Memory, or
-other task roots.
+- Docker/import/materialization/patch-apply/noninterference failure: harness
+  error; no capability score is inferred.
+- Execution completes but official evaluator rejects the frozen patch: valid
+  unsuccessful repair; retain and count it once.
+- Official evaluator accepts an alternative patch: successful repair even when
+  it differs from the developer patch.
+- Valid official failure never grants an extra attempt and never triggers H0
+  modification in Experiment 1.
 
-The direct adapter executes the trusted checkout as the measured subject. A
-future candidate-subject broker must report and isolate a distinct experiment
-line SHA before candidate metrics can be authoritative; a Study binding alone
-must never be treated as proof that candidate code executed.
-
-## Rollback
-
-The integration is additive to legacy `local-git` Eval. A Docker doctor,
-preflight, verifier, SDK, or oracle failure is retained as a harness error or
-repair failure and cannot produce a passing score. Runtime roots are
-gitignored and may be discarded without mutating target main or Autobugfix Git
-history.
+Legacy `local-git` Eval remains compatible and follows the same
+generate-freeze-score ordering with its own adapter/scorer.
