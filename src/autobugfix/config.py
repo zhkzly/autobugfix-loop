@@ -31,6 +31,7 @@ from autobugfix.models import (
     RoleConfig,
     RoleRuntimeConfig,
     SchedulerConfig,
+    SWEBenchmarkConfig,
     TestCommands,
     WorkerConfig,
 )
@@ -213,6 +214,28 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "framework_revision": "6d54320e0db5a357f9ab38a8e4d2e5aead7e1c09",
                 "timezone": "America/Los_Angeles",
                 "preflight_repetitions": 2,
+                "memory_limit": "8g",
+                "cpu_limit": 4.0,
+                "pids_limit": 1024,
+            },
+            "swe": {
+                "harness_project": "harnesses/swebench",
+                "platform": "linux/amd64",
+                "swebench_version": "4.1.0",
+                "swebench_commit": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+                "swebench_tree": "f178530b37202c549b1b2b3300db2da90da648db",
+                "verified_dataset": "princeton-nlp/SWE-bench_Verified",
+                "verified_dataset_revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+                "verified_namespace": None,
+                "live_repository": "https://github.com/microsoft/SWE-bench-Live.git",
+                "live_commit": "c5ea7e48b7b8bb0f4bcbbceb182a09dadfabfc2c",
+                "live_tree": "aaa2c4a59dab49c54ef6576d1190dfb590c2fd1d",
+                "live_launch_repository": "https://github.com/microsoft/RepoLaunch",
+                "live_launch_commit": "ff359c6edb9aaa400fff3fe819fa483a5cc2ee23",
+                "live_launch_tree": "1491dbf642336270565700707393f24dadbe190a",
+                "live_dataset": "SWE-bench-Live/MultiLang",
+                "live_dataset_revision": "608f7ae9ab8ea1f9f0d030fe04562cf6bd1a0c8b",
+                "scorer_timeout_seconds": 5400,
                 "memory_limit": "8g",
                 "cpu_limit": 4.0,
                 "pids_limit": 1024,
@@ -496,6 +519,7 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
     defects4j_raw = _as_mapping(
         benchmark_raw.get("defects4j"), "eval.benchmarks.defects4j"
     )
+    swe_raw = _as_mapping(benchmark_raw.get("swe"), "eval.benchmarks.swe")
     unsupported_defects4j_fields = sorted(
         set(defects4j_raw)
         & {
@@ -557,6 +581,89 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
                 memory_limit=str(defects4j_raw.get("memory_limit", "8g")),
                 cpu_limit=float(defects4j_raw.get("cpu_limit", 4.0)),
                 pids_limit=int(defects4j_raw.get("pids_limit", 1024)),
+            ),
+            swe=SWEBenchmarkConfig(
+                harness_project=_resolve(root, swe_raw.get("harness_project"))
+                or (root / "harnesses/swebench"),
+                platform=str(swe_raw.get("platform", "linux/amd64")),
+                swebench_version=str(swe_raw.get("swebench_version", "4.1.0")),
+                swebench_commit=str(
+                    swe_raw.get(
+                        "swebench_commit",
+                        "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+                    )
+                ),
+                swebench_tree=str(
+                    swe_raw.get(
+                        "swebench_tree",
+                        "f178530b37202c549b1b2b3300db2da90da648db",
+                    )
+                ),
+                verified_dataset=str(
+                    swe_raw.get("verified_dataset", "princeton-nlp/SWE-bench_Verified")
+                ),
+                verified_dataset_revision=str(
+                    swe_raw.get(
+                        "verified_dataset_revision",
+                        "c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+                    )
+                ),
+                verified_namespace=(
+                    str(swe_raw["verified_namespace"])
+                    if swe_raw.get("verified_namespace") is not None
+                    else None
+                ),
+                live_repository=str(
+                    swe_raw.get(
+                        "live_repository",
+                        "https://github.com/microsoft/SWE-bench-Live.git",
+                    )
+                ),
+                live_commit=str(
+                    swe_raw.get(
+                        "live_commit",
+                        "c5ea7e48b7b8bb0f4bcbbceb182a09dadfabfc2c",
+                    )
+                ),
+                live_tree=str(
+                    swe_raw.get(
+                        "live_tree",
+                        "aaa2c4a59dab49c54ef6576d1190dfb590c2fd1d",
+                    )
+                ),
+                live_launch_repository=str(
+                    swe_raw.get(
+                        "live_launch_repository",
+                        "https://github.com/microsoft/RepoLaunch",
+                    )
+                ),
+                live_launch_commit=str(
+                    swe_raw.get(
+                        "live_launch_commit",
+                        "ff359c6edb9aaa400fff3fe819fa483a5cc2ee23",
+                    )
+                ),
+                live_launch_tree=str(
+                    swe_raw.get(
+                        "live_launch_tree",
+                        "1491dbf642336270565700707393f24dadbe190a",
+                    )
+                ),
+                live_dataset=str(
+                    swe_raw.get("live_dataset", "SWE-bench-Live/MultiLang")
+                ),
+                live_dataset_revision=str(
+                    swe_raw.get(
+                        "live_dataset_revision",
+                        "608f7ae9ab8ea1f9f0d030fe04562cf6bd1a0c8b",
+                    )
+                ),
+                scorer_timeout_seconds=int(
+                    swe_raw.get("scorer_timeout_seconds", 5400)
+                ),
+                memory_limit=str(swe_raw.get("memory_limit", "8g")),
+                cpu_limit=float(swe_raw.get("cpu_limit", 4.0)),
+                pids_limit=int(swe_raw.get("pids_limit", 1024)),
             ),
         ),
     )

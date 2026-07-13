@@ -3,7 +3,7 @@
   "name": "swe-eval-adapters",
   "title": "Implement SWE benchmark Eval adapters",
   "description": "Integrate SWE-bench Verified and SWE-bench-Live official container harnesses and build the independent 16-case manifest.",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -12,8 +12,8 @@
   "assignee": "kelong.ZX",
   "createdAt": "2026-07-11",
   "completedAt": null,
-  "branch": null,
-  "base_branch": "main",
+  "branch": "agent/swe-eval-adapters",
+  "base_branch": "agent/defects4j-eval-adapter",
   "worktree_path": null,
   "commit": null,
   "pr_url": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": "07-11-experiment-main-benchmarks",
   "relatedFiles": [],
-  "notes": "",
+  "notes": "Verified Optimization qualification is 10/10 on runtime sha256:e83ab8521188fd47492b443a504116ff8d3bcfe77fba4c2990c8e1b8e87533cc. Live Holdout qualification and sealing require the human-held external Guard secret. Trusted baseline seeding on origin/main remains a publication gate.",
   "meta": {}
 }

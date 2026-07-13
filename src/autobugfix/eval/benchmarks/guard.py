@@ -445,6 +445,7 @@ def metric_payload(
     public_manifest_digest: str,
     code_identity: GuardCodeIdentity,
     study_binding: Mapping[str, Any] | None = None,
+    executed_subject_sha: str | None = None,
 ) -> dict[str, Any]:
     aggregate = {
         "case_count": case_count,
@@ -462,7 +463,7 @@ def metric_payload(
         "encrypted_artifact_sha256": encrypted_artifact_sha256,
         "public_manifest_digest": public_manifest_digest,
         "guard_code_identity": code_identity.to_dict(),
-        "executed_subject_sha": code_identity.trusted_commit,
+        "executed_subject_sha": executed_subject_sha or code_identity.trusted_commit,
         "created_at": utc_now(),
     }
     if study_binding is not None:

@@ -205,18 +205,57 @@ class CodexSDKBackend(CodexBackend):
             runtime_root = project_root / runtime_root
         return runtime_root.resolve()
 
-    @staticmethod
-    def _trusted_runtime_paths() -> tuple[Path, ...]:
+    def _trusted_worker_source(self, request: CodexRequest) -> Path:
+        package = Path(__file__).resolve().parent
+        entries: list[dict[str, str]] = []
+        for path in sorted(package.rglob("*")):
+            if path.is_symlink():
+                raise CodexSDKError("trusted Codex worker source cannot contain symlinks")
+            if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            relative = path.relative_to(package).as_posix()
+            entries.append(
+                {
+                    "path": relative,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        digest = hashlib.sha256(
+            json.dumps(entries, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        source_root = self._runtime_root(request) / "trusted-worker-sources" / digest
+        destination = source_root / "autobugfix"
+        marker = source_root / "manifest.json"
+        if source_root.exists():
+            try:
+                observed = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise CodexSDKError("trusted Codex worker source cache is corrupt") from exc
+            if observed != {"digest": digest, "files": entries} or not destination.is_dir():
+                raise CodexSDKError("trusted Codex worker source cache identity drift")
+            return source_root
+        source_root.mkdir(parents=True, mode=0o700, exist_ok=False)
+        shutil.copytree(
+            package,
+            destination,
+            symlinks=False,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        write_private_text(
+            marker,
+            json.dumps({"digest": digest, "files": entries}, sort_keys=True),
+            exclusive=True,
+        )
+        return source_root
+
+    def _trusted_runtime_paths(self, request: CodexRequest) -> tuple[Path, ...]:
         base_prefix = Path(sys.base_prefix).resolve()
         candidates = [
             Path(sys.prefix).resolve(),
             base_prefix,
             base_prefix.parent,
+            self._trusted_worker_source(request),
         ]
-        for parent in Path(__file__).resolve().parents:
-            if (parent / "pyproject.toml").is_file():
-                candidates.append(parent)
-                break
         return tuple(
             dict.fromkeys(
                 path
@@ -296,7 +335,7 @@ class CodexSDKBackend(CodexBackend):
             raise CodexSDKError(
                 "Codex writable metadata mount is outside its read-only authority root"
             )
-        trusted_runtime = list(self._trusted_runtime_paths())
+        trusted_runtime = list(self._trusted_runtime_paths(request))
         role_readable = (
             [request.cwd.resolve()] if request.sandbox == "read-only" else []
         )
@@ -317,7 +356,7 @@ class CodexSDKBackend(CodexBackend):
             default_hidden.append(home)
         for candidate in (
             Path("/mnt/c/Program Files/Docker"),
-            Path("/mnt/wsl/docker-desktop"),
+            Path("/mnt/wsl"),
             Path("/var/lib/docker"),
         ):
             if candidate.exists():
@@ -465,6 +504,18 @@ class CodexSDKBackend(CodexBackend):
             key=lambda item: (len(item.parts), str(item)),
         ):
             argv.extend(("--bind", str(path), str(path)))
+        for path in sorted(
+            dict.fromkeys(
+                path
+                for path in trusted_runtime
+                if any(
+                    path != writable_root and path.is_relative_to(writable_root)
+                    for writable_root in writable
+                )
+            ),
+            key=lambda item: (len(item.parts), str(item)),
+        ):
+            argv.extend(("--ro-bind", str(path), str(path)))
         for path in sorted(dict.fromkeys(final_hidden), key=str):
             argv.extend(("--tmpfs", str(path)))
         argv.extend(("--chdir", str(control_root), "--", *worker_argv))
@@ -545,6 +596,7 @@ class CodexSDKBackend(CodexBackend):
         os.replace(temporary, config_path)
         env = self.worker_environment()
         env["CODEX_HOME"] = str(codex_home)
+        env["PYTHONPATH"] = str(self._trusted_worker_source(request))
         return env
 
     def prepare_worker_environment(self, request: CodexRequest) -> dict[str, str]:
@@ -683,21 +735,29 @@ class CodexSDKBackend(CodexBackend):
         write_private_text(stdout_path, stdout or "")
         write_private_text(stderr_path, stderr or "")
 
-    def _run_worker(self, request: CodexRequest) -> CodexResult:
+    @staticmethod
+    def _scrub_worker_credentials(codex_home: Path) -> None:
+        """Remove bridged credentials as soon as the isolated SDK call exits."""
+
+        for name in ("auth.json",):
+            credential = codex_home / name
+            if credential.is_symlink():
+                credential.unlink(missing_ok=True)
+                continue
+            if credential.is_file():
+                credential.unlink()
+
+    def _run_prepared_worker(
+        self,
+        request: CodexRequest,
+        *,
+        worker_environment: dict[str, str],
+        request_path: Path,
+        result_path: Path,
+        worker_stdout: Path,
+        worker_stderr: Path,
+    ) -> CodexResult:
         project_root = self._control_root(request)
-        request.raw_log_path.parent.mkdir(parents=True, exist_ok=True)
-        request.stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
-        stem = request.raw_log_path.name
-        request_path = request.raw_log_path.with_name(f"{stem}.sdk-request.json")
-        result_path = request.raw_log_path.with_name(f"{stem}.sdk-result.json")
-        worker_stdout = request.raw_log_path.with_name(f"{stem}.worker.stdout.log")
-        worker_stderr = request.raw_log_path.with_name(f"{stem}.worker.stderr.log")
-        if result_path.exists():
-            result_path.unlink()
-        write_private_text(
-            request_path,
-            json.dumps(self.worker_request_payload(request), sort_keys=True),
-        )
         argv = [
             sys.executable,
             "-m",
@@ -709,7 +769,6 @@ class CodexSDKBackend(CodexBackend):
         ]
         if self.module_name:
             argv.extend(("--module-name", self.module_name))
-        worker_environment = self.prepare_worker_environment(request)
         process = subprocess.Popen(
             self.worker_launch_argv(request, argv),
             cwd=project_root,
@@ -763,6 +822,34 @@ class CodexSDKBackend(CodexBackend):
             raw=dict(data.get("raw") or {}),
             exit_code=int(data.get("exit_code", 0)),
         )
+
+    def _run_worker(self, request: CodexRequest) -> CodexResult:
+        request.raw_log_path.parent.mkdir(parents=True, exist_ok=True)
+        request.stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
+        stem = request.raw_log_path.name
+        request_path = request.raw_log_path.with_name(f"{stem}.sdk-request.json")
+        result_path = request.raw_log_path.with_name(f"{stem}.sdk-result.json")
+        worker_stdout = request.raw_log_path.with_name(f"{stem}.worker.stdout.log")
+        worker_stderr = request.raw_log_path.with_name(f"{stem}.worker.stderr.log")
+        if result_path.exists():
+            result_path.unlink()
+        write_private_text(
+            request_path,
+            json.dumps(self.worker_request_payload(request), sort_keys=True),
+        )
+        worker_environment = self.prepare_worker_environment(request)
+        codex_home = Path(worker_environment["CODEX_HOME"]).resolve()
+        try:
+            return self._run_prepared_worker(
+                request,
+                worker_environment=worker_environment,
+                request_path=request_path,
+                result_path=result_path,
+                worker_stdout=worker_stdout,
+                worker_stderr=worker_stderr,
+            )
+        finally:
+            self._scrub_worker_credentials(codex_home)
 
     def _run_in_process(self, request: CodexRequest) -> CodexResult:
         request.raw_log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -90,7 +90,7 @@ def diff_for_task(
     base_ref = base_ref or f"{repo.remote}/{repo.main_branch}"
     tracked = run_git(
         worktree_path,
-        ["diff", "--binary", base_ref],
+        ["diff", "--no-ext-diff", "--no-textconv", "--binary", base_ref],
         check=True,
     ).stdout
     untracked_raw = run_git(
@@ -102,7 +102,16 @@ def diff_for_task(
     for relative_path in (item for item in untracked_raw.split("\0") if item):
         result = run_git(
             worktree_path,
-            ["diff", "--binary", "--no-index", "--", "/dev/null", relative_path],
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--binary",
+                "--no-index",
+                "--",
+                "/dev/null",
+                relative_path,
+            ],
             check=False,
         )
         if result.returncode not in {0, 1}:

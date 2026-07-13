@@ -208,6 +208,26 @@ class BenchmarkStore:
             data,
         )
 
+    def write_swe_record(
+        self,
+        category: str,
+        adapter: str,
+        identity: str,
+        data: Mapping[str, Any],
+    ) -> Path:
+        verify_record(data)
+        return self._atomic_yaml(
+            self._child(
+                self.trusted_root,
+                "swe",
+                category,
+                adapter,
+                identity,
+                f"{data['record_digest']}.yaml",
+            ),
+            data,
+        )
+
     def read_trusted_manifest(self, path: Path) -> SealedBenchmarkManifest:
         resolved = path.resolve()
         if not resolved.is_relative_to(self.trusted_root):

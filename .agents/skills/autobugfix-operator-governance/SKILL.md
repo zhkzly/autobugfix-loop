@@ -87,10 +87,13 @@ The benchmark metric transition is deliberately split across trust domains:
 An Operator Writer may request these transitions but cannot run the human
 secret steps, edit their SQLite result, or substitute a YAML claim.
 
-The direct Defects4J Guard runner currently authorizes H0 only. Candidate
-registration must additionally prove `executed_subject_sha == line.head_sha`;
-until an isolated subject broker exists, the service must fail closed instead
-of signing current-main results under a candidate binding.
+The direct Defects4J Guard runner authorizes its clean trusted subject only.
+Experiment 2 uses a separate SWE exact-subject broker that accepts the
+service-derived Study binding, executes its bound H0 or integrated line SHA in
+an isolated subject checkout, and requires
+`executed_subject_sha == study_binding.subject_sha`. The external SWE Guard
+root and wave tokens are human authority and must never enter Operator
+evidence, WriterView, candidate worktrees, or governance SQLite.
 
 The current experiments share only one named H0 definition. Experiment 1 is a
 descriptive 16-case Defects4J evaluation of unchanged H0, so Operator must not

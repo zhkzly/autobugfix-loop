@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 from pathlib import Path
 
 
@@ -15,12 +16,31 @@ def run_git(
     timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+        )
         result = subprocess.run(
-            ["git", "-C", str(repo), *args],
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                f"core.hooksPath={os.devnull}",
+                "-C",
+                str(repo),
+                *args,
+            ],
             text=True,
             capture_output=True,
             check=False,
             timeout=timeout_seconds,
+            env=environment,
         )
     except subprocess.TimeoutExpired as exc:
         raise GitError(
@@ -75,7 +95,7 @@ def git_dir(path: Path) -> Path:
 
 
 def diff_against(path: Path, base_ref: str, extra_args: list[str] | None = None) -> str:
-    args = ["diff", "--binary", base_ref]
+    args = ["diff", "--no-ext-diff", "--no-textconv", "--binary", base_ref]
     if extra_args:
         args.extend(extra_args)
     return run_git(path, args, check=True).stdout

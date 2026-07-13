@@ -85,11 +85,45 @@ third re-verifies the signature, frozen harness/policy, Study binding, and
 numeric success contract before the Operator service records metric authority.
 Do not type aggregate values into a substitute receipt.
 
-The current direct Guard runner measures only the clean trusted checkout and
-therefore produces H0/Baseline authority. It must reject a binding whose
-`subject_sha` differs from that checkout. Do not claim a CANDIDATE metric until
-the experiment task provides a trusted isolated subject broker that reports
-the exact experiment-line SHA; changing a YAML binding is not execution.
+The Defects4J direct Guard runner measures only the clean trusted checkout.
+Experiment 2 instead uses the SWE exact-subject broker for both H0 and the
+integrated H_general candidate. The broker derives the candidate SHA/tree from
+Git, binds config/skills/runtime/image/Study facts, and freezes its final patch
+before the official scorer. Changing a YAML binding is never execution.
+
+SWE preparation and execution use distinct authority commands:
+
+```text
+# Public Optimization qualification; two official gold runs, no model call.
+autobugfix eval benchmark qualify-swe --protocol benchmarks/swe-experiment-2.yaml \
+  --adapter swebench_verified --instance <public-id>
+
+# Holdout qualification is a human Guard action. The external root must be
+# outside the project, Eval, Memory, and Operator roots.
+autobugfix eval benchmark qualify-swe --protocol benchmarks/swe-experiment-2.yaml \
+  --adapter swebench_live --instance <private-id> --guard-root <external-root>
+
+autobugfix eval benchmark prepare-swe --protocol benchmarks/swe-experiment-2.yaml \
+  --guard-root <external-root>
+autobugfix eval benchmark seal-swe --prepared <prepared.yaml> \
+  --guard-root <external-root>
+
+# Operator-visible case evidence. The result may drive governed H_general work.
+autobugfix eval benchmark run-swe-optimization --manifest <manifest.yaml> \
+  --case <public-case> --study-binding <binding.yaml> --run-id <id>
+
+# Human Guard-only Holdout execution. Case evidence remains encrypted; only a
+# signed aggregate leaves the Guard authority plane.
+autobugfix eval benchmark guard-run-swe --manifest <manifest.yaml> \
+  --guard-root <external-root> --wave-token <opaque-token> \
+  --study-binding <binding.yaml> --run-id <id>
+```
+
+Never put `guard-root`, its catalog, decrypted cohort, Holdout IDs, wave tokens,
+or case-level Guard artifacts in an Operator request/evidence path. A failed
+official scorer is Eval evidence after freeze and cannot trigger another
+Writer attempt. Only the declared visible verifier can drive bounded Execution
+feedback.
 
 Private Defects4J qualification may compare buggy and fixed revisions to reject
 an unstable benchmark case. Never move its fixed baseline, gold data, or

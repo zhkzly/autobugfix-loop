@@ -1,0 +1,19 @@
+[project]
+name = "autobugfix-swebench-harness"
+version = "0.1.0"
+description = "Locked official SWE-bench runtime for Autobugfix Eval."
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "swebench==4.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
