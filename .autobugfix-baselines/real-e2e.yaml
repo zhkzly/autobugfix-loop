@@ -1,0 +1,38 @@
+name: real-e2e
+base_sha: be906c5d752b316e537fdc72e618e04ee8c7105e
+profile: real-e2e
+profile_contract:
+  commands:
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - scripts/real_repository_acceptance.py
+    - --root
+    - '{shadow_state_root}/real-e2e'
+    - --model
+    - gpt-5.4-mini
+    name: real-repository-e2e
+  network_access: true
+  timeout_seconds: 3600
+profile_digest: 58a34e67110daf517fceb4385c12fc6f383c951f1411e92cc5cba062b5aa2fb2
+profile_values: {}
+input_digest: bb5358ae89259e0f0fd390d04e9e1c758867f2856f3c42ae82ed2b76a10d7b02
+metrics:
+  artifact_completeness: 1.0
+  pass_rate: 1.0
+  runtime_seconds: 861.690494229988
+receipt_digest: fb04c2cb99c7ac63ff8748aafc0a139174ed2a52e88fb6fab12425d9e5d8af71
+commands:
+- name: real-repository-e2e
+  exit_code: 0
+  passed: true
+  timed_out: false
+  duration_seconds: 861.690494229988
+  stdout_sha256: fc9a7bacd906fca3bee922e6c46e16e7aaf3c3e672707ca9b507019ef319ace8
+  stderr_sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+notes: Trusted post-M1 baseline for SWE Eval promotion
+created_at: '2026-07-13T16:37:39Z'
+baseline_digest: 31b6d00e3e46f88b5cd5d89e24f124f1ea402047a94c4b94a930e369eeb60edc
