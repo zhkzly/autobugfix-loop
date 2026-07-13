@@ -64,6 +64,64 @@ Memory, model, budget, and receipt digests. `run-evaluation` accepts the
 prepared manifest only; a repair failure is a measured result and cannot cause
 an extra case run. Only harness failure makes the command fail.
 
+The Raw Codex SDK comparator is an Eval-owned measurement arm, not an Operator
+request and not an Execution backend. Its standalone uv
+project calls `openai_codex.Codex` directly for exactly one fresh thread and
+one turn per case. It receives only the sanitized buggy worktree and visible
+case bundle; it receives no Autobugfix skills, Memory, managed verifier
+feedback, fixed truth, gold patch, hidden tests, or official score.
+The runner must use `ApprovalMode.deny_all`, `Sandbox.workspace_write`, and
+disabled tool network access. Treat any different runner metadata, request
+record, result record, or retained Codex config as a harness failure; automatic
+approval is not an acceptable Raw baseline policy.
+
+Use this order:
+
+```text
+autobugfix eval baseline pilot-raw-codex --protocol <raw-seed>
+  --source-manifest <prepared-H0> --case <declared-development-case>
+  --run-id <pilot-id>
+autobugfix eval baseline prepare-raw-codex --protocol <raw-seed>
+  --source-manifest <prepared-H0> --h0-report <frozen-H0-report>
+autobugfix eval baseline run-raw-codex --manifest <prepared-raw>
+  --run-id <formal-id>
+autobugfix eval baseline report-raw-codex --run-dir <formal-run>
+  --h0-report <same-frozen-H0-report>
+```
+
+Pilot only on a predeclared development case. After pilot harness fixes,
+commit and freeze the runner before formal generation. A valid failed repair
+remains in the result. Any transport, sandbox, materialization, patch-apply,
+or scorer harness error invalidates the whole formal run; never resume selected
+cases or use an official result to start another SDK turn. Operator must not
+triage Raw/H0 case outcomes into H0 changes, skills, or Memory during this
+measurement. The standalone Raw process loads no Operator or role skill; this
+skill governs the supervising human/main-agent workflow only.
+
+Experiment 2 uses a separate SWE treatment protocol and never imports the
+Defects4J Raw result or case feedback. Before any Operator evolution, run the
+public Raw comparator under the same pinned Verified cases and scorer:
+
+```text
+autobugfix eval baseline run-swe-raw-development
+  --source-protocol benchmarks/swe-experiment-2.yaml
+  --treatment benchmarks/swe-experiment-2-raw-codex.yaml
+  --instance <predeclared-optimization-case> --run-id <development-id>
+autobugfix eval baseline prepare-swe-raw-codex
+  --source-protocol benchmarks/swe-experiment-2.yaml
+  --treatment benchmarks/swe-experiment-2-raw-codex.yaml
+autobugfix eval baseline run-swe-raw-codex
+  --manifest <prepared-raw-manifest> --run-id <formal-id>
+```
+
+The development command validates one selected case only. Formal preparation
+requires a clean committed non-main checkout and freezes all ten case,
+qualification, source, image, runtime, SDK, prompt, config, and Git identities.
+Never expose Raw generated patches to Operator as solution hints. Public Raw
+aggregate outcomes are contextual measurements; `H_general` versus frozen H0
+remains the primary evolution effect. Holdout Raw/H0/H_general results remain
+Guard-owned and sealed until all three treatment identities are frozen.
+
 `seal` and `guard-run` are human Guard actions for treatment studies, not the
 Experiment 1 H0 measurement. When used, they must execute from a clean control
 checkout at `eval.benchmarks.guard.trusted_ref`; the encrypted bundle, public

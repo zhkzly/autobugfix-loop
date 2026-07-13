@@ -7,6 +7,13 @@ Build the trusted, production-grade measurement control required by Experiment
 Autobugfix Execution loop against an exact H0 or candidate subject, freeze the
 generated patch and trace, and only then invoke the official benchmark scorer.
 
+The approved Experiment-2 extension also supplies an independent direct
+`openai-codex` comparator. Raw Codex receives the same visible issue and buggy
+repository, runs one fresh SDK thread and one turn without Autobugfix Memory,
+skills, verifier feedback, evaluator, or retry, freezes its patch, and is then
+scored by the same official SWE runtime. This comparator is Eval-owned and is
+not an Execution mode or an Operator successor.
+
 This child does not optimize Autobugfix and does not create `H_general`. It
 provides the external Eval/Guard authority that will measure both H0 and the
 later governed H_general experiment line under one frozen protocol.
@@ -104,6 +111,21 @@ unpinned Hugging Face revision.
   noninterference receipt. Any mutation of the frozen submission is a harness
   error.
 
+### Direct Codex Comparator
+
+- R14a. Run Raw Codex through the preview `openai-codex` Python SDK in a
+  separately locked uv project; production execution may not use `codex exec`
+  or import Autobugfix runtime code into the SDK worker.
+- R14b. Bind Raw generation to the same pinned Optimization cases, source
+  snapshots, model, timeout, official images, and scorer as H0. The one-turn
+  comparator is a system-level reference, not a compute-matched ablation.
+- R14c. Disable project hooks and multi-agent delegation, hide Eval/Guard/
+  Operator authority, retain raw request/events/stderr/result artifacts, and
+  freeze the generated diff before official scoring.
+- R14d. Raw official results are measurement output. They cannot trigger a
+  second turn, modify H0/H_general, enter Memory, or become same-case Writer
+  feedback.
+
 ### Subject Broker
 
 - R15. Add a trusted isolated subject broker capable of running the exact
@@ -160,6 +182,9 @@ unpinned Hugging Face revision.
       unseen-repository Holdout cases are sealed with 3/8/16 projections.
 - [ ] Generated patches are scored by official tests, never exact-diff
       equality, and harness errors remain distinct from unresolved issues.
+- [ ] One real `gpt-5.4-mini` Raw Codex SDK case produces SDK events, a frozen
+      diff, an official SWE result, and a passing noninterference receipt
+      without importing Autobugfix into the worker.
 - [ ] Root tests, harness-project tests, both compile checks, diff hygiene,
       role-skill validation, and a real official-container acceptance pass.
 
@@ -169,8 +194,10 @@ unpinned Hugging Face revision.
 - Reading Holdout results to improve H0 or candidate skills.
 - A full 500-case leaderboard run.
 - Windows Holdout execution in this Linux/WSL experiment.
-- Combining Experiment 1, Raw SDK baseline, H_bug, or Defects4J case feedback
-  with Experiment 2.
+- Combining Experiment 1, H_bug, Defects4J results, or their case-level
+  feedback with Experiment 2. Reusing the independently tested generic Raw SDK
+  sandbox implementation is allowed; its Defects4J artifacts and outcomes are
+  not Experiment-2 inputs.
 
 ## Notes
 

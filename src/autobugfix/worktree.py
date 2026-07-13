@@ -82,12 +82,7 @@ def validate_task_worktree(
     return resolved
 
 
-def diff_for_task(
-    repo: RepoProfile,
-    worktree_path: Path,
-    base_ref: str | None = None,
-) -> str:
-    base_ref = base_ref or f"{repo.remote}/{repo.main_branch}"
+def git_diff_with_untracked(worktree_path: Path, base_ref: str) -> str:
     tracked = run_git(
         worktree_path,
         ["diff", "--no-ext-diff", "--no-textconv", "--binary", base_ref],
@@ -120,6 +115,17 @@ def diff_for_task(
             )
         parts.append(result.stdout)
     return "".join(parts)
+
+
+def diff_for_task(
+    repo: RepoProfile,
+    worktree_path: Path,
+    base_ref: str | None = None,
+) -> str:
+    return git_diff_with_untracked(
+        worktree_path,
+        base_ref or f"{repo.remote}/{repo.main_branch}",
+    )
 
 
 def ignored_paths(worktree_path: Path) -> tuple[str, ...]:

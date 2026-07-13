@@ -277,6 +277,7 @@ layer_resolution:
     - .trellis/spec/
     - .trellis/tasks/
     - docs/
+    - baselines/
 
 layers:
   execution:
@@ -316,6 +317,7 @@ layers:
       - tests/test_memory_gradio_app.py
   eval:
     paths:
+      - baselines/**
       - benchmarks/**
       - containers/**
       - harnesses/**
@@ -327,6 +329,7 @@ layers:
       - tests/test_eval_benchmarks.py
       - tests/test_swe_*.py
       - tests/test_subject_broker.py
+      - tests/test_raw_codex_baseline.py
   operator:
     paths:
       - .autobugfix-governance/**
@@ -450,7 +453,9 @@ validation_profiles:
     timeout_seconds: 240
     commands:
       - name: eval-tests
-        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_eval.py, tests/test_eval_benchmarks.py, tests/test_dataset.py, tests/test_swe_models.py, tests/test_swe_runtime.py, tests/test_swe_adapters.py, tests/test_subject_broker.py]
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_eval.py, tests/test_eval_benchmarks.py, tests/test_raw_codex_baseline.py, tests/test_dataset.py, tests/test_swe_models.py, tests/test_swe_runtime.py, tests/test_swe_adapters.py, tests/test_swe_raw_codex.py, tests/test_subject_broker.py]
+      - name: raw-codex-standalone-tests
+        argv: [uv, run, --project, baselines/raw_codex_sdk, --cache-dir, /tmp/uv-cache, pytest, -q, baselines/raw_codex_sdk/tests]
   shared_runtime:
     timeout_seconds: 240
     commands:
@@ -468,6 +473,10 @@ validation_profiles:
         argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q]
       - name: compileall
         argv: [uv, run, --cache-dir, /tmp/uv-cache, python, -m, compileall, -q, src, tests, scripts]
+      - name: raw-codex-standalone-tests
+        argv: [uv, run, --project, baselines/raw_codex_sdk, --cache-dir, /tmp/uv-cache, pytest, -q, baselines/raw_codex_sdk/tests]
+      - name: raw-codex-standalone-compileall
+        argv: [uv, run, --project, baselines/raw_codex_sdk, --cache-dir, /tmp/uv-cache, python, -m, compileall, -q, baselines/raw_codex_sdk/src, baselines/raw_codex_sdk/tests]
       - name: diff-check
         argv: [git, diff, --check, "{base_sha}", --]
 

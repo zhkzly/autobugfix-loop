@@ -305,6 +305,97 @@ skill contents, active Memory, model, attempt budget, and every qualified case
 receipt. `run-evaluation` rejects any drift and writes a final
 `subject-noninterference.yaml` receipt.
 
+### Raw Codex SDK Comparator
+
+The Raw comparator is a separate experimental treatment, not another
+Execution backend. It gives the same buggy repository snapshot and visible
+issue bundle to one fresh direct Codex Python SDK thread/turn, freezes the Git
+patch produced by that turn, and then uses the same independent Defects4J
+official scorer as H0. It deliberately receives no Autobugfix role skills,
+Memory, managed verifier callback, evaluator feedback, gold patch, fixed
+revision, hidden tests, or official verdict.
+
+The treatment is a separately locked uv project at
+`baselines/raw_codex_sdk`, pinned to `openai-codex==0.1.0b3`. The trusted Eval
+service launches it in Bubblewrap with only the target worktree, visible case
+bundle, isolated `CODEX_HOME`, read-only runner environment, and raw output
+mount. The SDK process cannot write prepared manifests, submissions, scores,
+or comparison reports. The treatment pins `ApprovalMode.deny_all`,
+`Sandbox.workspace_write`, and disabled tool network access. The SDK control
+connection remains available, but model-issued commands cannot request a
+permission escalation or use the network to retrieve benchmark truth.
+
+Run one already exposed development case before freezing the formal runner:
+
+```bash
+uv run autobugfix eval baseline pilot-raw-codex \
+  --protocol benchmarks/defects4j-v3.0.1-raw-codex-baseline.yaml \
+  --source-manifest .autobugfix/trusted-eval-cases/manifests/defects4j-v3.0.1-h0-16/<prepared-h0>.yaml \
+  --case d4j-jacksoncore-2 \
+  --run-id raw-codex-pilot
+```
+
+After pilot-only harness fixes, commit the runner and use a clean checkout to
+freeze and run all 16 cases exactly once:
+
+```bash
+uv run autobugfix eval baseline prepare-raw-codex \
+  --protocol benchmarks/defects4j-v3.0.1-raw-codex-baseline.yaml \
+  --source-manifest .autobugfix/trusted-eval-cases/manifests/defects4j-v3.0.1-h0-16/<prepared-h0>.yaml \
+  --h0-report .autobugfix/eval-runs/<h0-run>/evaluation-report.yaml
+
+uv run autobugfix eval baseline run-raw-codex \
+  --manifest .autobugfix/trusted-eval-cases/manifests/defects4j-v3.0.1-raw-codex-sdk/<prepared-raw>.yaml \
+  --run-id raw-codex-formal-16
+
+uv run autobugfix eval baseline report-raw-codex \
+  --run-dir .autobugfix/raw-codex-baseline/formal-runs/raw-codex-formal-16 \
+  --h0-report .autobugfix/eval-runs/<h0-run>/evaluation-report.yaml
+```
+
+A model timeout, empty patch, out-of-policy patch, or official rejection is a
+measured failed repair. A transport, sandbox, materialization, patch-apply, or
+scorer infrastructure failure invalidates the complete formal run; fix the
+harness under a new code/manifest digest and restart all 16 cases. The primary
+paired report contains the 13 cases not used during H0 development; the three
+exposed cases and all-16 result are secondary diagnostics.
+
+Experiment 2 has an independent Raw comparator for the ten public
+SWE-bench Verified Optimization cases. It reuses only the generic locked SDK
+worker; no Defects4J result, artifact, Memory, or case feedback enters the SWE
+experiment. Run one real development case before committing the formal
+treatment:
+
+```bash
+uv run --cache-dir /tmp/uv-cache autobugfix eval baseline \
+  run-swe-raw-development \
+  --source-protocol benchmarks/swe-experiment-2.yaml \
+  --treatment benchmarks/swe-experiment-2-raw-codex.yaml \
+  --instance astropy__astropy-12907 \
+  --run-id raw-swe-development
+```
+
+After the shared scorer and Raw runner are stable, commit the non-main Eval
+branch, prepare from a clean checkout, and execute all ten cases serially:
+
+```bash
+uv run --cache-dir /tmp/uv-cache autobugfix eval baseline \
+  prepare-swe-raw-codex \
+  --source-protocol benchmarks/swe-experiment-2.yaml \
+  --treatment benchmarks/swe-experiment-2-raw-codex.yaml
+
+uv run --cache-dir /tmp/uv-cache autobugfix eval baseline \
+  run-swe-raw-codex \
+  --manifest <prepared-swe-raw-manifest> \
+  --run-id raw-swe-formal-10
+```
+
+The shared official scorer starts only after Raw SDK events and the generated
+patch are frozen. A failed official test is a measured outcome and cannot
+start another turn. This is a system-level one-turn reference; the primary
+Operator evolution comparison remains the budget-matched H_general versus H0
+comparison on the sealed Holdout.
+
 For a separate Operator treatment study, derive a binding, run the encrypted
 Holdout, and import the signed aggregate through service-owned transitions:
 
