@@ -11,7 +11,7 @@ import pytest
 
 from autobugfix.codex_sdk import CodexSDKBackend, CodexSDKError
 from autobugfix.git_utils import git_common_dir, git_dir
-from autobugfix.models import CodexRequest
+from autobugfix.models import CodexRequest, CodexResult
 
 
 def write_project_config(root: Path) -> None:
@@ -252,6 +252,57 @@ def test_runtime_bridge_sanitizes_user_config_and_legacy_effort(tmp_path, monkey
     assert second_environment["CODEX_HOME"] != environment["CODEX_HOME"]
 
 
+@pytest.mark.parametrize("raises", [False, True])
+def test_worker_scrubs_bridged_auth_after_success_or_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raises: bool,
+) -> None:
+    home = tmp_path / "home"
+    source_home = home / ".codex"
+    source_home.mkdir(parents=True)
+    (source_home / "auth.json").write_text(
+        '{"token":"never-persist"}', encoding="utf-8"
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    write_project_config(project)
+    monkeypatch.setenv("HOME", str(home))
+    request = CodexRequest(
+        role="writer",
+        prompt="prompt",
+        cwd=project,
+        control_root=project,
+        sandbox="workspace-write",
+        model="m",
+        timeout_seconds=30,
+        developer_instructions="instructions",
+        raw_log_path=project / "raw.jsonl",
+        stderr_log_path=project / "stderr.log",
+        approval_mode="auto_review",
+    )
+    backend = CodexSDKBackend()
+    observed_home: Path | None = None
+
+    def fake_run(*args, worker_environment, **kwargs):
+        nonlocal observed_home
+        observed_home = Path(worker_environment["CODEX_HOME"])
+        assert (observed_home / "auth.json").is_file()
+        if raises:
+            raise CodexSDKError("synthetic worker failure")
+        return CodexResult(text="done", raw={}, exit_code=0)
+
+    monkeypatch.setattr(backend, "_run_prepared_worker", fake_run)
+    if raises:
+        with pytest.raises(CodexSDKError, match="synthetic"):
+            backend.run(request)
+    else:
+        backend.run(request)
+
+    assert observed_home is not None
+    assert not (observed_home / "auth.json").exists()
+
+
 def test_target_worktree_config_cannot_override_trusted_control_runtime(tmp_path, monkeypatch):
     control_root = tmp_path / "control"
     target = tmp_path / "target"
@@ -345,8 +396,9 @@ def test_worker_bubblewrap_hides_host_tmp_authority_but_mounts_worktree(tmp_path
         (
             "from pathlib import Path; "
             f"print(Path({str(authority / 'gold.patch')!r}).exists()); "
-            "print(Path('/run/docker.sock').exists()); "
-            "print(Path('/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe').exists()); "
+                "print(Path('/run/docker.sock').exists()); "
+                "print(Path('/mnt/wsl/docker-desktop-bind-mounts').exists()); "
+                "print(Path('/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe').exists()); "
             f"Path({str(worktree / 'writer.txt')!r}).write_text('ok')"
         ),
     ]
@@ -359,7 +411,7 @@ def test_worker_bubblewrap_hides_host_tmp_authority_but_mounts_worktree(tmp_path
         check=True,
     )
 
-    assert result.stdout.splitlines() == ["False", "False", "False"]
+    assert result.stdout.splitlines() == ["False", "False", "False", "False"]
     assert (worktree / "writer.txt").read_text(encoding="utf-8") == "ok"
 
 

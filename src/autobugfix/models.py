@@ -176,6 +176,30 @@ class Defects4JBenchmarkConfig:
 
 
 @dataclass(slots=True)
+class SWEBenchmarkConfig:
+    harness_project: Path = Path("harnesses/swebench")
+    platform: str = "linux/amd64"
+    swebench_version: str = "4.1.0"
+    swebench_commit: str = "726c5461e2ef52d83cf1ea2107870a8bb3328d57"
+    swebench_tree: str = "f178530b37202c549b1b2b3300db2da90da648db"
+    verified_dataset: str = "princeton-nlp/SWE-bench_Verified"
+    verified_dataset_revision: str = "c104f840cc67f8b6eec6f759ebc8b2693d585d4a"
+    verified_namespace: str | None = None
+    live_repository: str = "https://github.com/microsoft/SWE-bench-Live.git"
+    live_commit: str = "c5ea7e48b7b8bb0f4bcbbceb182a09dadfabfc2c"
+    live_tree: str = "aaa2c4a59dab49c54ef6576d1190dfb590c2fd1d"
+    live_launch_repository: str = "https://github.com/microsoft/RepoLaunch"
+    live_launch_commit: str = "ff359c6edb9aaa400fff3fe819fa483a5cc2ee23"
+    live_launch_tree: str = "1491dbf642336270565700707393f24dadbe190a"
+    live_dataset: str = "SWE-bench-Live/MultiLang"
+    live_dataset_revision: str = "608f7ae9ab8ea1f9f0d030fe04562cf6bd1a0c8b"
+    scorer_timeout_seconds: int = 5400
+    memory_limit: str = "8g"
+    cpu_limit: float = 4.0
+    pids_limit: int = 1024
+
+
+@dataclass(slots=True)
 class EvalGuardConfig:
     trusted_ref: str = "origin/main"
 
@@ -190,6 +214,7 @@ class EvalBenchmarkConfig:
     min_free_disk_gb: int = 10
     guard: EvalGuardConfig = field(default_factory=EvalGuardConfig)
     defects4j: Defects4JBenchmarkConfig = field(default_factory=Defects4JBenchmarkConfig)
+    swe: SWEBenchmarkConfig = field(default_factory=SWEBenchmarkConfig)
 
 
 @dataclass(slots=True)

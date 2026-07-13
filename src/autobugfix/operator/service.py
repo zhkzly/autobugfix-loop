@@ -748,8 +748,18 @@ class OperatorGovernanceService:
             "study_id": study.study_id,
             "line_id": study.line_id,
             "subject_sha": study.base_subject_sha,
+            "subject_tree": rev_parse(
+                self.project_root, f"{study.base_subject_sha}^{{tree}}"
+            ),
+            "line_generation": 0,
             "manifest_digest": study.manifest_digest,
             "success_contract_digest": digest_payload(study.success_contract),
+            "harness_sha": study.harness_sha,
+            "policy_digest": study.policy_digest,
+            "role_config_digest": study.role_config_digest,
+            "memory_digest": study.memory_digest,
+            "primary_model": study.primary_model,
+            "target_checkpoint_name": study.target_checkpoint_name,
             "budget_grant_id": None,
             "budget_digest": None,
             "wave": None,
@@ -779,6 +789,10 @@ class OperatorGovernanceService:
             payload.update(
                 {
                     "subject_sha": line.head_sha,
+                    "subject_tree": rev_parse(
+                        self.project_root, f"{line.head_sha}^{{tree}}"
+                    ),
+                    "line_generation": line.generation,
                     "budget_grant_id": grant.grant_id,
                     "budget_digest": grant.grant_digest,
                     "wave": grant.wave,

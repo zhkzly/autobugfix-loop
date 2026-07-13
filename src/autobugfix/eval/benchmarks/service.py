@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
+import shutil
 import tempfile
 import uuid
 from dataclasses import replace
@@ -18,6 +20,21 @@ from autobugfix.eval.benchmarks.authority import (
     resolve_guard_code_identity,
 )
 from autobugfix.eval.benchmarks.defects4j import Defects4JRuntime
+from autobugfix.eval.benchmarks.swe_runtime import SWERuntime
+from autobugfix.eval.benchmarks.swe_guard import SWEGuardStore, SWEGuardStoreError
+from autobugfix.eval.benchmarks.subject_broker import SWESubjectBroker
+from autobugfix.eval.benchmarks.swe_live import SWELiveAdapter
+from autobugfix.eval.benchmarks.swe_materialize import (
+    SWEImageMaterializer,
+    SWEMaterializedRepository,
+)
+from autobugfix.eval.benchmarks.swe_models import (
+    SWEAttachment,
+    SWEExperimentProtocol,
+    SWEInstance,
+    SWEVisibleCase,
+)
+from autobugfix.eval.benchmarks.swe_verified import SWEVerifiedAdapter
 from autobugfix.eval.benchmarks.guard import (
     GuardBundle,
     GuardCaseSpec,
@@ -38,6 +55,7 @@ from autobugfix.eval.benchmarks.models import (
     EvaluationSeedManifest,
     PreparedEvaluationCase,
     PreparedEvaluationManifest,
+    canonical_json,
     digest_file,
     digest_payload,
     record_with_digest,
@@ -90,17 +108,19 @@ class EvalBenchmarkService:
     def _doctor_runtime(
         self,
         adapter: str,
-        runtime: Defects4JRuntime,
+        runtime: Defects4JRuntime | SWERuntime,
     ) -> dict[str, Any]:
-        if adapter != "defects4j":
-            raise EvalBenchmarkServiceError(f"unsupported benchmark adapter: {adapter}")
         artifact_root = (
             self.config.eval.benchmarks.trusted_case_root
             / "doctor-artifacts"
             / adapter
             / uuid.uuid4().hex
         )
-        report = runtime.doctor(artifact_root)
+        report = (
+            runtime.doctor(artifact_root)
+            if isinstance(runtime, Defects4JRuntime)
+            else runtime.doctor(adapter, artifact_root)
+        )
         data = report.to_dict()
         path = self.store.write_doctor(adapter, data)
         return {
@@ -115,10 +135,1419 @@ class EvalBenchmarkService:
         }
 
     def doctor(self, adapter: str) -> dict[str, Any]:
-        return self._doctor_runtime(
-            adapter,
-            Defects4JRuntime(self.config.eval.benchmarks),
+        if adapter == "defects4j":
+            runtime: Defects4JRuntime | SWERuntime = Defects4JRuntime(
+                self.config.eval.benchmarks
+            )
+        elif adapter in SWERuntime.ADAPTERS:
+            runtime = SWERuntime(self.project_root, self.config.eval.benchmarks)
+        else:
+            raise EvalBenchmarkServiceError(f"unsupported benchmark adapter: {adapter}")
+        return self._doctor_runtime(adapter, runtime)
+
+    def _swe_adapter(self, adapter: str):
+        runtime = SWERuntime(self.project_root, self.config.eval.benchmarks)
+        if adapter == "swebench_verified":
+            return SWEVerifiedAdapter(runtime)
+        if adapter == "swebench_live":
+            return SWELiveAdapter(runtime)
+        raise EvalBenchmarkServiceError(f"unsupported SWE adapter: {adapter}")
+
+    def _swe_guard_store(self, guard_root: Path) -> SWEGuardStore:
+        return SWEGuardStore(
+            guard_root,
+            forbidden_roots=(
+                self.project_root,
+                self.config.eval.benchmarks.cache_root,
+                self.config.eval.benchmarks.trusted_case_root,
+                self.config.eval.benchmarks.visible_manifest_root,
+                self.config.operator.state.root,
+                self.config.operator.artifacts.root,
+                self.project_root / ".autobugfix-memory",
+            ),
         )
+
+    def _swe_guard_adapter(self, adapter: str, store: SWEGuardStore):
+        private_config = replace(
+            self.config.eval.benchmarks,
+            cache_root=store.root / "runtime-cache",
+            trusted_case_root=store.root / "runtime-state",
+            visible_manifest_root=store.root / "visible-projection",
+        )
+        runtime = SWERuntime(self.project_root, private_config)
+        if adapter == "swebench_live":
+            return SWELiveAdapter(runtime)
+        if adapter == "swebench_verified":
+            return SWEVerifiedAdapter(runtime)
+        raise EvalBenchmarkServiceError(f"unsupported SWE Guard adapter: {adapter}")
+
+    def inspect_swe(self, adapter: str, instance_id: str) -> dict[str, Any]:
+        runner = self._swe_adapter(adapter)
+        artifact_root = (
+            self.config.eval.benchmarks.trusted_case_root
+            / "swe"
+            / "inspection-artifacts"
+            / adapter
+            / safe_component(instance_id, "instance_id")
+            / uuid.uuid4().hex
+        )
+        instance = runner.load_instance(instance_id, artifact_root)
+        return record_with_digest(
+            {
+                "schema": "autobugfix-swe-public-inspection-v1",
+                "adapter": adapter,
+                "instance_id": instance.instance_id,
+                "repository": instance.repository,
+                "base_commit": instance.base_commit,
+                "language": instance.language,
+                "problem_statement": instance.problem_statement,
+                "hints_text": instance.hints_text,
+                "created_at": instance.created_at,
+                "docker_image": instance.docker_image,
+                "dataset_revision": runner.snapshot.revision,
+                "dataset_snapshot_sha256": runner.snapshot.sha256,
+                "runtime_id": runner.runtime.runtime_id,
+            }
+        )
+
+    def qualify_swe(
+        self,
+        protocol_path: Path,
+        adapter: str,
+        instance_id: str,
+        guard_root: Path | None = None,
+        guard_secret: str | bytes | None = None,
+    ) -> dict[str, Any]:
+        protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+        if adapter == "swebench_verified":
+            expected_dataset = protocol.optimization_dataset
+            role = "optimization"
+        elif adapter == "swebench_live":
+            expected_dataset = protocol.holdout_dataset
+            role = "sealed_holdout"
+        else:
+            raise EvalBenchmarkServiceError(f"unsupported SWE adapter: {adapter}")
+        guard_store = None
+        if adapter == "swebench_live":
+            if guard_root is None or guard_secret is None:
+                raise EvalBenchmarkServiceError(
+                    "SWE-bench-Live qualification requires external encrypted Guard storage"
+                )
+            guard_store = self._swe_guard_store(guard_root)
+            runner = self._swe_guard_adapter(adapter, guard_store)
+        else:
+            runner = self._swe_adapter(adapter)
+        if runner.snapshot.dataset != expected_dataset:
+            raise EvalBenchmarkServiceError("SWE protocol dataset does not match adapter")
+        identity = safe_component(instance_id, "instance_id")
+        run_token = uuid.uuid4().hex
+        temporary = None
+        if guard_store is not None:
+            staging = guard_store.root / "staging"
+            staging.mkdir(parents=True, mode=0o700, exist_ok=True)
+            temporary = tempfile.TemporaryDirectory(
+                prefix="qualification-", dir=staging
+            )
+            run_root = Path(temporary.name)
+        else:
+            run_root = (
+                self.config.eval.benchmarks.trusted_case_root
+                / "swe"
+                / "qualification-runs"
+                / adapter
+                / identity
+                / run_token
+            )
+        inspect_root = run_root / "inspection"
+        instance = runner.load_instance(instance_id, inspect_root)
+        official_attempts = []
+        expected_image_id: str | None = None
+        for attempt in range(1, protocol.qualification_repeats + 1):
+            official = runner.score(
+                instance,
+                run_root / f"gold-score-{attempt}",
+                run_id=f"gold-{identity}-{run_token[:8]}-{attempt}",
+                gold=True,
+                expected_image_id=expected_image_id,
+            )
+            official_record = official.to_dict()
+            official_path = (
+                self.store.write_swe_record(
+                    "official-results",
+                    adapter,
+                    identity,
+                    official_record,
+                )
+                if guard_store is None
+                else None
+            )
+            official_attempts.append(
+                {
+                    "attempt": attempt,
+                    "record_digest": official_record["record_digest"],
+                    "record_path": (
+                        str(official_path)
+                        if official_path is not None
+                        else f"encrypted:official-attempt-{attempt}"
+                    ),
+                    "resolved": official.resolved,
+                    "harness_error": official.harness_error,
+                    "image_id": official.image_id,
+                }
+            )
+            if attempt == 1 and official.image_id.startswith("sha256:"):
+                expected_image_id = official.image_id
+        materialized = None
+        harness_error = next(
+            (
+                str(item["harness_error"])
+                for item in official_attempts
+                if item["harness_error"]
+            ),
+            "",
+        )
+        stable_gold = all(item["resolved"] for item in official_attempts)
+        stable_image = len({item["image_id"] for item in official_attempts}) == 1
+        eligibility_reason = harness_error
+        if not stable_gold and not harness_error:
+            eligibility_reason = "repeated official gold patches did not resolve the case"
+        if not stable_image and not harness_error:
+            eligibility_reason = "official image identity changed across qualification runs"
+        if stable_gold and stable_image and not harness_error:
+            try:
+                materialized = SWEImageMaterializer(runner).materialize(
+                    instance,
+                    run_root / "materialization",
+                )
+            except Exception as exc:
+                harness_error = f"materialization failed: {exc}"
+                eligibility_reason = harness_error
+        eligible = (
+            stable_gold
+            and stable_image
+            and not harness_error
+            and materialized is not None
+        )
+        if eligible:
+            eligibility_reason = (
+                "two official gold scorer runs and materialization passed"
+            )
+        receipt = record_with_digest(
+            {
+                "schema": "autobugfix-swe-qualification-v3",
+                "protocol_digest": protocol.protocol_digest,
+                "adapter": adapter,
+                "role": role,
+                "instance_id": instance.instance_id,
+                "repository": instance.repository,
+                "base_commit": instance.base_commit,
+                "language": instance.language,
+                "dataset": runner.snapshot.dataset,
+                "dataset_revision": runner.snapshot.revision,
+                "dataset_snapshot_sha256": runner.snapshot.sha256,
+                "runtime_id": runner.runtime.runtime_id,
+                "official_attempts": official_attempts,
+                "official_result_digest": official_attempts[-1]["record_digest"],
+                "official_result_path": official_attempts[-1]["record_path"],
+                "image": instance.docker_image,
+                "image_id": official.image_id,
+                "source_path": materialized.source_path if materialized else "unavailable",
+                "source_tree": materialized.source_tree if materialized else "unavailable",
+                "source_digest": materialized.source_digest if materialized else "unavailable",
+                "eligible": eligible,
+                "eligibility_reason": eligibility_reason,
+                "harness_error": harness_error,
+                "qualified_at": utc_now(),
+            }
+        )
+        if guard_store is not None:
+            assert guard_secret is not None
+            projection = guard_store.write_qualification(
+                receipt,
+                run_root,
+                secret=guard_secret,
+                protocol_digest=protocol.protocol_digest,
+                runtime_id=runner.runtime.runtime_id,
+            )
+            if materialized is not None:
+                source = Path(materialized.source_path)
+                if source.is_relative_to(runner.runtime.cache_root):
+                    shutil.rmtree(source)
+            if temporary is not None:
+                temporary.cleanup()
+            return projection
+        receipt_path = self.store.write_swe_record(
+            "qualification", adapter, identity, receipt
+        )
+        return {
+            **receipt,
+            "receipt_path": str(receipt_path),
+            "official_record_path": str(official_attempts[-1]["record_path"]),
+        }
+
+    @staticmethod
+    def _swe_task_type(problem_statement: str) -> str:
+        text = problem_statement.lower()
+        if any(
+            marker in text
+            for marker in (
+                "add support",
+                "new feature",
+                "implement ",
+                "feature request",
+                "enhancement",
+            )
+        ):
+            return "feature"
+        if any(
+            marker in text
+            for marker in (
+                "deprecat",
+                "refactor",
+                "documentation",
+                "maintenance",
+                "cleanup",
+            )
+        ):
+            return "maintenance"
+        return "bugfix"
+
+    @staticmethod
+    def _swe_public_attachments(*texts: str) -> tuple[SWEAttachment, ...]:
+        references: list[str] = []
+        patterns = (
+            r"!\[[^\]]*\]\((https?://[^)\s]+)\)",
+            r"<img[^>]+src=[\"'](https?://[^\"']+)[\"']",
+            r"(https?://[^\s<>()]+\.(?:png|jpe?g|gif|webp|svg)(?:\?[^\s<>()]*)?)",
+        )
+        for text in texts:
+            for pattern in patterns:
+                references.extend(re.findall(pattern, text, flags=re.IGNORECASE))
+        attachments = []
+        for uri in dict.fromkeys(reference.rstrip(".,;:") for reference in references):
+            suffix = uri.split("?", 1)[0].rsplit(".", 1)[-1].lower()
+            media = {
+                "png": "image/png",
+                "jpg": "image/jpeg",
+                "jpeg": "image/jpeg",
+                "gif": "image/gif",
+                "webp": "image/webp",
+                "svg": "image/svg+xml",
+            }.get(suffix, "application/octet-stream")
+            attachments.append(
+                SWEAttachment(
+                    kind="upstream-reference",
+                    uri=uri,
+                    sha256=hashlib.sha256(uri.encode("utf-8")).hexdigest(),
+                    media_type=media,
+                    description="Public attachment referenced by the benchmark issue",
+                )
+            )
+        return tuple(attachments)
+
+    def run_swe_development_case(
+        self,
+        protocol_path: Path,
+        adapter: str,
+        instance_id: str,
+        *,
+        run_id: str,
+        subject_sha: str | None = None,
+        model: str = "gpt-5.4-mini",
+        max_attempts: int = 2,
+        timeout_seconds: int = 900,
+    ) -> dict[str, Any]:
+        protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+        if (
+            model != protocol.model
+            or max_attempts != protocol.max_attempts
+            or timeout_seconds != protocol.timeout_seconds
+        ):
+            raise EvalBenchmarkServiceError(
+                "development execution budget differs from the frozen SWE protocol"
+            )
+        identity = safe_component(instance_id, "instance_id")
+        run_name = safe_component(run_id, "run_id")
+        selected_subject = subject_sha or protocol.h0_subject
+        if selected_subject != protocol.h0_subject:
+            raise EvalBenchmarkServiceError(
+                "development acceptance currently permits only the frozen H0 subject"
+            )
+        if adapter != "swebench_verified":
+            raise EvalBenchmarkServiceError(
+                "development execution is restricted to visible SWE-bench Verified cases; "
+                "SWE-bench-Live identity belongs to the sealed Guard"
+            )
+        runner = self._swe_adapter(adapter)
+        root = (
+            self.config.eval.benchmarks.trusted_case_root
+            / "swe"
+            / "development-runs"
+            / adapter
+            / identity
+            / run_name
+        )
+        if root.exists():
+            raise EvalBenchmarkServiceError("SWE development run_id already exists")
+        inspection_root = root / "inspection"
+        instance = runner.load_instance(identity, inspection_root)
+        image_id = runner.image_id(instance, root / "image", allow_pull=False)
+        materialized = SWEImageMaterializer(runner).materialize(
+            instance,
+            root / "materialization",
+        )
+        visible = SWEVisibleCase(
+            case_token=f"dev-{hashlib.sha256(f'{adapter}:{identity}'.encode()).hexdigest()[:24]}",
+            benchmark=adapter,  # type: ignore[arg-type]
+            dataset_revision=runner.snapshot.revision,
+            harness_commit=(
+                runner.runtime.config.swebench_commit
+                if adapter == "swebench_verified"
+                else runner.runtime.config.live_commit
+            ),
+            repository=instance.repository,
+            base_commit=instance.base_commit,
+            language=instance.language,
+            task_type=self._swe_task_type(instance.problem_statement),  # type: ignore[arg-type]
+            problem_statement=instance.problem_statement,
+            public_hints=tuple(
+                item.strip()
+                for item in instance.hints_text.split("\n\n")
+                if item.strip()
+            ),
+            attachments=self._swe_public_attachments(
+                instance.problem_statement, instance.hints_text
+            ),
+            first_wave=3,
+            source_snapshot_digest=materialized.source_digest,
+            verifier_profile="swe-visible-v1",
+        )
+        visible_path = self.store.write_swe_record(
+            "development-visible",
+            adapter,
+            identity,
+            visible.to_dict(),
+        )
+        frozen = SWESubjectBroker(self.project_root, runner.runtime).run(
+            subject_sha=selected_subject,
+            expected_subject_tree=rev_parse(
+                self.project_root, f"{selected_subject}^{{tree}}"
+            ),
+            visible_case=visible,
+            instance=instance,
+            materialized=materialized,
+            image_id=image_id,
+            artifact_root=root / "subject-run",
+            protocol_digest=protocol.protocol_digest,
+            model=model,
+            max_attempts=max_attempts,
+            timeout_seconds=timeout_seconds,
+            experiment_role="optimization",
+        )
+        before = frozen.identity()
+        official = runner.score(
+            instance,
+            root / "official-score",
+            run_id=f"dev-{run_name}",
+            submission=frozen.submission,
+            expected_image_id=image_id,
+        )
+        official_record = official.to_dict()
+        official_path = self.store.write_swe_record(
+            "official-results",
+            adapter,
+            identity,
+            official_record,
+        )
+        noninterference = self.submission_noninterference(
+            frozen,
+            before,
+            official_result_digest=str(official_record["record_digest"]),
+        )
+        noninterference_path = self.store.write_swe_record(
+            "noninterference",
+            adapter,
+            identity,
+            noninterference,
+        )
+        report = record_with_digest(
+            {
+                "schema": "autobugfix-swe-development-run-v1",
+                "development_only": True,
+                "protocol_digest": protocol.protocol_digest,
+                "adapter": adapter,
+                "instance_id": identity,
+                "visible_case_digest": visible.to_dict()["record_digest"],
+                "visible_case_path": str(visible_path),
+                "executed_subject_sha": frozen.submission.subject_sha,
+                "executed_subject_tree": frozen.submission.subject_tree,
+                "submission_digest": frozen.submission.record["record_digest"],
+                "official_result_digest": official_record["record_digest"],
+                "official_result_path": str(official_path),
+                "noninterference_digest": noninterference["record_digest"],
+                "noninterference_path": str(noninterference_path),
+                "resolved": official.resolved,
+                "harness_error": official.harness_error,
+            }
+        )
+        report_path = self.store.write_swe_record(
+            "development-reports",
+            adapter,
+            identity,
+            report,
+        )
+        return {**report, "report_path": str(report_path), "run_root": str(root)}
+
+    @staticmethod
+    def submission_noninterference(
+        frozen,
+        before: Mapping[str, str],
+        *,
+        official_result_digest: str,
+    ) -> dict[str, Any]:
+        from autobugfix.eval.benchmarks.swe_submission import SWESubmissionAuthority
+
+        return SWESubmissionAuthority.noninterference_receipt(
+            frozen,
+            before,
+            official_result_digest=official_result_digest,
+        )
+
+    def _load_swe_public_manifest(self, path: Path) -> dict[str, Any]:
+        resolved = path.resolve()
+        visible_root = self.config.eval.benchmarks.visible_manifest_root.resolve()
+        if not resolved.is_relative_to(visible_root) or not resolved.is_file():
+            raise EvalBenchmarkServiceError(
+                "formal SWE manifest must be an Eval-owned visible projection"
+            )
+        raw = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
+        if not isinstance(raw, Mapping):
+            raise EvalBenchmarkServiceError("formal SWE manifest is invalid")
+        verify_record(raw)
+        if raw.get("schema") != "autobugfix-swe-sealed-manifest-v1":
+            raise EvalBenchmarkServiceError("unsupported formal SWE manifest")
+        return dict(raw)
+
+    @staticmethod
+    def _load_swe_study_binding(
+        path: Path,
+        public_manifest: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        raw = yaml.safe_load(path.resolve().read_text(encoding="utf-8")) or {}
+        if not isinstance(raw, Mapping):
+            raise EvalBenchmarkServiceError("SWE Study binding is invalid")
+        verify_record(raw)
+        if (
+            raw.get("schema") != "autobugfix-guard-study-binding-v1"
+            or raw.get("manifest_digest") != public_manifest.get("record_digest")
+            or raw.get("target_checkpoint_name") != "H_general"
+            or raw.get("primary_model") != "gpt-5.4-mini"
+        ):
+            raise EvalBenchmarkServiceError(
+                "SWE Study binding differs from the sealed experiment"
+            )
+        return dict(raw)
+
+    def _execute_formal_swe_case(
+        self,
+        *,
+        runner,
+        instance: SWEInstance,
+        visible: SWEVisibleCase,
+        materialized: SWEMaterializedRepository,
+        image_id: str,
+        study_binding: Mapping[str, Any],
+        protocol_digest: str,
+        run_root: Path,
+        run_id: str,
+        experiment_role: str,
+        authority_root: Path,
+    ) -> dict[str, Any]:
+        subject_sha = str(study_binding["subject_sha"])
+        subject_tree = str(study_binding["subject_tree"])
+        frozen = SWESubjectBroker(
+            self.project_root,
+            runner.runtime,
+            authority_root=authority_root,
+        ).run(
+            subject_sha=subject_sha,
+            expected_subject_tree=subject_tree,
+            visible_case=visible,
+            instance=instance,
+            materialized=materialized,
+            image_id=image_id,
+            artifact_root=run_root / "subject-run",
+            protocol_digest=protocol_digest,
+            model="gpt-5.4-mini",
+            max_attempts=2,
+            timeout_seconds=900,
+            experiment_role=experiment_role,
+            study_binding=study_binding,
+        )
+        frozen_before = frozen.identity()
+        official = runner.score(
+            instance,
+            run_root / "official-score",
+            run_id=run_id,
+            submission=frozen.submission,
+            expected_image_id=image_id,
+        )
+        official_record = official.to_dict()
+        noninterference = self.submission_noninterference(
+            frozen,
+            frozen_before,
+            official_result_digest=str(official_record["record_digest"]),
+        )
+        report = record_with_digest(
+            {
+                "schema": "autobugfix-swe-formal-case-v1",
+                "case_token": visible.case_token,
+                "experiment_role": experiment_role,
+                "study_binding_digest": study_binding["record_digest"],
+                "executed_subject_sha": frozen.submission.subject_sha,
+                "executed_subject_tree": frozen.submission.subject_tree,
+                "submission_digest": frozen.submission.record["record_digest"],
+                "official_result": official_record,
+                "noninterference": noninterference,
+                "resolved": official.resolved,
+                "harness_error": official.harness_error,
+            }
+        )
+        write_yaml(run_root / "formal-case-report.yaml", report)
+        return report
+
+    def run_swe_optimization_case(
+        self,
+        public_manifest_path: Path,
+        *,
+        case_selector: str,
+        study_binding_path: Path,
+        out_root: Path,
+        run_id: str,
+    ) -> dict[str, Any]:
+        public = self._load_swe_public_manifest(public_manifest_path)
+        binding = self._load_swe_study_binding(study_binding_path, public)
+        current_identity = self.guard_authority()
+        raw_guard = public.get("guard")
+        if not isinstance(raw_guard, Mapping):
+            raise EvalBenchmarkServiceError("SWE manifest Guard projection is invalid")
+        sealed_identity = raw_guard.get("code_identity")
+        if not isinstance(sealed_identity, Mapping):
+            raise EvalBenchmarkServiceError("SWE manifest code identity is invalid")
+        if current_identity != GuardCodeIdentity.from_dict(sealed_identity):
+            raise EvalBenchmarkServiceError("SWE trusted Eval code identity drift")
+        raw_cases = public.get("optimization_cases")
+        if not isinstance(raw_cases, list):
+            raise EvalBenchmarkServiceError("SWE Optimization projection is invalid")
+        matches = []
+        for item in raw_cases:
+            if not isinstance(item, Mapping):
+                continue
+            candidate_visible = item.get("visible_case")
+            case_token = (
+                str(candidate_visible.get("case_token") or "")
+                if isinstance(candidate_visible, Mapping)
+                else ""
+            )
+            if case_selector in {
+                str(item.get("benchmark_instance_id") or ""),
+                case_token,
+            }:
+                matches.append(item)
+        if len(matches) != 1:
+            raise EvalBenchmarkServiceError("no unique SWE Optimization case selected")
+        selected = matches[0]
+        verify_record(selected)
+        raw_visible = selected.get("visible_case")
+        if not isinstance(raw_visible, Mapping):
+            raise EvalBenchmarkServiceError("SWE visible case is invalid")
+        visible = SWEVisibleCase.from_dict(raw_visible)
+        instance_id = str(selected["benchmark_instance_id"])
+        runner = self._swe_adapter("swebench_verified")
+        output = out_root.resolve()
+        trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
+        if not output.is_relative_to(trusted_root):
+            raise EvalBenchmarkServiceError(
+                "SWE Optimization output must remain in trusted Eval state"
+            )
+        root = output / safe_component(run_id, "run_id")
+        root.mkdir(parents=True, mode=0o700, exist_ok=False)
+        instance = runner.load_instance(instance_id, root / "inspection")
+        image_id = runner.image_id(instance, root / "image", allow_pull=False)
+        materialized = SWEImageMaterializer(runner).materialize(
+            instance, root / "materialization"
+        )
+        if (
+            visible.repository != instance.repository
+            or visible.base_commit != instance.base_commit
+            or visible.source_snapshot_digest != materialized.source_digest
+        ):
+            raise EvalBenchmarkServiceError("SWE Optimization case materialization drift")
+        return self._execute_formal_swe_case(
+            runner=runner,
+            instance=instance,
+            visible=visible,
+            materialized=materialized,
+            image_id=image_id,
+            study_binding=binding,
+            protocol_digest=str(public["protocol_digest"]),
+            run_root=root,
+            run_id=safe_component(run_id, "run_id"),
+            experiment_role="optimization",
+            authority_root=trusted_root,
+        )
+
+    @staticmethod
+    def _swe_executed_subject_sha(
+        reports: Sequence[Mapping[str, Any]], expected_subject_sha: str
+    ) -> str:
+        observed = {
+            str(report.get("executed_subject_sha") or "") for report in reports
+        }
+        if observed != {expected_subject_sha}:
+            raise EvalBenchmarkServiceError(
+                "SWE case reports do not prove one expected executed subject"
+            )
+        return observed.pop()
+
+    def guard_run_swe(
+        self,
+        public_manifest_path: Path,
+        *,
+        guard_root: Path,
+        guard_secret: str | bytes,
+        wave_token: str,
+        study_binding_path: Path,
+        out_root: Path,
+        run_id: str,
+    ) -> dict[str, Any]:
+        public = self._load_swe_public_manifest(public_manifest_path)
+        binding = self._load_swe_study_binding(study_binding_path, public)
+        raw_guard = public.get("guard")
+        if not isinstance(raw_guard, Mapping):
+            raise EvalBenchmarkServiceError("SWE Guard projection is invalid")
+        guard_id = safe_component(raw_guard.get("guard_id"), "guard_id")
+        guard_store = self._swe_guard_store(guard_root)
+        try:
+            bundle = guard_store.load_preparation(
+                guard_id,
+                expected_sha256=str(raw_guard.get("bundle_sha256") or ""),
+                secret=guard_secret,
+                protocol_digest=str(public["protocol_digest"]),
+                runtime_id=str(public["runtime_id"]),
+            )
+        except SWEGuardStoreError as exc:
+            raise EvalBenchmarkServiceError(str(exc)) from exc
+        if (
+            bundle.get("schema") != "autobugfix-swe-guard-bundle-v1"
+            or bundle.get("guard_id") != guard_id
+            or bundle.get("preparation_digest") != public.get("preparation_digest")
+        ):
+            raise EvalBenchmarkServiceError("SWE Guard bundle binding drift")
+        raw_identity = bundle.get("code_identity")
+        if not isinstance(raw_identity, Mapping):
+            raise EvalBenchmarkServiceError("SWE Guard code identity is invalid")
+        code_identity = GuardCodeIdentity.from_dict(raw_identity)
+        if code_identity != self.guard_authority():
+            raise EvalBenchmarkServiceError(
+                "current trusted Eval code differs from the sealed SWE Guard"
+            )
+        raw_tokens = bundle.get("wave_tokens")
+        if not isinstance(raw_tokens, Mapping):
+            raise EvalBenchmarkServiceError("SWE Guard wave authority is invalid")
+        matched = [
+            int(wave)
+            for wave, token in raw_tokens.items()
+            if hmac.compare_digest(str(token), wave_token)
+        ]
+        if len(matched) != 1:
+            raise EvalBenchmarkServiceError("invalid opaque SWE Guard wave token")
+        wave = matched[0]
+        bound_wave = binding.get("wave")
+        if binding.get("kind") == "CANDIDATE" and int(bound_wave or 0) != wave:
+            raise EvalBenchmarkServiceError(
+                "SWE Guard wave differs from the candidate budget grant"
+            )
+        if binding.get("kind") == "BASELINE" and wave != 16:
+            raise EvalBenchmarkServiceError("SWE H0 Guard baseline must use all six cases")
+        private = bundle.get("private_cohort")
+        if not isinstance(private, Mapping):
+            raise EvalBenchmarkServiceError("SWE private cohort is invalid")
+        verify_record(private)
+        raw_cases = private.get("cases")
+        if not isinstance(raw_cases, list):
+            raise EvalBenchmarkServiceError("SWE private cohort cases are invalid")
+        selected = [
+            item
+            for item in raw_cases
+            if isinstance(item, Mapping)
+            and item.get("role") == "sealed_holdout"
+            and int(item.get("first_wave") or 0) <= wave
+        ]
+        expected_count = {3: 1, 8: 3, 16: 6}[wave]
+        if len(selected) != expected_count:
+            raise EvalBenchmarkServiceError("SWE Guard wave selection contract is invalid")
+        runner = self._swe_guard_adapter("swebench_live", guard_store)
+        if runner.runtime.runtime_id != public.get("runtime_id"):
+            raise EvalBenchmarkServiceError("SWE Guard runtime identity drift")
+        output = out_root.resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        run_name = safe_component(run_id, "run_id")
+        encrypted_artifacts = output / f"{run_name}.artifacts.abfg"
+        metric_path = output / f"{run_name}.metric.yaml"
+        if encrypted_artifacts.exists() or metric_path.exists():
+            raise EvalBenchmarkServiceError("SWE Guard output run_id already exists")
+        reports: list[dict[str, Any]] = []
+        staging = guard_store.root / "staging"
+        staging.mkdir(parents=True, mode=0o700, exist_ok=True)
+        fatal: BaseException | None = None
+        with tempfile.TemporaryDirectory(prefix="formal-run-", dir=staging) as temp:
+            private_root = Path(temp)
+            private_root.chmod(0o700)
+            try:
+                for index, raw_case in enumerate(selected, start=1):
+                    raw_instance = raw_case.get("instance")
+                    raw_visible = raw_case.get("visible_case")
+                    raw_materialized = raw_case.get("materialized")
+                    if not all(
+                        isinstance(item, Mapping)
+                        for item in (raw_instance, raw_visible, raw_materialized)
+                    ):
+                        raise EvalBenchmarkServiceError(
+                            "SWE Guard case contract is invalid"
+                        )
+                    instance = SWEInstance.from_trusted_record(raw_instance)
+                    visible = SWEVisibleCase.from_dict(raw_visible)
+                    case_root = private_root / f"case-{index:02d}"
+                    case_root.mkdir(mode=0o700)
+                    image_id = runner.image_id(
+                        instance, case_root / "image", allow_pull=False
+                    )
+                    if image_id != raw_materialized.get("image_id"):
+                        raise EvalBenchmarkServiceError(
+                            "SWE Holdout image identity drift"
+                        )
+                    materialized = SWEImageMaterializer(runner).materialize(
+                        instance, case_root / "materialization"
+                    )
+                    if (
+                        materialized.source_tree
+                        != raw_materialized.get("source_tree")
+                        or materialized.source_digest
+                        != raw_materialized.get("source_digest")
+                    ):
+                        raise EvalBenchmarkServiceError(
+                            "SWE Holdout source snapshot drift"
+                        )
+                    report = self._execute_formal_swe_case(
+                        runner=runner,
+                        instance=instance,
+                        visible=visible,
+                        materialized=materialized,
+                        image_id=image_id,
+                        study_binding=binding,
+                        protocol_digest=str(public["protocol_digest"]),
+                        run_root=case_root,
+                        run_id=f"{run_name}-case-{index:02d}",
+                        experiment_role="sealed_holdout",
+                        authority_root=private_root,
+                    )
+                    if report.get("harness_error"):
+                        raise EvalBenchmarkServiceError(
+                            "official SWE Holdout scorer reported a harness error"
+                        )
+                    reports.append(report)
+                    source = Path(materialized.source_path)
+                    if source.is_relative_to(runner.runtime.cache_root):
+                        shutil.rmtree(source)
+            except BaseException as exc:
+                fatal = exc
+                (private_root / "guard-fatal.txt").write_text(
+                    f"{type(exc).__name__}: {exc}\n", encoding="utf-8"
+                )
+            finally:
+                encrypt_artifact_tree(
+                    private_root,
+                    encrypted_artifacts,
+                    secret=guard_secret,
+                    aad=canonical_json(
+                        {
+                            "schema": "autobugfix-swe-run-artifacts-v1",
+                            "guard_id": guard_id,
+                            "run_id": run_name,
+                            "wave": wave,
+                            "study_binding_digest": binding["record_digest"],
+                        }
+                    ).encode("ascii"),
+                )
+        if fatal is not None:
+            raise EvalBenchmarkServiceError(
+                f"SWE Guard run failed after encrypting partial evidence: {fatal}"
+            ) from fatal
+        passed = sum(1 for report in reports if report.get("resolved") is True)
+        failed = len(reports) - passed
+        executed_subject_sha = self._swe_executed_subject_sha(
+            reports, str(binding["subject_sha"])
+        )
+        metric = signed_metric(
+            metric_payload(
+                guard_id=guard_id,
+                run_id=run_name,
+                wave=wave,
+                case_count=len(reports),
+                passed_count=passed,
+                failed_count=failed,
+                harness_error_count=0,
+                encrypted_artifact_sha256=guard_artifact_digest(
+                    encrypted_artifacts
+                ),
+                public_manifest_digest=str(public["record_digest"]),
+                code_identity=code_identity,
+                study_binding=binding,
+                executed_subject_sha=executed_subject_sha,
+            ),
+            guard_secret,
+        )
+        write_yaml(metric_path, metric)
+        return {
+            "guard_id": guard_id,
+            "run_id": run_name,
+            "wave": wave,
+            "case_count": len(reports),
+            "passed_count": passed,
+            "failed_count": failed,
+            "harness_error_count": 0,
+            "pass_rate": passed / len(reports),
+            "metric_receipt": str(metric_path),
+            "encrypted_artifacts_sha256": guard_artifact_digest(
+                encrypted_artifacts
+            ),
+        }
+
+    def _swe_qualification_pool(
+        self,
+        protocol: SWEExperimentProtocol,
+        adapter: str,
+    ) -> list[dict[str, Any]]:
+        runner = self._swe_adapter(adapter)
+        root = (
+            self.config.eval.benchmarks.trusted_case_root
+            / "swe/qualification"
+            / adapter
+        )
+        by_instance: dict[str, dict[str, Any]] = {}
+        if not root.is_dir():
+            return []
+        for path in sorted(root.glob("*/*.yaml")):
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(raw, Mapping):
+                raise EvalBenchmarkServiceError("SWE qualification record is invalid")
+            verify_record(raw)
+            if path.name != f"{raw['record_digest']}.yaml":
+                raise EvalBenchmarkServiceError("SWE qualification path digest drift")
+            if raw.get("schema") not in {
+                "autobugfix-swe-qualification-v1",
+                "autobugfix-swe-qualification-v2",
+                "autobugfix-swe-qualification-v3",
+            }:
+                continue
+            if raw.get("protocol_digest") != protocol.protocol_digest:
+                continue
+            if raw.get("runtime_id") != runner.runtime.runtime_id:
+                continue
+            if raw.get("dataset_revision") != runner.snapshot.revision:
+                continue
+            instance_id = safe_component(raw.get("instance_id"), "instance_id")
+            if path.parent.name != instance_id:
+                raise EvalBenchmarkServiceError("SWE qualification identity path drift")
+            current = by_instance.get(instance_id)
+            if current is None or str(raw.get("qualified_at") or "") > str(
+                current.get("qualified_at") or ""
+            ):
+                by_instance[instance_id] = dict(raw)
+        return [
+            record
+            for record in by_instance.values()
+            if record.get("schema") == "autobugfix-swe-qualification-v3"
+            and record.get("eligible")
+        ]
+
+    @staticmethod
+    def _swe_first_wave(index: int, *, role: str) -> int:
+        if role == "optimization":
+            return 3 if index < 2 else 8 if index < 5 else 16
+        return 3 if index < 1 else 8 if index < 3 else 16
+
+    def _swe_visible_case(
+        self,
+        runner,
+        instance,
+        qualification: Mapping[str, Any],
+        *,
+        case_token: str,
+        first_wave: int,
+        task_type: str | None = None,
+    ) -> SWEVisibleCase:
+        return SWEVisibleCase(
+            case_token=case_token,
+            benchmark=instance.adapter,
+            dataset_revision=runner.snapshot.revision,
+            harness_commit=(
+                runner.runtime.config.swebench_commit
+                if instance.adapter == "swebench_verified"
+                else runner.runtime.config.live_commit
+            ),
+            repository=instance.repository,
+            base_commit=instance.base_commit,
+            language=instance.language,
+            task_type=task_type or self._swe_task_type(instance.problem_statement),
+            problem_statement=instance.problem_statement,
+            public_hints=tuple(
+                item.strip()
+                for item in instance.hints_text.split("\n\n")
+                if item.strip()
+            ),
+            attachments=self._swe_public_attachments(
+                instance.problem_statement, instance.hints_text
+            ),
+            first_wave=first_wave,
+            source_snapshot_digest=str(qualification["source_digest"]),
+            verifier_profile="swe-visible-v1",
+        )
+
+    def _validate_swe_qualification_source(
+        self,
+        runner,
+        instance,
+        qualification: Mapping[str, Any],
+        artifact_root: Path,
+    ) -> SWEMaterializedRepository:
+        image_id = runner.image_id(instance, artifact_root / "image", allow_pull=False)
+        if image_id != qualification.get("image_id"):
+            raise EvalBenchmarkServiceError("qualified SWE image identity drift")
+        materialized = SWEMaterializedRepository(
+            instance_id=instance.instance_id,
+            repository=instance.repository,
+            base_commit=instance.base_commit,
+            source_path=str(qualification["source_path"]),
+            source_tree=str(qualification["source_tree"]),
+            source_digest=str(qualification["source_digest"]),
+            image=instance.docker_image,
+            image_id=image_id,
+        )
+        observed = SWEImageMaterializer(runner)._verify_existing(
+            instance,
+            Path(materialized.source_path),
+            image_id,
+        )
+        if observed != materialized:
+            raise EvalBenchmarkServiceError("qualified SWE source snapshot drift")
+        return materialized
+
+    def prepare_swe(
+        self,
+        protocol_path: Path,
+        *,
+        guard_root: Path,
+        guard_secret: str | bytes,
+    ) -> dict[str, Any]:
+        protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+        preparation_id = f"swe-prep-{uuid.uuid4().hex}"
+        guard_store = self._swe_guard_store(guard_root)
+        guard_staging_parent = guard_store.root / "staging"
+        guard_staging_parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        guard_temporary = tempfile.TemporaryDirectory(
+            prefix="preparation-", dir=guard_staging_parent
+        )
+        holdout_staging = Path(guard_temporary.name)
+        verified_runner = self._swe_adapter("swebench_verified")
+        live_runner = self._swe_guard_adapter("swebench_live", guard_store)
+        optimization_pool = self._swe_qualification_pool(
+            protocol, "swebench_verified"
+        )
+        try:
+            holdout_pool = [
+                record
+                for record in guard_store.qualification_records(
+                    secret=guard_secret,
+                    protocol_digest=protocol.protocol_digest,
+                    runtime_id=live_runner.runtime.runtime_id,
+                )
+                if record.get("schema") == "autobugfix-swe-qualification-v3"
+                and record.get("eligible")
+            ]
+        except SWEGuardStoreError as exc:
+            raise EvalBenchmarkServiceError(str(exc)) from exc
+        selected_types = {
+            selection.instance_id: selection.task_type
+            for selection in protocol.optimization_cases
+        }
+        optimization_pool = [
+            record
+            for record in optimization_pool
+            if record.get("instance_id") in selected_types
+        ]
+        if len(optimization_pool) != protocol.optimization_count:
+            raise EvalBenchmarkServiceError(
+                "SWE preparation requires exactly ten current eligible Optimization receipts; "
+                f"observed {len(optimization_pool)}"
+            )
+        if len(holdout_pool) != protocol.holdout_count:
+            raise EvalBenchmarkServiceError(
+                "SWE preparation requires exactly six current eligible Holdout receipts; "
+                f"observed {len(holdout_pool)}"
+            )
+
+        optimization_candidates = []
+        for record in optimization_pool:
+            instance = verified_runner.load_instance(
+                str(record["instance_id"]),
+                self.config.eval.benchmarks.trusted_case_root
+                / "swe/preparation-validation/optimization"
+                / preparation_id
+                / str(record["record_digest"]),
+            )
+            task_type = selected_types[instance.instance_id]
+            optimization_candidates.append((task_type, instance, record))
+        optimization_candidates.sort(
+            key=lambda item: (
+                {"feature": 0, "maintenance": 1, "bugfix": 2}[item[0]],
+                item[1].repository,
+                item[1].instance_id,
+            )
+        )
+        optimization_repositories = {
+            item[1].repository for item in optimization_candidates
+        }
+        task_types = {item[0] for item in optimization_candidates}
+        if len(optimization_repositories) < 4 or task_types != {
+            "bugfix",
+            "feature",
+            "maintenance",
+        }:
+            raise EvalBenchmarkServiceError(
+                "Optimization cohort must cover at least four repositories and all task types"
+            )
+
+        holdout_candidates = []
+        for record in holdout_pool:
+            instance = live_runner.load_instance(
+                str(record["instance_id"]),
+                holdout_staging
+                / "inspection"
+                / str(record["record_digest"]),
+            )
+            holdout_candidates.append((instance, record))
+        holdout_candidates.sort(key=lambda item: (item[0].language, item[0].repository))
+        holdout_repositories = {item[0].repository for item in holdout_candidates}
+        if len(holdout_repositories) != protocol.holdout_count:
+            raise EvalBenchmarkServiceError(
+                "Holdout cohort must contain six repository-unique cases"
+            )
+        if optimization_repositories & holdout_repositories:
+            raise EvalBenchmarkServiceError(
+                "Holdout repositories must be absent from Optimization"
+            )
+        if len({item[0].language for item in holdout_candidates}) < 4:
+            raise EvalBenchmarkServiceError(
+                "Holdout cohort must cover at least four language families"
+            )
+
+        validation_root = (
+            self.config.eval.benchmarks.trusted_case_root
+            / "swe/preparation-runs"
+            / preparation_id
+        )
+        private_cases: list[dict[str, Any]] = []
+        visible_optimization: list[dict[str, Any]] = []
+        for index, (_, instance, record) in enumerate(optimization_candidates):
+            token = "opt-" + hashlib.sha256(
+                f"{protocol.protocol_digest}:{instance.instance_id}".encode("utf-8")
+            ).hexdigest()[:24]
+            wave = self._swe_first_wave(index, role="optimization")
+            materialized = self._validate_swe_qualification_source(
+                verified_runner,
+                instance,
+                record,
+                validation_root / "optimization" / token,
+            )
+            visible = self._swe_visible_case(
+                verified_runner,
+                instance,
+                record,
+                case_token=token,
+                first_wave=wave,
+                task_type=selected_types[instance.instance_id],
+            )
+            visible_optimization.append(
+                record_with_digest(
+                    {
+                        "schema": "autobugfix-swe-optimization-case-v1",
+                        "benchmark_instance_id": instance.instance_id,
+                        "visible_case": visible.to_dict(),
+                    }
+                )
+            )
+            private_cases.append(
+                {
+                    "role": "optimization",
+                    "case_token": token,
+                    "first_wave": wave,
+                    "qualification_digest": record["record_digest"],
+                    "instance": instance.trusted_record(),
+                    "visible_case": visible.to_dict(),
+                    "materialized": {
+                        "instance_id": materialized.instance_id,
+                        "repository": materialized.repository,
+                        "base_commit": materialized.base_commit,
+                        "source_path": materialized.source_path,
+                        "source_tree": materialized.source_tree,
+                        "source_digest": materialized.source_digest,
+                        "image": materialized.image,
+                        "image_id": materialized.image_id,
+                    },
+                }
+            )
+        for index, (instance, record) in enumerate(holdout_candidates):
+            token = f"holdout-{secrets.token_hex(24)}"
+            wave = self._swe_first_wave(index, role="sealed_holdout")
+            image_id = live_runner.image_id(
+                instance,
+                holdout_staging / "validation" / token / "image",
+                allow_pull=False,
+            )
+            if image_id != record.get("image_id"):
+                raise EvalBenchmarkServiceError("qualified Holdout image identity drift")
+            materialized = SWEImageMaterializer(live_runner).materialize(
+                instance,
+                holdout_staging / "validation" / token / "materialization",
+            )
+            if (
+                materialized.source_tree != record.get("source_tree")
+                or materialized.source_digest != record.get("source_digest")
+            ):
+                raise EvalBenchmarkServiceError(
+                    "qualified Holdout source snapshot drift"
+                )
+            visible = self._swe_visible_case(
+                live_runner,
+                instance,
+                record,
+                case_token=token,
+                first_wave=wave,
+            )
+            private_cases.append(
+                {
+                    "role": "sealed_holdout",
+                    "case_token": token,
+                    "first_wave": wave,
+                    "qualification_digest": record["record_digest"],
+                    "instance": instance.trusted_record(),
+                    "visible_case": visible.to_dict(),
+                    "materialized": {
+                        "instance_id": materialized.instance_id,
+                        "repository": materialized.repository,
+                        "base_commit": materialized.base_commit,
+                        "source_path": "guard-rematerialize",
+                        "source_tree": materialized.source_tree,
+                        "source_digest": materialized.source_digest,
+                        "image": materialized.image,
+                        "image_id": materialized.image_id,
+                    },
+                }
+            )
+            source = Path(materialized.source_path)
+            if source.is_relative_to(live_runner.runtime.cache_root):
+                shutil.rmtree(source)
+
+        private_record = record_with_digest(
+            {
+                "schema": "autobugfix-swe-private-cohort-v1",
+                "preparation_id": preparation_id,
+                "protocol_digest": protocol.protocol_digest,
+                "runtime_id": verified_runner.runtime.runtime_id,
+                "h0_subject": protocol.h0_subject,
+                "cases": private_cases,
+                "created_at": utc_now(),
+            }
+        )
+        _, encrypted_preparation_sha256 = guard_store.write_preparation(
+            preparation_id,
+            private_record,
+            secret=guard_secret,
+            protocol_digest=protocol.protocol_digest,
+            runtime_id=verified_runner.runtime.runtime_id,
+        )
+        guard_temporary.cleanup()
+        prepared = record_with_digest(
+            {
+                "schema": "autobugfix-swe-preparation-v1",
+                "preparation_id": preparation_id,
+                "protocol_digest": protocol.protocol_digest,
+                "runtime_id": verified_runner.runtime.runtime_id,
+                "h0_subject": protocol.h0_subject,
+                "h0_tree": rev_parse(
+                    self.project_root, f"{protocol.h0_subject}^{{tree}}"
+                ),
+                "optimization_cases": visible_optimization,
+                "optimization_count": len(visible_optimization),
+                "holdout_count": protocol.holdout_count,
+                "private_bundle_digest": private_record["record_digest"],
+                "encrypted_preparation_sha256": encrypted_preparation_sha256,
+                "waves": {"3": 3, "8": 8, "16": 16},
+                "created_at": utc_now(),
+            }
+        )
+        prepared_path = self.store.write_swe_record(
+            "prepared",
+            "swe_experiment_2",
+            preparation_id,
+            prepared,
+        )
+        return {
+            "preparation_id": preparation_id,
+            "preparation_digest": prepared["record_digest"],
+            "prepared_path": str(prepared_path),
+            "optimization_count": len(visible_optimization),
+            "holdout_count": protocol.holdout_count,
+            "encrypted_preparation_sha256": encrypted_preparation_sha256,
+            "waves": {3: 3, 8: 8, 16: 16},
+        }
+
+    def seal_swe(
+        self,
+        prepared_path: Path,
+        *,
+        guard_root: Path,
+        guard_secret: str | bytes,
+    ) -> dict[str, Any]:
+        resolved = prepared_path.resolve()
+        expected_root = (
+            self.config.eval.benchmarks.trusted_case_root
+            / "swe/prepared/swe_experiment_2"
+        ).resolve()
+        if not resolved.is_relative_to(expected_root):
+            raise EvalBenchmarkServiceError("SWE preparation is outside trusted state")
+        prepared = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
+        if not isinstance(prepared, Mapping):
+            raise EvalBenchmarkServiceError("SWE preparation record is invalid")
+        verify_record(prepared)
+        if prepared.get("schema") != "autobugfix-swe-preparation-v1":
+            raise EvalBenchmarkServiceError("unsupported SWE preparation schema")
+        if resolved.name != f"{prepared['record_digest']}.yaml":
+            raise EvalBenchmarkServiceError("SWE preparation path digest drift")
+        optimization_cases = prepared.get("optimization_cases")
+        if (
+            not isinstance(optimization_cases, list)
+            or len(optimization_cases) != 10
+            or int(prepared.get("optimization_count") or 0) != 10
+            or int(prepared.get("holdout_count") or 0) != 6
+            or prepared.get("waves") != {"3": 3, "8": 8, "16": 16}
+        ):
+            raise EvalBenchmarkServiceError("SWE preparation cohort shape is invalid")
+        guard_store = self._swe_guard_store(guard_root)
+        try:
+            private = guard_store.load_preparation(
+                str(prepared["preparation_id"]),
+                expected_sha256=str(prepared["encrypted_preparation_sha256"]),
+                secret=guard_secret,
+                protocol_digest=str(prepared["protocol_digest"]),
+                runtime_id=str(prepared["runtime_id"]),
+            )
+        except SWEGuardStoreError as exc:
+            raise EvalBenchmarkServiceError(str(exc)) from exc
+        if private.get("record_digest") != prepared.get("private_bundle_digest"):
+            raise EvalBenchmarkServiceError("SWE private cohort digest drift")
+        private_cases = private.get("cases")
+        if (
+            private.get("preparation_id") != prepared.get("preparation_id")
+            or private.get("protocol_digest") != prepared.get("protocol_digest")
+            or private.get("runtime_id") != prepared.get("runtime_id")
+            or private.get("h0_subject") != prepared.get("h0_subject")
+            or not isinstance(private_cases, list)
+            or len(private_cases) != 16
+            or sum(
+                1
+                for item in private_cases
+                if isinstance(item, Mapping) and item.get("role") == "optimization"
+            )
+            != 10
+            or sum(
+                1
+                for item in private_cases
+                if isinstance(item, Mapping) and item.get("role") == "sealed_holdout"
+            )
+            != 6
+        ):
+            raise EvalBenchmarkServiceError("SWE private cohort shape is invalid")
+        code_identity = self.guard_authority()
+        guard_id = new_guard_id()
+        wave_tokens = {
+            "3": secrets.token_urlsafe(32),
+            "8": secrets.token_urlsafe(32),
+            "16": secrets.token_urlsafe(32),
+        }
+        guard_bundle = record_with_digest(
+            {
+                "schema": "autobugfix-swe-guard-bundle-v1",
+                "guard_id": guard_id,
+                "preparation_digest": prepared["record_digest"],
+                "protocol_digest": prepared["protocol_digest"],
+                "runtime_id": prepared["runtime_id"],
+                "code_identity": code_identity.to_dict(),
+                "wave_tokens": wave_tokens,
+                "private_cohort": private,
+            }
+        )
+        _, bundle_digest = guard_store.write_preparation(
+            guard_id,
+            guard_bundle,
+            secret=guard_secret,
+            protocol_digest=str(prepared["protocol_digest"]),
+            runtime_id=str(prepared["runtime_id"]),
+        )
+        public_manifest = record_with_digest(
+            {
+                "schema": "autobugfix-swe-sealed-manifest-v1",
+                "manifest_id": f"swe-general-{guard_id}",
+                "preparation_digest": prepared["record_digest"],
+                "protocol_digest": prepared["protocol_digest"],
+                "runtime_id": prepared["runtime_id"],
+                "h0_subject": prepared["h0_subject"],
+                "h0_tree": prepared["h0_tree"],
+                "optimization_cases": list(prepared["optimization_cases"]),
+                "optimization_count": int(prepared["optimization_count"]),
+                "guard": {
+                    "guard_id": guard_id,
+                    "code_identity": code_identity.to_dict(),
+                    "bundle_sha256": bundle_digest,
+                    "holdout_count": int(prepared["holdout_count"]),
+                    "waves": dict(prepared["waves"]),
+                },
+                "sealed_at": utc_now(),
+            }
+        )
+        manifest_id = str(public_manifest["manifest_id"])
+        manifest_path = self.store.write_visible_yaml(
+            manifest_id, "manifest.yaml", public_manifest
+        )
+        optimization_path = self.store.write_visible_jsonl_rows(
+            manifest_id,
+            "optimization.jsonl",
+            list(prepared["optimization_cases"]),
+        )
+        return {
+            "manifest_id": manifest_id,
+            "guard_id": guard_id,
+            "manifest_digest": public_manifest["record_digest"],
+            "visible_manifest": str(manifest_path),
+            "optimization_dataset": str(optimization_path),
+            "optimization_count": int(prepared["optimization_count"]),
+            "sealed_holdout_count": int(prepared["holdout_count"]),
+            "encrypted_bundle_sha256": bundle_digest,
+            "waves": {3: 3, 8: 8, 16: 16},
+            "wave_tokens": wave_tokens,
+        }
 
     @staticmethod
     def _file_set_digest(

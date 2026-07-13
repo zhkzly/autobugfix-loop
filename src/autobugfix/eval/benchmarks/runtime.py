@@ -20,6 +20,7 @@ def run_command(
     name: str,
     timeout_seconds: int,
     env: Mapping[str, str] | None = None,
+    inherit_env: bool = True,
 ) -> CommandEvidence:
     if not argv or any(not str(item) for item in argv):
         raise ValueError("benchmark command argv must not be empty")
@@ -30,13 +31,22 @@ def run_command(
     stderr_path = artifact_dir / "stderr.log"
     if stdout_path.exists() or stderr_path.exists():
         raise ValueError(f"benchmark command artifact directory is not fresh: {artifact_dir}")
-    command_env = dict(os.environ)
+    command_env = dict(os.environ) if inherit_env else {}
     if env:
         command_env.update({str(key): str(value) for key, value in env.items()})
     captured_env = {
         key: command_env[key]
         for key in sorted(command_env)
-        if key in {"HOME", "JAVA_HOME", "LD_LIBRARY_PATH", "PATH", "PERL5LIB", "TZ"}
+        if key
+        in {
+            "HOME",
+            "JAVA_HOME",
+            "LD_LIBRARY_PATH",
+            "PATH",
+            "PERL5LIB",
+            "PYTHONPATH",
+            "TZ",
+        }
     }
     environment_digest = hashlib.sha256(
         canonical_json(captured_env).encode("utf-8")

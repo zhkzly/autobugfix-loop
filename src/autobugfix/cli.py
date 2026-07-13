@@ -281,6 +281,112 @@ def command_eval(args: argparse.Namespace) -> int:
             report = service.preflight(Path(args.manifest), case_selector=args.case)
             _print_yaml(report)
             return 0 if report["failed_count"] == 0 else 1
+        if args.benchmark_action == "inspect-swe":
+            _print_yaml(service.inspect_swe(args.adapter, args.instance))
+            return 0
+        if args.benchmark_action == "qualify-swe":
+            guard_secret = None
+            guard_root = None
+            if args.adapter == "swebench_live":
+                if not args.guard_root:
+                    raise RuntimeError(
+                        "SWE Holdout qualification requires --guard-root"
+                    )
+                if not sys.stdin.isatty():
+                    raise RuntimeError(
+                        "SWE Holdout qualification requires an interactive Guard terminal"
+                    )
+                guard_root = Path(args.guard_root)
+                guard_secret = getpass.getpass(
+                    "SWE Guard secret (at least 16 bytes; never stored): "
+                )
+            report = service.qualify_swe(
+                Path(args.protocol),
+                args.adapter,
+                args.instance,
+                guard_root=guard_root,
+                guard_secret=guard_secret,
+            )
+            _print_yaml(report)
+            return 0 if report["eligible"] else 1
+        if args.benchmark_action == "run-swe-development":
+            report = service.run_swe_development_case(
+                Path(args.protocol),
+                args.adapter,
+                args.instance,
+                run_id=args.run_id,
+                subject_sha=args.subject_sha,
+                model=args.model,
+                max_attempts=args.max_attempts,
+                timeout_seconds=args.timeout_seconds,
+            )
+            _print_yaml(report)
+            return 0 if report["resolved"] and not report["harness_error"] else 1
+        if args.benchmark_action == "prepare-swe":
+            if not sys.stdin.isatty():
+                raise RuntimeError(
+                    "SWE cohort preparation requires an interactive Guard terminal"
+                )
+            secret = getpass.getpass(
+                "SWE Guard secret (at least 16 bytes; never stored): "
+            )
+            _print_yaml(
+                service.prepare_swe(
+                    Path(args.protocol),
+                    guard_root=Path(args.guard_root),
+                    guard_secret=secret,
+                )
+            )
+            return 0
+        if args.benchmark_action == "seal-swe":
+            if not sys.stdin.isatty():
+                raise RuntimeError(
+                    "SWE Holdout sealing requires an interactive trusted human terminal"
+                )
+            service.guard_authority()
+            secret = getpass.getpass(
+                "SWE Guard secret (at least 16 bytes; never stored): "
+            )
+            confirmation = getpass.getpass("Confirm SWE Guard secret: ")
+            if secret != confirmation:
+                raise RuntimeError("SWE Guard secret confirmation did not match")
+            _print_yaml(
+                service.seal_swe(
+                    Path(args.prepared),
+                    guard_root=Path(args.guard_root),
+                    guard_secret=secret,
+                )
+            )
+            return 0
+        if args.benchmark_action == "run-swe-optimization":
+            report = service.run_swe_optimization_case(
+                Path(args.manifest),
+                case_selector=args.case,
+                study_binding_path=Path(args.study_binding),
+                out_root=Path(args.out),
+                run_id=args.run_id,
+            )
+            _print_yaml(report)
+            return 0 if report["resolved"] and not report["harness_error"] else 1
+        if args.benchmark_action == "guard-run-swe":
+            if not sys.stdin.isatty():
+                raise RuntimeError(
+                    "SWE Guard execution requires an interactive trusted terminal"
+                )
+            secret = getpass.getpass(
+                "SWE Guard secret (at least 16 bytes; never stored): "
+            )
+            report = service.guard_run_swe(
+                Path(args.manifest),
+                guard_root=Path(args.guard_root),
+                guard_secret=secret,
+                wave_token=args.wave_token,
+                study_binding_path=Path(args.study_binding),
+                out_root=Path(args.out),
+                run_id=args.run_id,
+            )
+            _print_yaml(report)
+            return 0 if report["harness_error_count"] == 0 else 1
         if args.benchmark_action == "prepare-evaluation":
             _print_yaml(service.prepare_evaluation(Path(args.manifest)))
             return 0
@@ -920,12 +1026,86 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark = eval_sub.add_parser("benchmark")
     benchmark_sub = benchmark.add_subparsers(dest="benchmark_action", required=True)
     benchmark_doctor = benchmark_sub.add_parser("doctor")
-    benchmark_doctor.add_argument("--adapter", default="defects4j", choices=["defects4j"])
+    benchmark_doctor.add_argument(
+        "--adapter",
+        default="defects4j",
+        choices=["defects4j", "swebench_verified", "swebench_live"],
+    )
     benchmark_doctor.set_defaults(func=command_eval)
     benchmark_preflight = benchmark_sub.add_parser("preflight")
     benchmark_preflight.add_argument("--manifest", required=True)
     benchmark_preflight.add_argument("--case")
     benchmark_preflight.set_defaults(func=command_eval)
+    benchmark_inspect_swe = benchmark_sub.add_parser("inspect-swe")
+    benchmark_inspect_swe.add_argument(
+        "--adapter",
+        required=True,
+        choices=["swebench_verified", "swebench_live"],
+    )
+    benchmark_inspect_swe.add_argument("--instance", required=True)
+    benchmark_inspect_swe.set_defaults(func=command_eval)
+    benchmark_qualify_swe = benchmark_sub.add_parser("qualify-swe")
+    benchmark_qualify_swe.add_argument("--protocol", required=True)
+    benchmark_qualify_swe.add_argument(
+        "--adapter",
+        required=True,
+        choices=["swebench_verified", "swebench_live"],
+    )
+    benchmark_qualify_swe.add_argument("--instance", required=True)
+    benchmark_qualify_swe.add_argument("--guard-root")
+    benchmark_qualify_swe.set_defaults(func=command_eval)
+    benchmark_run_swe_development = benchmark_sub.add_parser(
+        "run-swe-development"
+    )
+    benchmark_run_swe_development.add_argument("--protocol", required=True)
+    benchmark_run_swe_development.add_argument(
+        "--adapter",
+        required=True,
+        choices=["swebench_verified", "swebench_live"],
+    )
+    benchmark_run_swe_development.add_argument("--instance", required=True)
+    benchmark_run_swe_development.add_argument("--run-id", required=True)
+    benchmark_run_swe_development.add_argument("--subject-sha")
+    benchmark_run_swe_development.add_argument(
+        "--model", default="gpt-5.4-mini"
+    )
+    benchmark_run_swe_development.add_argument(
+        "--max-attempts", type=int, default=2
+    )
+    benchmark_run_swe_development.add_argument(
+        "--timeout-seconds", type=int, default=900
+    )
+    benchmark_run_swe_development.set_defaults(func=command_eval)
+    benchmark_prepare_swe = benchmark_sub.add_parser("prepare-swe")
+    benchmark_prepare_swe.add_argument("--protocol", required=True)
+    benchmark_prepare_swe.add_argument("--guard-root", required=True)
+    benchmark_prepare_swe.set_defaults(func=command_eval)
+    benchmark_seal_swe = benchmark_sub.add_parser("seal-swe")
+    benchmark_seal_swe.add_argument("--prepared", required=True)
+    benchmark_seal_swe.add_argument("--guard-root", required=True)
+    benchmark_seal_swe.set_defaults(func=command_eval)
+    benchmark_run_swe_optimization = benchmark_sub.add_parser(
+        "run-swe-optimization"
+    )
+    benchmark_run_swe_optimization.add_argument("--manifest", required=True)
+    benchmark_run_swe_optimization.add_argument("--case", required=True)
+    benchmark_run_swe_optimization.add_argument("--study-binding", required=True)
+    benchmark_run_swe_optimization.add_argument("--run-id", required=True)
+    benchmark_run_swe_optimization.add_argument(
+        "--out",
+        default=".autobugfix/trusted-eval-cases/swe/formal-optimization",
+    )
+    benchmark_run_swe_optimization.set_defaults(func=command_eval)
+    benchmark_guard_run_swe = benchmark_sub.add_parser("guard-run-swe")
+    benchmark_guard_run_swe.add_argument("--manifest", required=True)
+    benchmark_guard_run_swe.add_argument("--guard-root", required=True)
+    benchmark_guard_run_swe.add_argument("--wave-token", required=True)
+    benchmark_guard_run_swe.add_argument("--study-binding", required=True)
+    benchmark_guard_run_swe.add_argument("--run-id", required=True)
+    benchmark_guard_run_swe.add_argument(
+        "--out", default=".autobugfix/guard-results/swe"
+    )
+    benchmark_guard_run_swe.set_defaults(func=command_eval)
     benchmark_prepare_evaluation = benchmark_sub.add_parser("prepare-evaluation")
     benchmark_prepare_evaluation.add_argument("--manifest", required=True)
     benchmark_prepare_evaluation.set_defaults(func=command_eval)

@@ -323,6 +323,7 @@ layers:
     paths:
       - benchmarks/**
       - containers/**
+      - harnesses/**
       - src/autobugfix/dataset.py
       - src/autobugfix/eval/**
       - .agents/role-skills/eval/**
@@ -345,6 +346,7 @@ layers:
       - .agents/skills/autobugfix-eval-operator/**
       - .agents/skills/autobugfix-operator-governance/**
       - .agents/skills/oncall-bugfix/**
+      - .agents/role-skills/operator/**
       - scripts/validate_operator_policy.py
       - scripts/validate_operator_pr.py
       - scripts/install_operator_governance.py
@@ -383,6 +385,7 @@ layers:
       - .codex/hooks/operator-governance.py
       - .codex/hooks.json
       - tests/helpers.py
+      - .agents/role-skills/base/**
       - pyproject.toml
       - uv.lock
   docs_skills:
@@ -460,7 +463,7 @@ validation_profiles:
     timeout_seconds: 240
     commands:
       - name: eval-tests
-        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_eval.py, tests/test_eval_benchmarks.py, tests/test_dataset.py]
+        argv: [uv, run, --cache-dir, /tmp/uv-cache, pytest, -q, tests/test_eval.py, tests/test_eval_benchmarks.py, tests/test_dataset.py, tests/test_swe_models.py, tests/test_swe_runtime.py, tests/test_swe_adapters.py, tests/test_subject_broker.py]
   shared_runtime:
     timeout_seconds: 240
     commands:
