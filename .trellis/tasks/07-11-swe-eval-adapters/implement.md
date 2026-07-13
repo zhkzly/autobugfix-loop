@@ -115,13 +115,62 @@ uv run --cache-dir /tmp/uv-cache autobugfix eval benchmark seal-swe --prepared <
 - [x] Re-run gold qualification after the final harness change.
 - [ ] Freeze adapter/runtime/protocol digests for Experiment 2.
 
+## 7a. Raw Codex SDK Comparator
+
+- [x] Reuse the separately locked standalone Raw SDK worker without importing
+      Defects4J manifests, results, or case feedback into Experiment 2.
+- [x] Add an SWE-specific treatment protocol and prepared manifest bound to
+      the frozen ten Optimization cases and current official runtime.
+- [x] Implement one-case development and ten-case formal commands that clone
+      sanitized source, run one SDK turn, freeze evidence, invoke the official
+      scorer, and verify noninterference.
+- [x] Record Raw/H0/H_general as distinct treatments. Raw is contextual; the
+      primary evolution comparison remains budget-matched H_general versus H0.
+
+Development acceptance `raw-swe-dev-20260713-002` used
+`gpt-5.4-mini` through `openai-codex==0.1.0b3`, produced a one-file patch,
+froze SDK request/events/result and process logs before scoring, passed the
+official SWE-bench 4.1.0 Docker scorer, and passed noninterference. The trusted
+runtime remained
+`sha256:e83ab8521188fd47492b443a504116ff8d3bcfe77fba4c2990c8e1b8e87533cc`.
+The final evidence whitelist reduced one case from an invalid roughly 1 GiB
+Codex-home copy to 212 KiB and retained no auth bridge or mutable Codex home.
+This development result is harness acceptance only and is excluded from the
+ten-case formal baseline. A subsequent authority review found that this pilot
+used SDK `auto_review`; the formal protocol now pins `deny_all`,
+`workspace-write`, and disabled tool network access. Run a fresh development
+case under the new treatment digest before formal preparation. The earlier
+pilot remains diagnostic evidence but is not acceptance for the revised
+protocol.
+
+Revised development acceptance `raw-swe-dev-20260713-003-deny-all` then ran a
+fresh SDK thread and turn under the locked authority policy. It completed in
+155.38 seconds, produced a patch touching
+`astropy/modeling/separable.py` and its focused test, passed the official
+SWE-bench 4.1.0 scorer, and passed noninterference. Frozen `request.json`,
+`process-result.json`, and `codex-config.toml` independently record
+`deny_all`, `workspace-write`, and `network_access: false`. The evidence
+whitelist is about 270 KiB and contains neither `auth.json` nor a retained
+Codex home. Submission, official-result, and noninterference digests are
+`4ee41a44253612f53d693d699ad892f84fe538910518132c586e4fe32e8f511c`,
+`553f1b57b3298363b3f49da9ec30bafef20159545c4e4fa5acc613b5f069fed6`,
+and `6b56c43ea4d0771eed6c26e934daeb9115558c480e034bc0b43abe4e5d019849`.
+This pilot remains excluded from the formal ten-case score.
+
+Validation:
+
+```text
+uv run --cache-dir /tmp/uv-cache pytest -q tests/test_swe_raw_codex.py baselines/raw_codex_sdk/tests
+uv run --cache-dir /tmp/uv-cache autobugfix eval baseline run-swe-raw-development --source-protocol benchmarks/swe-experiment-2.yaml --treatment benchmarks/swe-experiment-2-raw-codex.yaml --instance astropy__astropy-12907 --run-id <id>
+```
+
 ## 8. Quality And Reviews
 
-- [ ] Run root and nested harness tests and compile checks.
-- [ ] Run diff hygiene, role-skill validation, and task validation.
-- [ ] Sequentially review Execution, Memory, Eval, Operator governance, Codex
+- [x] Run root and nested harness tests and compile checks.
+- [x] Run diff hygiene, role-skill validation, and task validation.
+- [x] Sequentially review Execution, Memory, Eval, Operator governance, Codex
       runtime, portability/privacy, and official acceptance boundaries.
-- [ ] Confirm H0, Raw baseline, target snapshots, and main checkout are
+- [x] Confirm H0, Raw baseline, target snapshots, and main checkout are
       unchanged.
 - [ ] Commit and push the adapter branch before creating
       `experiment/general-main`.

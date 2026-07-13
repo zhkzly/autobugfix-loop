@@ -17,6 +17,8 @@ from autobugfix.eval.diagnosis import diagnose_run
 from autobugfix.eval.improvements import list_improvements, show_improvement, update_improvement
 from autobugfix.eval.runner import run_eval, score_path
 from autobugfix.eval.benchmarks.service import EvalBenchmarkService
+from autobugfix.eval.baselines.raw_codex import RawCodexBaselineService
+from autobugfix.eval.baselines.swe_raw_codex import SWERawCodexBaselineService
 from autobugfix.eval.supervision import supervision_note
 from autobugfix.gradio_app import launch as launch_ui
 from autobugfix.memory.service import MemoryService
@@ -271,6 +273,70 @@ def command_dataset(args: argparse.Namespace) -> int:
 
 def command_eval(args: argparse.Namespace) -> int:
     action = args.eval_action
+    if action == "baseline":
+        if args.baseline_action == "prepare-swe-raw-codex":
+            service = SWERawCodexBaselineService(Path.cwd())
+            _print_yaml(
+                service.prepare(
+                    Path(args.source_protocol),
+                    Path(args.treatment),
+                )
+            )
+            return 0
+        if args.baseline_action == "run-swe-raw-development":
+            service = SWERawCodexBaselineService(Path.cwd())
+            result = service.run_development(
+                Path(args.source_protocol),
+                Path(args.treatment),
+                instance_id=args.instance,
+                out_root=Path(args.out),
+                run_id=args.run_id,
+            )
+            _print_yaml(result)
+            return 0 if result["summary"]["status"] == "completed" else 1
+        if args.baseline_action == "run-swe-raw-codex":
+            service = SWERawCodexBaselineService(Path.cwd())
+            result = service.run_formal(
+                Path(args.manifest),
+                out_root=Path(args.out),
+                run_id=args.run_id,
+            )
+            _print_yaml(result)
+            return 0 if result["summary"]["status"] == "completed" else 1
+        service = RawCodexBaselineService(Path.cwd())
+        if args.baseline_action == "prepare-raw-codex":
+            _print_yaml(
+                service.prepare(
+                    Path(args.protocol),
+                    Path(args.source_manifest),
+                    Path(args.h0_report),
+                )
+            )
+            return 0
+        if args.baseline_action == "pilot-raw-codex":
+            result = service.pilot(
+                Path(args.protocol),
+                Path(args.source_manifest),
+                case_id=args.case,
+                out_root=Path(args.out),
+                run_id=args.run_id,
+            )
+            _print_yaml(result)
+            return 0 if result["summary"]["harness_error_count"] == 0 else 1
+        if args.baseline_action == "run-raw-codex":
+            result = service.run_formal(
+                Path(args.manifest),
+                out_root=Path(args.out),
+                run_id=args.run_id,
+            )
+            _print_yaml(result)
+            return 0 if result["summary"]["status"] == "completed" else 1
+        if args.baseline_action == "report-raw-codex":
+            _print_yaml(
+                service.report(Path(args.run_dir), Path(args.h0_report))
+            )
+            return 0
+        raise AssertionError(f"unhandled Eval baseline action: {args.baseline_action}")
     if action == "benchmark":
         service = EvalBenchmarkService(Path.cwd())
         if args.benchmark_action == "doctor":
@@ -1023,6 +1089,59 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_parser = sub.add_parser("eval")
     eval_sub = eval_parser.add_subparsers(dest="eval_action", required=True)
+    baseline = eval_sub.add_parser("baseline")
+    baseline_sub = baseline.add_subparsers(
+        dest="baseline_action", required=True
+    )
+    baseline_prepare = baseline_sub.add_parser("prepare-raw-codex")
+    baseline_prepare.add_argument("--protocol", required=True)
+    baseline_prepare.add_argument("--source-manifest", required=True)
+    baseline_prepare.add_argument("--h0-report", required=True)
+    baseline_prepare.set_defaults(func=command_eval)
+    baseline_pilot = baseline_sub.add_parser("pilot-raw-codex")
+    baseline_pilot.add_argument("--protocol", required=True)
+    baseline_pilot.add_argument("--source-manifest", required=True)
+    baseline_pilot.add_argument("--case", required=True)
+    baseline_pilot.add_argument(
+        "--out", default=".autobugfix/raw-codex-baseline/pilot-runs"
+    )
+    baseline_pilot.add_argument("--run-id", required=True)
+    baseline_pilot.set_defaults(func=command_eval)
+    baseline_run = baseline_sub.add_parser("run-raw-codex")
+    baseline_run.add_argument("--manifest", required=True)
+    baseline_run.add_argument(
+        "--out", default=".autobugfix/raw-codex-baseline/formal-runs"
+    )
+    baseline_run.add_argument("--run-id", required=True)
+    baseline_run.set_defaults(func=command_eval)
+    baseline_report = baseline_sub.add_parser("report-raw-codex")
+    baseline_report.add_argument("--run-dir", required=True)
+    baseline_report.add_argument("--h0-report", required=True)
+    baseline_report.set_defaults(func=command_eval)
+    baseline_prepare_swe = baseline_sub.add_parser("prepare-swe-raw-codex")
+    baseline_prepare_swe.add_argument("--source-protocol", required=True)
+    baseline_prepare_swe.add_argument("--treatment", required=True)
+    baseline_prepare_swe.set_defaults(func=command_eval)
+    baseline_development_swe = baseline_sub.add_parser(
+        "run-swe-raw-development"
+    )
+    baseline_development_swe.add_argument("--source-protocol", required=True)
+    baseline_development_swe.add_argument("--treatment", required=True)
+    baseline_development_swe.add_argument("--instance", required=True)
+    baseline_development_swe.add_argument(
+        "--out",
+        default=".autobugfix/raw-codex-baseline/swe/development-runs",
+    )
+    baseline_development_swe.add_argument("--run-id", required=True)
+    baseline_development_swe.set_defaults(func=command_eval)
+    baseline_run_swe = baseline_sub.add_parser("run-swe-raw-codex")
+    baseline_run_swe.add_argument("--manifest", required=True)
+    baseline_run_swe.add_argument(
+        "--out",
+        default=".autobugfix/raw-codex-baseline/swe/formal-runs",
+    )
+    baseline_run_swe.add_argument("--run-id", required=True)
+    baseline_run_swe.set_defaults(func=command_eval)
     benchmark = eval_sub.add_parser("benchmark")
     benchmark_sub = benchmark.add_subparsers(dest="benchmark_action", required=True)
     benchmark_doctor = benchmark_sub.add_parser("doctor")

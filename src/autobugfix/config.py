@@ -27,6 +27,7 @@ from autobugfix.models import (
     OperatorVerificationConfig,
     OperatorWorktreeConfig,
     PpeConfig,
+    RawCodexBaselineConfig,
     RepoProfile,
     RoleConfig,
     RoleRuntimeConfig,
@@ -207,6 +208,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "issue_timeout_seconds": 60,
             "min_free_disk_gb": 10,
             "guard": {"trusted_ref": "origin/main"},
+            "raw_codex": {
+                "runner_project": "baselines/raw_codex_sdk",
+                "runtime_root": ".autobugfix/raw-codex-baseline",
+                "sdk_version": "0.1.0b3",
+                "model": "gpt-5.4-mini",
+                "reasoning_effort": "medium",
+                "service_tier": None,
+                "approval_mode": "deny_all",
+                "sandbox": "workspace-write",
+                "network_access": False,
+                "timeout_seconds": 500,
+                "swe_timeout_seconds": 900,
+                "require_process_sandbox": True,
+            },
             "defects4j": {
                 "image": "autobugfix/defects4j:3.0.1",
                 "verifier_image": "autobugfix/defects4j-verifier:3.0.1",
@@ -516,6 +531,9 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
     eval_raw = _as_mapping(merged.get("eval"), "eval")
     benchmark_raw = _as_mapping(eval_raw.get("benchmarks"), "eval.benchmarks")
     guard_raw = _as_mapping(benchmark_raw.get("guard"), "eval.benchmarks.guard")
+    raw_codex_raw = _as_mapping(
+        benchmark_raw.get("raw_codex"), "eval.benchmarks.raw_codex"
+    )
     defects4j_raw = _as_mapping(
         benchmark_raw.get("defects4j"), "eval.benchmarks.defects4j"
     )
@@ -558,6 +576,42 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
             min_free_disk_gb=int(benchmark_raw.get("min_free_disk_gb", 10)),
             guard=EvalGuardConfig(
                 trusted_ref=str(guard_raw.get("trusted_ref", "origin/main")),
+            ),
+            raw_codex=RawCodexBaselineConfig(
+                runner_project=_resolve(
+                    root,
+                    raw_codex_raw.get("runner_project", "baselines/raw_codex_sdk"),
+                )
+                or (root / "baselines/raw_codex_sdk"),
+                runtime_root=_resolve(
+                    root,
+                    raw_codex_raw.get(
+                        "runtime_root", ".autobugfix/raw-codex-baseline"
+                    ),
+                )
+                or (root / ".autobugfix/raw-codex-baseline"),
+                sdk_version=str(raw_codex_raw.get("sdk_version", "0.1.0b3")),
+                model=str(raw_codex_raw.get("model", "gpt-5.4-mini")),
+                reasoning_effort=str(
+                    raw_codex_raw.get("reasoning_effort", "medium")
+                ),
+                service_tier=(
+                    str(raw_codex_raw["service_tier"])
+                    if raw_codex_raw.get("service_tier") is not None
+                    else None
+                ),
+                approval_mode=str(
+                    raw_codex_raw.get("approval_mode", "deny_all")
+                ),
+                sandbox=str(raw_codex_raw.get("sandbox", "workspace-write")),
+                network_access=bool(raw_codex_raw.get("network_access", False)),
+                timeout_seconds=int(raw_codex_raw.get("timeout_seconds", 500)),
+                swe_timeout_seconds=int(
+                    raw_codex_raw.get("swe_timeout_seconds", 900)
+                ),
+                require_process_sandbox=bool(
+                    raw_codex_raw.get("require_process_sandbox", True)
+                ),
             ),
             defects4j=Defects4JBenchmarkConfig(
                 image=str(defects4j_raw.get("image", DEFECTS4J_DOCKER_IMAGE)),
@@ -889,6 +943,14 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
             benchmark_config.defects4j.preflight_repetitions,
             "defects4j.preflight_repetitions",
         ),
+        (
+            benchmark_config.raw_codex.timeout_seconds,
+            "raw_codex.timeout_seconds",
+        ),
+        (
+            benchmark_config.raw_codex.swe_timeout_seconds,
+            "raw_codex.swe_timeout_seconds",
+        ),
     ):
         if value < 1:
             raise ConfigError(f"eval.benchmarks.{field} must be positive")
@@ -922,6 +984,35 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
             "eval.benchmarks.defects4j.platform must remain "
             f"{DEFECTS4J_DOCKER_PLATFORM}"
         )
+    raw_codex = benchmark_config.raw_codex
+    if raw_codex.model != "gpt-5.4-mini":
+        raise ConfigError(
+            "eval.benchmarks.raw_codex.model must remain gpt-5.4-mini"
+        )
+    if raw_codex.sdk_version != "0.1.0b3":
+        raise ConfigError(
+            "eval.benchmarks.raw_codex.sdk_version must remain 0.1.0b3"
+        )
+    if raw_codex.reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+        raise ConfigError(
+            "eval.benchmarks.raw_codex.reasoning_effort must be low, medium, high, or xhigh"
+        )
+    if raw_codex.approval_mode != "deny_all":
+        raise ConfigError(
+            "eval.benchmarks.raw_codex.approval_mode must remain deny_all"
+        )
+    if raw_codex.sandbox != "workspace-write":
+        raise ConfigError(
+            "eval.benchmarks.raw_codex.sandbox must remain workspace-write"
+        )
+    if raw_codex.network_access:
+        raise ConfigError(
+            "eval.benchmarks.raw_codex.network_access must remain false"
+        )
+    if not raw_codex.require_process_sandbox:
+        raise ConfigError(
+            "eval.benchmarks.raw_codex.require_process_sandbox must remain true"
+        )
     runtime_roots = {
         "state": operator_config.state.root.resolve(),
         "artifacts": operator_config.artifacts.root.resolve(),
@@ -943,6 +1034,7 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
         "benchmark_cache": benchmark_config.cache_root.resolve(),
         "trusted_cases": benchmark_config.trusted_case_root.resolve(),
         "visible_manifests": benchmark_config.visible_manifest_root.resolve(),
+        "raw_codex_runtime": benchmark_config.raw_codex.runtime_root.resolve(),
     }
     memory_root = (root / ".autobugfix-memory").resolve()
     for left_name, left_root in benchmark_roots.items():

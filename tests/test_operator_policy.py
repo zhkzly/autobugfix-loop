@@ -1463,16 +1463,7 @@ def test_constitution_classifies_every_governed_source_path_once():
     constitution = yaml.safe_load(PACKAGE_POLICY.read_text(encoding="utf-8"))
     tracked = run(["git", "ls-files"], root).stdout.splitlines()
     tracked.extend(run(["git", "ls-files", "--others", "--exclude-standard"], root).stdout.splitlines())
-    prefixes = (
-        "src/",
-        "tests/",
-        "scripts/",
-        ".github/",
-        ".agents/",
-        ".trellis/spec/",
-        ".trellis/tasks/",
-        "docs/",
-    )
+    prefixes = tuple(constitution["layer_resolution"]["governed_prefixes"])
     invalid = {
         path: layers_for_file(constitution, path)
         for path in tracked

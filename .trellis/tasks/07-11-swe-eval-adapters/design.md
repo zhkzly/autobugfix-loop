@@ -18,6 +18,13 @@ Trusted Eval control checkout
   -> recompute digests and write noninterference receipt
   -> Eval writes result or harness error
 
+Direct Raw Codex comparator
+  -> consumes the same visible case and sanitized buggy snapshot
+  -> launches a locked standalone openai-codex worker with hooks disabled
+  -> permits exactly one fresh thread and one turn
+  -> freezes patch plus raw SDK evidence before any official result exists
+  -> invokes the same trusted official scorer and noninterference check
+
 External Holdout Guard
   -> authenticates encrypted six-case bundle
   -> requests exact subject binding from Operator Study
@@ -40,6 +47,7 @@ separate worktree owned by Execution.
 | Execution Writer | visible task/context, target task worktree | target task worktree only | no task/gate/scorer authority |
 | Operator | visible Optimization artifacts and projections | requests through service | no Holdout or Eval authority |
 | Holdout Guard | encrypted bundle, trusted adapter, exact subject | encrypted artifacts and signed aggregate | final Holdout metric |
+| Raw Codex worker | visible case and isolated target checkout | target checkout and SDK log grant only | no benchmark or task-state authority |
 
 ## Source Layout
 
@@ -61,6 +69,13 @@ src/autobugfix/eval/benchmarks/
   subject_broker.py              # exact Autobugfix SHA execution
   swe_service.py                 # qualification, preparation, run, report
 
+src/autobugfix/eval/baselines/
+  isolation.py                   # shared process/Bubblewrap boundary
+  swe_raw_models.py              # Raw treatment and frozen manifest contracts
+  swe_raw_codex.py               # SWE Raw prepare/run/score service
+
+baselines/raw_codex_sdk/         # separately locked SDK-only worker project
+
 tests/
   test_swe_models.py
   test_swe_runtime.py
@@ -72,6 +87,12 @@ tests/
 Existing benchmark store, hashing, subprocess, Docker, Execution service, and
 artifact primitives are reused where their contracts match. CLI remains a
 thin adapter over services.
+
+The Raw worker is intentionally not implemented as a flag on
+`AutobugfixService`: doing so would let the control treatment inherit roles,
+Memory, verifier feedback, evaluator behavior, or task state. Only the outer
+Eval service is shared, so all treatments receive the same materialization and
+official scorer while generation remains isolated.
 
 ## Runtime Pinning
 

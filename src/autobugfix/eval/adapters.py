@@ -52,20 +52,18 @@ class SubmissionApplyError(EvalAdapterError):
         self.exit_code = exit_code
 
 
-def _submission_checkout(
-    case: EvalCase,
-    materialized: MaterializedCase,
-    submission: FrozenSubmission,
+def create_patch_checkout(
+    remote: Path,
+    base_commit: str,
+    patch: str,
     destination: Path,
 ) -> Path:
-    if submission.case_id != case.case_id:
-        raise EvalAdapterError("frozen submission is bound to a different case")
     clone = subprocess.run(
         [
             "git",
             "clone",
             "--no-hardlinks",
-            str(materialized.remote),
+            str(remote),
             str(destination),
         ],
         text=True,
@@ -76,12 +74,12 @@ def _submission_checkout(
         raise EvalAdapterError(
             clone.stderr.strip() or "cannot create isolated scoring checkout"
         )
-    run_git(destination, ["checkout", "--detach", case.base_commit], check=True)
+    run_git(destination, ["checkout", "--detach", base_commit], check=True)
     run_git(destination, ["clean", "-fdx"], check=True)
-    if submission.patch.strip():
+    if patch.strip():
         applied = subprocess.run(
             ["git", "-C", str(destination), "apply", "--binary", "-"],
-            input=submission.patch,
+            input=patch,
             text=True,
             capture_output=True,
             check=False,
@@ -93,6 +91,22 @@ def _submission_checkout(
                 applied.returncode,
             )
     return destination
+
+
+def _submission_checkout(
+    case: EvalCase,
+    materialized: MaterializedCase,
+    submission: FrozenSubmission,
+    destination: Path,
+) -> Path:
+    if submission.case_id != case.case_id:
+        raise EvalAdapterError("frozen submission is bound to a different case")
+    return create_patch_checkout(
+        materialized.remote,
+        case.base_commit,
+        submission.patch,
+        destination,
+    )
 
 
 class LocalGitAdapter:
