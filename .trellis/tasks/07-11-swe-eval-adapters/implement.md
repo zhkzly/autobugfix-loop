@@ -40,6 +40,9 @@ uv run --cache-dir /tmp/uv-cache autobugfix eval benchmark doctor --adapter sweb
       visible verifier commands.
 - [x] Prove all edits occur in real Execution task worktrees and snapshots stay
       unchanged.
+- [x] Treat the image Git object database, rather than its setup-mutated
+      worktree, as the source of the exact dataset base commit; reject any
+      dirty or identity-drifted sanitized destination.
 - [x] Retain verifier stdout/stderr/events outside target worktrees.
 
 Validation:

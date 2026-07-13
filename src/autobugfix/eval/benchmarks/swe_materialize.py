@@ -91,15 +91,9 @@ class SWEImageMaterializer:
         artifact_root: Path,
     ) -> None:
         source_head = self._git(source, "rev-parse", "HEAD")
-        source_status = self._git(
-            source,
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-        )
-        if source_status:
-            raise SWERuntimeError("official image repository is not a clean source snapshot")
-
+        # Official images may carry setup/build artifacts in their worktree. The
+        # exact base commit object is authoritative; the destination is verified
+        # independently after fetching it without copying source worktree files.
         self._require_git_command(
             [
                 "git",
