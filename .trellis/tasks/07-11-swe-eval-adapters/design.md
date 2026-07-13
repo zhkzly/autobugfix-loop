@@ -141,11 +141,15 @@ Docker, logs, sibling cases, cache names, or error messages.
 ## Materialization
 
 Eval creates an official instance container without applying any patch and
-copies `/testbed` into a private staging directory. It verifies the expected
-base commit, normalizes ownership without changing Git content, removes
-benchmark-only files when present, and creates a bare sanitized source cache.
-Execution clones that cache into its ordinary task worktree. The source cache,
-container, and target main snapshot remain read-only.
+copies `/testbed` into a private staging directory only as a local Git object
+source. Official image setup may leave tracked or untracked build artifacts in
+that source worktree, so Eval neither copies its worktree files nor mutates it.
+Instead, Eval verifies that the expected base commit object exists below the
+image HEAD, fetches exactly that commit into a new repository, and rejects the
+result unless it is a clean one-commit detached snapshot with no refs, remotes,
+ignored files, or benchmark-only worktree artifacts. Execution clones that
+sanitized cache into its ordinary task worktree. The source cache, container,
+and target main snapshot remain read-only.
 
 The target config uses a Docker-backed visible verifier. It mounts only the
 task worktree over `/testbed`, hides Eval state, and runs predeclared public

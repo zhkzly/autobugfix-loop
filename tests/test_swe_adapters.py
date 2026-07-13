@@ -203,19 +203,39 @@ def test_materializer_rejects_base_absent_from_image_repository(
         )
 
 
-def test_materializer_rejects_dirty_official_image_repository(
+def test_materializer_ignores_dirty_image_worktree_and_fetches_exact_base(
     tmp_path: Path,
 ) -> None:
-    source, base, _ = make_image_repository(tmp_path)
+    source, base, synthetic_head = make_image_repository(tmp_path)
+    (source / "module.py").write_text("VALUE = 999\n", encoding="utf-8")
     (source / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+    source_status = git(
+        source,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
+    destination = tmp_path / "snapshot"
 
-    with pytest.raises(SWERuntimeError, match="not a clean source snapshot"):
-        materializer(tmp_path)._clone_base_snapshot(
-            instance(base),
-            source,
-            tmp_path / "snapshot",
-            tmp_path / "artifacts",
-        )
+    materializer(tmp_path)._clone_base_snapshot(
+        instance(base),
+        source,
+        destination,
+        tmp_path / "artifacts",
+    )
+
+    assert git(source, "rev-parse", "HEAD") == synthetic_head
+    assert (
+        git(source, "status", "--porcelain=v1", "--untracked-files=all")
+        == source_status
+    )
+    assert (source / "module.py").read_text(encoding="utf-8") == "VALUE = 999\n"
+    assert (source / "untracked.txt").read_text(encoding="utf-8") == "dirty\n"
+    assert git(destination, "rev-parse", "HEAD") == base
+    assert git(destination, "status", "--porcelain=v1", "--untracked-files=all") == ""
+    assert (destination / "module.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert not (destination / ".swebench_setup").exists()
+    assert not (destination / "untracked.txt").exists()
 
 
 def test_verified_official_empty_patch_is_valid_unresolved(
