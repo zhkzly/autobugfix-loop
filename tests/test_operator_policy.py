@@ -596,6 +596,71 @@ def test_sandbox_remaps_read_only_runtime_venv_environment(tmp_path: Path):
     )
 
 
+def test_sandbox_reopens_exact_runtime_source_below_masked_tmp(tmp_path: Path):
+    if os.environ.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap":
+        pytest.skip("runtime overlay is owned by the inherited admission sandbox")
+    if shutil.which("bwrap") is None:
+        pytest.skip("Bubblewrap is unavailable")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    destination = candidate / ".venv"
+    runtime = tmp_path / "trusted-runtime"
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(runtime)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    probe = runtime / "bin/runtime-probe"
+    probe.write_text(
+        f"#!{runtime / 'bin/python'}\n"
+        "import os\n"
+        f"assert os.environ['VIRTUAL_ENV'] == {str(destination)!r}\n",
+        encoding="utf-8",
+    )
+    probe.chmod(0o755)
+
+    result = _run_command(
+        candidate,
+        tmp_path / "logs",
+        "tmp-runtime-source",
+        [str(probe)],
+        30,
+        process_sandbox="bubblewrap",
+        require_process_sandbox=True,
+        network_access=False,
+        hidden_roots=(),
+        writable_roots=(),
+        read_only_binds=((runtime, destination),),
+    )
+
+    assert result["passed"], Path(result["stderr_path"]).read_text(encoding="utf-8")
+
+
+def test_sandbox_rejects_runtime_source_equal_to_masked_tmp(tmp_path: Path):
+    if os.environ.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap":
+        pytest.skip("runtime overlay is owned by the inherited admission sandbox")
+    if shutil.which("bwrap") is None:
+        pytest.skip("Bubblewrap is unavailable")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+
+    with pytest.raises(OperatorValidationError, match="masked authority root"):
+        _run_command(
+            candidate,
+            tmp_path / "logs",
+            "broad-tmp-runtime",
+            ["/bin/true"],
+            30,
+            process_sandbox="bubblewrap",
+            require_process_sandbox=True,
+            network_access=False,
+            hidden_roots=(),
+            writable_roots=(),
+            read_only_binds=((Path("/tmp"), candidate / ".venv"),),
+        )
+
+
 def test_sandbox_blocks_secrets_and_host_docker_daemon_across_nested_sandbox(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -903,6 +968,32 @@ def test_behavior_scope_requires_baseline_and_patch_bound_experiment(tmp_path: P
     assert deterministic_only["experiment_results"] == []
     assert deterministic_only["metric_receipt"] is None
     assert deterministic_only["regression"] is None
+
+
+def test_failed_profile_cannot_be_published_as_trusted_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    monkeypatch.setattr(
+        "autobugfix.operator.service.run_command_specs",
+        lambda *args, **kwargs: [
+            {
+                "name": "failed-real-e2e",
+                "passed": False,
+                "timed_out": False,
+                "exit_code": 1,
+            }
+        ],
+    )
+
+    with pytest.raises(
+        OperatorGovernanceError,
+        match="trusted baseline profile did not pass: failed-real-e2e",
+    ):
+        service.capture_baseline("failed-baseline", profile="smoke")
+
+    assert not (root / ".autobugfix-baselines/failed-baseline.yaml").exists()
 
 
 def test_committed_baseline_rejects_later_behavior_commit(tmp_path: Path):
