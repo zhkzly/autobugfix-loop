@@ -156,10 +156,12 @@ SWE preparation and execution use distinct authority commands:
 autobugfix eval benchmark qualify-swe --protocol benchmarks/swe-experiment-2.yaml \
   --adapter swebench_verified --instance <public-id>
 
-# Holdout qualification is a human Guard action. The external root must be
-# outside the project, Eval, Memory, and Operator roots.
-autobugfix eval benchmark qualify-swe --protocol benchmarks/swe-experiment-2.yaml \
-  --adapter swebench_live --instance <private-id> --guard-root <external-root>
+# Formal Holdout qualification is one human Guard action. The external root
+# must be outside project, Eval, Memory, Operator, and agent-readable roots.
+# Secret-keyed ordering selects cases without exposing IDs to Operator.
+autobugfix eval benchmark qualify-swe-holdout-cohort \
+  --protocol benchmarks/swe-experiment-2.yaml \
+  --guard-root <external-root> --max-candidates 24
 
 autobugfix eval benchmark prepare-swe --protocol benchmarks/swe-experiment-2.yaml \
   --guard-root <external-root>
@@ -182,6 +184,20 @@ or case-level Guard artifacts in an Operator request/evidence path. A failed
 official scorer is Eval evidence after freeze and cannot trigger another
 Writer attempt. Only the declared visible verifier can drive bounded Execution
 feedback.
+
+The supervising Operator must not run the Holdout cohort command, inspect its
+processes, capture its terminal, or read its external root. A human runs it in
+a separate terminal and reports only the aggregate summary digest. The command
+uses the Guard secret to order candidates, excludes every Live identity already
+present in Operator-visible Eval evidence, resumes encrypted qualifications,
+and stops only at six repository-unique cases spanning at least four language
+families. Never replace it with six visible `--instance` invocations for a
+formal experiment.
+
+Do not keep an Operator process active while the human Guard uses a shared
+Docker daemon. If the Operator can inspect that daemon, use a dedicated Guard
+Docker context/host or stop the Operator until qualification and Guard scoring
+finish; image tags and process arguments are Guard-local case evidence.
 
 Private Defects4J qualification may compare buggy and fixed revisions to reject
 an unstable benchmark case. Never move its fixed baseline, gold data, or

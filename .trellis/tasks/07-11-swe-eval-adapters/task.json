@@ -12,7 +12,7 @@
   "assignee": "kelong.ZX",
   "createdAt": "2026-07-11",
   "completedAt": null,
-  "branch": "agent/swe-eval-adapters",
+  "branch": "agent/swe-eval-adapters-complete",
   "base_branch": "agent/defects4j-eval-adapter",
   "worktree_path": null,
   "commit": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": "07-11-experiment-main-benchmarks",
   "relatedFiles": [],
-  "notes": "Verified Optimization qualification is 10/10 on runtime sha256:e83ab8521188fd47492b443a504116ff8d3bcfe77fba4c2990c8e1b8e87533cc. Live Holdout qualification and sealing require the human-held external Guard secret. Trusted baseline seeding on origin/main remains a publication gate.",
+  "notes": "Verified Optimization qualification is 10/10 on runtime sha256:3eb9ba95dbf997c098c1bb893a6123e66e2ebf5f90b7d7be4d0d52ffe4fb5083. Live Holdout qualification uses one secret-ordered human Guard command and sealing still requires the external Guard secret. Trusted baseline seeding on origin/main remains a publication gate.",
   "meta": {}
 }
