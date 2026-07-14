@@ -1,0 +1,1012 @@
+schema: autobugfix-operator-bundle-v3
+authority: advisory_transport_revalidated_by_trusted_base
+triage:
+  triage_id: triage-constitution-path-registry-v4-v2
+  summary: Trusted constitution cannot classify all required repository-level SWE
+    Eval paths
+  suspected_layers:
+  - operator
+  evidence:
+  - /tmp/autobugfix-m3-constitution-audit-v2.yaml
+  creator: operator-main-agent
+  confidence: high
+  next_actions:
+  - Request a constitution-only path registry expansion with examples coverage
+  created_at: '2026-07-13T16:48:35Z'
+  triage_digest: 22a1ec6f841253625701d27b328a205b11d36a75079808f671035b3c0b3329c4
+request:
+  request_id: op-constitution-path-registry-v4-v2
+  summary: Expand only the trusted layer registry required for SWE Eval promotion
+  primary_layer: operator
+  secondary_layers: []
+  requested_risk: constitutional
+  triage_id: triage-constitution-path-registry-v4-v2
+  triage_digest: 22a1ec6f841253625701d27b328a205b11d36a75079808f671035b3c0b3329c4
+  evidence:
+  - /tmp/autobugfix-m3-constitution-audit-v2.yaml
+  validation_profiles:
+  - operator
+  - full
+  performance_baseline: real-e2e
+  planned_paths:
+  - src/autobugfix/operator/constitution.yaml
+  constitution_digest: 803d7cf02c9aa606cc98ba54dedefc4c05baf366209d1b2c0e666c0f895cd69a
+  branch: operator/experiment/constitution-path-registry-v4-v2
+  base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  creator: operator-main-agent
+  expires_at: '2026-07-21T00:00:00Z'
+  created_at: '2026-07-13T16:48:41Z'
+  request_digest: 1c87702178176fd538032fdbc0fce325928401ef43bf56a8ccf49ceb691be231
+events:
+- event_id: 25dea438a5bf476a9a6b25af791ea6f6
+  request_id: op-constitution-path-registry-v4-v2
+  kind: request_created
+  actor: operator-main-agent
+  payload:
+    base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+    constitution_digest: 803d7cf02c9aa606cc98ba54dedefc4c05baf366209d1b2c0e666c0f895cd69a
+    request_digest: 1c87702178176fd538032fdbc0fce325928401ef43bf56a8ccf49ceb691be231
+  previous_hash: null
+  created_at: '2026-07-13T16:48:41Z'
+  event_hash: 0ef5241fb2dae06146efa029bd08a97a62ea763abcf8b23b821eec1bf69a2fbc
+- event_id: f83f1411155b49619e9ac7a5409e3c85
+  request_id: op-constitution-path-registry-v4-v2
+  kind: approval_recorded
+  actor: 0kelong.zx@gmail.com
+  payload:
+    approval_id: signed-20260714T042205-9c8f7fde
+    kind: human_signed
+    stage: scope
+  previous_hash: 0ef5241fb2dae06146efa029bd08a97a62ea763abcf8b23b821eec1bf69a2fbc
+  created_at: '2026-07-14T04:22:05Z'
+  event_hash: 48f7ca7366dd17e05c369ea7dddb7bd8a4e0725e40b306dbb8dc03dcadb516c2
+- event_id: 07ed66d4c0cf48d1b1eec47fca7a7de4
+  request_id: op-constitution-path-registry-v4-v2
+  kind: request_activated
+  actor: kelongzx
+  payload:
+    branch: operator/experiment/constitution-path-registry-v4-v2
+    experiment_id: experiment-20260714T042229-7f3c9194
+    scope_version: 1
+    workspace_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+  previous_hash: 48f7ca7366dd17e05c369ea7dddb7bd8a4e0725e40b306dbb8dc03dcadb516c2
+  created_at: '2026-07-14T04:22:29Z'
+  event_hash: 5766997559e45c7bc5c92d5362ae1495797be6ce1bfc4df7297ddcd9f7e82ba7
+- event_id: 437a40b64c984a07b842506d2e6d5012
+  request_id: op-constitution-path-registry-v4-v2
+  kind: writer_started
+  actor: kelongzx
+  payload:
+    attempt: 1
+    run_id: writer-20260714T042240-59e1c035
+  previous_hash: 5766997559e45c7bc5c92d5362ae1495797be6ce1bfc4df7297ddcd9f7e82ba7
+  created_at: '2026-07-14T04:22:40Z'
+  event_hash: 1990ec2c2cc4781b7d9b77fa5bbe9cfc75208ad455e1d16805ee36990519c287
+- event_id: 1f9eb4e9a86b4fd89cabf22264fbba5a
+  request_id: op-constitution-path-registry-v4-v2
+  kind: writer_failed
+  actor: trusted-host
+  payload:
+    error: "Codex SDK worker failed with exit 1: Traceback (most recent call last):\n\
+      \  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen\
+      \ runpy>\", line 88, in _run_code\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk_worker.py\"\
+      , line 46, in <module>\n    raise SystemExit(main())\n                     ^^^^^^\n\
+      \  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk_worker.py\"\
+      , line 37, in main\n    result = build_backend().run(_request(request_data))\n\
+      \             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+      , line 261, in run\n    result = self._call_sdk(module, request)\n         \
+      \    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+      , line 250, in _call_sdk\n    return self._call_preview_sdk(module, request)\n\
+      \           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+      , line 189, in _call_preview_sdk\n    env=self._runtime_env(request),\n    \
+      \    ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+      , line 102, in _runtime_env\n    raise CodexSDKError(\nautobugfix.codex_sdk.CodexSDKError:\
+      \ cannot locate .autobugfix/config.yaml for SDK role; refusing to inherit global\
+      \ Codex hooks/runtime"
+    run_id: writer-20260714T042240-59e1c035
+  previous_hash: 1990ec2c2cc4781b7d9b77fa5bbe9cfc75208ad455e1d16805ee36990519c287
+  created_at: '2026-07-14T04:22:41Z'
+  event_hash: 719fa3af4c081018566c39a86a86154532485c7893460b009fd02b04b889f477
+- event_id: be89dbf2cf9947ad96bcdda4f7363b60
+  request_id: op-constitution-path-registry-v4-v2
+  kind: feedback_published
+  actor: trusted-host
+  payload:
+    feedback_id: feedback-20260714T042241-72fca7a7
+  previous_hash: 719fa3af4c081018566c39a86a86154532485c7893460b009fd02b04b889f477
+  created_at: '2026-07-14T04:22:41Z'
+  event_hash: 97b6674d1ede8eec8cb4e49149e4616c03d03545011f6992fd06113378658fcf
+- event_id: 37ac0231da374264be8a2e3f4e00d0f0
+  request_id: op-constitution-path-registry-v4-v2
+  kind: writer_started
+  actor: kelongzx
+  payload:
+    attempt: 2
+    run_id: writer-20260714T042346-0aa7bd81
+  previous_hash: 97b6674d1ede8eec8cb4e49149e4616c03d03545011f6992fd06113378658fcf
+  created_at: '2026-07-14T04:23:46Z'
+  event_hash: 6b0e09b9b0bbcae8e97648c762928512996b82786356bc9f694f3379d5e8b10c
+- event_id: 001cba0626f845eda4dc35a82951d030
+  request_id: op-constitution-path-registry-v4-v2
+  kind: writer_failed
+  actor: trusted-host
+  payload:
+    error: "Codex SDK worker failed with exit 1: Traceback (most recent call last):\n\
+      \  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen\
+      \ runpy>\", line 88, in _run_code\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk_worker.py\"\
+      , line 46, in <module>\n    raise SystemExit(main())\n                     ^^^^^^\n\
+      \  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk_worker.py\"\
+      , line 37, in main\n    result = build_backend().run(_request(request_data))\n\
+      \             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+      , line 261, in run\n    result = self._call_sdk(module, request)\n         \
+      \    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+      , line 250, in _call_sdk\n    return self._call_preview_sdk(module, request)\n\
+      \           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+      , line 209, in _call_preview_sdk\n    return thread.run(\n           ^^^^^^^^^^^\n\
+      \  File \"/home/kelongzx/pycodes/auto_bug_fix/.venv-control/lib/python3.12/site-packages/openai_codex/api.py\"\
+      , line 569, in run\n    return _collect_turn_result(stream, turn_id=turn.id)\n\
+      \           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/kelongzx/pycodes/auto_bug_fix/.venv-control/lib/python3.12/site-packages/openai_codex/_run.py\"\
+      , line 87, in _collect_turn_result\n    _raise_for_failed_turn(completed.turn)\n\
+      \  File \"/home/kelongzx/pycodes/auto_bug_fix/.venv-control/lib/python3.12/site-packages/openai_codex/_run.py\"\
+      , line 64, in _raise_for_failed_turn\n    raise RuntimeError(turn.error.message)\n\
+      RuntimeError: {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\"\
+      ,\"message\":\"The 'gpt-5.6-sol' model requires a newer version of Codex. Please\
+      \ upgrade to the latest app or CLI and try again.\"}}"
+    run_id: writer-20260714T042346-0aa7bd81
+  previous_hash: 6b0e09b9b0bbcae8e97648c762928512996b82786356bc9f694f3379d5e8b10c
+  created_at: '2026-07-14T04:23:57Z'
+  event_hash: a249cfd893ef98b97f509acff3a98e12c4b3e3c6fc34212787b54323aa37260a
+- event_id: d4c89ae25539456db8ef705661327c98
+  request_id: op-constitution-path-registry-v4-v2
+  kind: feedback_published
+  actor: trusted-host
+  payload:
+    feedback_id: feedback-20260714T042357-6cbe6c46
+  previous_hash: a249cfd893ef98b97f509acff3a98e12c4b3e3c6fc34212787b54323aa37260a
+  created_at: '2026-07-14T04:23:57Z'
+  event_hash: a155d421abcb8c540939acb90ac7a3f6dffbdcf42ddd6dc0a14ffba05e2cc209
+- event_id: 08a2b890a42a469cb17bf57a78bb64a0
+  request_id: op-constitution-path-registry-v4-v2
+  kind: writer_started
+  actor: kelongzx
+  payload:
+    attempt: 3
+    run_id: writer-20260714T042434-bd3ab932
+  previous_hash: a155d421abcb8c540939acb90ac7a3f6dffbdcf42ddd6dc0a14ffba05e2cc209
+  created_at: '2026-07-14T04:24:34Z'
+  event_hash: 0c88be40dbdb9ff3987102567da34a14dbff5ac4ec1ef70ec9fa7e9121412af2
+- event_id: 8032f6c7b5c2492c8286335c4cbf8e9b
+  request_id: op-constitution-path-registry-v4-v2
+  kind: patch_observed
+  actor: trusted-host
+  payload:
+    head_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+    patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+    run_id: writer-20260714T042434-bd3ab932
+  previous_hash: 0c88be40dbdb9ff3987102567da34a14dbff5ac4ec1ef70ec9fa7e9121412af2
+  created_at: '2026-07-14T04:31:46Z'
+  event_hash: 8922b6b471782f9ffa31c7d3aebe4aef26cd4941b59b6b7c6860697dd7300c26
+- event_id: 757a79e237c544bc8673d785f783e909
+  request_id: op-constitution-path-registry-v4-v2
+  kind: writer_completed
+  actor: trusted-host
+  payload:
+    run_id: writer-20260714T042434-bd3ab932
+  previous_hash: 8922b6b471782f9ffa31c7d3aebe4aef26cd4941b59b6b7c6860697dd7300c26
+  created_at: '2026-07-14T04:31:46Z'
+  event_hash: 96ca606452ad7f6fc70b553576b899026276dd7413b20f089f7ba19260f2a48d
+- event_id: 8dde8840cda3471aab9b33a6dba11440
+  request_id: op-constitution-path-registry-v4-v2
+  kind: check_started
+  actor: kelongzx
+  payload:
+    check_id: check-20260714T043203-162a2eb8
+    mode: fast
+  previous_hash: 96ca606452ad7f6fc70b553576b899026276dd7413b20f089f7ba19260f2a48d
+  created_at: '2026-07-14T04:32:03Z'
+  event_hash: fbb12a158b4a89d42e2817177d7ae6beaf3d9be0009a3edd879f86df57b5bd2e
+- event_id: 2442241c0d6a45438b3227cd709bf89d
+  request_id: op-constitution-path-registry-v4-v2
+  kind: check_passed
+  actor: trusted-host
+  payload:
+    check_id: check-20260714T043203-162a2eb8
+    failures: []
+    patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  previous_hash: fbb12a158b4a89d42e2817177d7ae6beaf3d9be0009a3edd879f86df57b5bd2e
+  created_at: '2026-07-14T04:32:28Z'
+  event_hash: 69c960106c8c342d115cacbd35265276175e0cca24de4cc77c05cd2074031c31
+- event_id: 87c13b0fa4304e8eadea2ecfa88678a6
+  request_id: op-constitution-path-registry-v4-v2
+  kind: gate_updated
+  actor: trusted-host
+  payload:
+    blocked_by: []
+  previous_hash: 69c960106c8c342d115cacbd35265276175e0cca24de4cc77c05cd2074031c31
+  created_at: '2026-07-14T04:32:28Z'
+  event_hash: 663ce072b289b3cc5a28ab53eeefb4a7b9632ed15a21a26e82b2cb3763c4e739
+- event_id: 6dc107ce2139457caa49dd6678f6ef02
+  request_id: op-constitution-path-registry-v4-v2
+  kind: candidate_committed
+  actor: kelongzx
+  payload:
+    head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+    manifest: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2/.autobugfix-governance/op-constitution-path-registry-v4-v2/bundle.yaml
+    patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  previous_hash: 663ce072b289b3cc5a28ab53eeefb4a7b9632ed15a21a26e82b2cb3763c4e739
+  created_at: '2026-07-14T04:32:44Z'
+  event_hash: b458c08b1e86c59e35b8ae37015012c1c00a8701e02143be54fb217f5a2ac26e
+- event_id: 74f0370709bb41bd9f348293889424d2
+  request_id: op-constitution-path-registry-v4-v2
+  kind: patch_observed
+  actor: trusted-host
+  payload:
+    head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+    patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  previous_hash: b458c08b1e86c59e35b8ae37015012c1c00a8701e02143be54fb217f5a2ac26e
+  created_at: '2026-07-14T04:32:44Z'
+  event_hash: 983f5c2cf8dfb07f3b1ebda13e1d36e4e56bbb0efc0bd0bb2be7c1b734845104
+- event_id: 69554fe6f6e94fa0ab20dbc2d52191f0
+  request_id: op-constitution-path-registry-v4-v2
+  kind: experiment_started
+  actor: kelongzx
+  payload:
+    experiment_id: experiment-20260714T043301-71d3a964
+    profile: real-e2e
+  previous_hash: 983f5c2cf8dfb07f3b1ebda13e1d36e4e56bbb0efc0bd0bb2be7c1b734845104
+  created_at: '2026-07-14T04:33:01Z'
+  event_hash: 864af31a5004ba0c5642fce3819c6fea54b46e45433a1b5b6235c17e7f100cd1
+- event_id: 0749bb431d344622844ed354ac528990
+  request_id: op-constitution-path-registry-v4-v2
+  kind: experiment_completed
+  actor: trusted-host
+  payload:
+    experiment_id: experiment-20260714T043301-71d3a964
+    failure: null
+    passed: true
+  previous_hash: 864af31a5004ba0c5642fce3819c6fea54b46e45433a1b5b6235c17e7f100cd1
+  created_at: '2026-07-14T04:41:02Z'
+  event_hash: f0279102121639da2ac0740e051c31a2d6d927cadc3bf0e053f4ac4b1652271e
+- event_id: 599c43a188a449f79d44eff9ebb0a1de
+  request_id: op-constitution-path-registry-v4-v2
+  kind: check_started
+  actor: kelongzx
+  payload:
+    check_id: check-20260714T044113-27065bcf
+    mode: full
+  previous_hash: f0279102121639da2ac0740e051c31a2d6d927cadc3bf0e053f4ac4b1652271e
+  created_at: '2026-07-14T04:41:13Z'
+  event_hash: 6fea6d92e3c0c1bec31c0365324a4badc85400a113c8d581f23238ae18f15022
+- event_id: 6af64c82111744059c556af5c1e572c8
+  request_id: op-constitution-path-registry-v4-v2
+  kind: check_passed
+  actor: trusted-host
+  payload:
+    check_id: check-20260714T044113-27065bcf
+    failures: []
+    patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  previous_hash: 6fea6d92e3c0c1bec31c0365324a4badc85400a113c8d581f23238ae18f15022
+  created_at: '2026-07-14T04:46:28Z'
+  event_hash: c247a91dece4300c5eb46a3200f0f2d592be27769a9fc725f66c12826bbef99c
+- event_id: ee90a84c68164011978a6cfe13ab99b4
+  request_id: op-constitution-path-registry-v4-v2
+  kind: gate_updated
+  actor: trusted-host
+  payload:
+    blocked_by: []
+  previous_hash: c247a91dece4300c5eb46a3200f0f2d592be27769a9fc725f66c12826bbef99c
+  created_at: '2026-07-14T04:46:28Z'
+  event_hash: b1ab4845b6678fd6581ecda7b4c6f7f26d7da33fcdc03535b2869a9e827ab6dd
+- event_id: ae288a34afa74ca280095b09c7229197
+  request_id: op-constitution-path-registry-v4-v2
+  kind: verification_accepted
+  actor: trusted-host
+  payload:
+    check_id: check-20260714T044113-27065bcf
+    head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+    patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  previous_hash: b1ab4845b6678fd6581ecda7b4c6f7f26d7da33fcdc03535b2869a9e827ab6dd
+  created_at: '2026-07-14T04:46:28Z'
+  event_hash: 2d75b2bb3d4b7b380ac4d35186db3ff2ab330fc171bc8325abcf6ffe49f24b19
+- event_id: fea079ce99804b98be734bdb70f86168
+  request_id: op-constitution-path-registry-v4-v2
+  kind: promotion_prepared
+  actor: kelongzx
+  payload:
+    promotion_id: promotion-20260714T044900-786fd836
+    receipt_id: artifact-20260714T044900-970a912a
+  previous_hash: 2d75b2bb3d4b7b380ac4d35186db3ff2ab330fc171bc8325abcf6ffe49f24b19
+  created_at: '2026-07-14T04:49:00Z'
+  event_hash: c6529b143a67a3469c45dab38fb454bfe72833db054e02bfcbc4973862c7fc37
+- event_id: 8de2ae6757ef4eeb97e6f509d3495b1b
+  request_id: op-constitution-path-registry-v4-v2
+  kind: approval_recorded
+  actor: 0kelong.zx@gmail.com
+  payload:
+    approval_id: signed-20260714T062827-e71e9925
+    kind: human_signed
+    stage: merge
+  previous_hash: c6529b143a67a3469c45dab38fb454bfe72833db054e02bfcbc4973862c7fc37
+  created_at: '2026-07-14T06:28:27Z'
+  event_hash: cc39d275fcd4039792498e03fd2501c77f97202e97c156546c832b32d2d11d44
+- event_id: 3c58b847f090483d8b9940fa32b075ff
+  request_id: op-constitution-path-registry-v4-v2
+  kind: request_reopened
+  actor: kelongzx
+  payload:
+    reason: Refresh trusted transport bundle with patch-bound merge approval
+  previous_hash: cc39d275fcd4039792498e03fd2501c77f97202e97c156546c832b32d2d11d44
+  created_at: '2026-07-14T06:28:36Z'
+  event_hash: 7104816f766d0388d675694f94ded733a8e54b11224869085188bb5d40a149ea
+projection:
+  request_id: op-constitution-path-registry-v4-v2
+  state: ACTIVE
+  last_event_hash: 7104816f766d0388d675694f94ded733a8e54b11224869085188bb5d40a149ea
+  workspace_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+  patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+  validation_id: check-20260714T044113-27065bcf
+  active_writer_run_id: null
+  active_check_run_id: null
+  scope_version: 1
+  outcome: null
+  blocked_by:
+  - Refresh trusted transport bundle with patch-bound merge approval
+  violations: []
+approvals:
+- approval_id: signed-20260714T042205-9c8f7fde
+  request_id: op-constitution-path-registry-v4-v2
+  request_digest: 1c87702178176fd538032fdbc0fce325928401ef43bf56a8ccf49ceb691be231
+  base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  approver: 0kelong.zx@gmail.com
+  kind: human_signed
+  stage: scope
+  decision: approve
+  reason: Authorize constitution-only path registry expansion for SWE Eval harness
+    files
+  allowed_layers:
+  - operator
+  scope_version: 1
+  allowed_paths:
+  - src/autobugfix/operator/constitution.yaml
+  expires_at: '2026-07-21T00:00:00Z'
+  patch_digest: null
+  head_sha: null
+  proof:
+    signature_base64: LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0KVTFOSVUwbEhBQUFBQVFBQUJCY0FBQUFIYzNOb0xYSnpZUUFBQUFNQkFBRUFBQVFCQUxWOVdrcHhoV2hQN21GYk9BRFBZbwo1bDh1eTZSeklxMUxHQWpiSkFjTU1ScHBYZDhhbGVyZ1pyeFlMdW94OTlWN2xmVHFrQ21VaktzT3d2aU94OWdWN3ZxZE0rCmM1d3VMU3J1dXpRMkxaRkJFK0gwSGJYWXV6c3RKOWh0Y1E1NzRXbTlrL2t5YU13NWF1MlEzUTlKMzIrTUllOGJGemNBU2sKUytBb0dzNldBanpsMlBTWkdEbTV5ZTdtZ1MyZ2wwV1FGckFjRUdjelZPenNaZ05PRlltc3d2dE9GY1J1ekVOU2ZRcGNlagorTDU4RnJ0aTRMNUVXYkl2YjlVaGJBKzhKdGNaUC9GeHNIZmdsVjBwcjBXcVN5ZVFsVUNRUGVUVDYzaTRNaWQzMW1aYmpwClJEYjhsU3RVZG5PNWFnMnY4LzB0dVlRT1Q4YnIwVWIvay9xazFYRjQybjlzVHRPZmlZZUM3bkl3VDVZcmNPalF6VHpoTksKWTFxenZTOWdlUHFneWk3d2ZXYUpSS0JkZXltTE9sdVBlUGlCQmw0Z081U1ZQM29ld1lvSUlLc0hLTUlCdUhzYlNoaDB2bQp3dzd0WmpML2wxTGNwb3BvdjlCNVQ1Y3UwTk02eFBmelBGaEFZVEQyajdxOFFKTW0vYzZsaHlzYytuU2FxVnBzSVVHQW5CClNWN3pqM3I4eUNuMi9IZWlZQXM2bTE1Z0hHS0tlb2FXV3BjczFRcFNRSHh3RGlZSDFGbnBDR3VCR3pRNjZBMENSM1JNcGYKbjlRR3I3MFUxQWt2MVl4WFY2aHdNNVg2Y2c3a1hoZDhVbHRqUmFpcTV5OFVZYWM5SmZYeUV0dFpmWjZYc3FqdmdITzBGVQpIb3o5dEFxekdPUVZIeFZ6MWJZU3FMMjdwakZ1UHNtRmJ1Sng3TnVhUFdYYytzalk4U0RFTmtjbnVpK1BDQlI5TkR6enI5CjYxdktuV0RxN3hwN280VlhoOWlvSGhaTm9FNkhwVTZNcWlKNWlYVTdyaU5kUksxYVRzY2pCM2NoNnBPQVQycG42ZDRocDIKQmhtOHVBYjI1UHNCa2lOWTFBRFppdCsySERTNDhkaGZta21WOFVHSjlFQkNzS3Y5eC8xYkoydUNSTzA4QnJ5bk85SUhtUgpxMXNUYk1kWFh6T0xWMXVtNldvZXVlZEIzK0RWS0U0MDZxUjNxdE1BM3o3eVFqRXJBVFEvS0JSUU5uRUtaZEx2b204SEc1CldCR29oYk5tSW9PbGZTV0tuMFA4YVJBTHN3V2VNUzRySEs4Z0tDdFQzZG9rNTY5dFF1S2xWRWRRRjU5ajgyaDJtMURsNk8KVGpTZCtncXNmdzkxQVRVUDg5dWVGdThMYnJNZ1NyU3NocWhsRWxwWkZCdGZjTklOUFprdGJMeSszcjZsaU93azJaMW9RMQpqWE9YQUVqT0V3WHFIK3pyTzBUeHVKYWFXY20xemRnTGFpQzZzZGxJdU9CemhZZUFVWmVmZ3VIUnY1T1NuVEhUNHBiamdSCmVKWFUvR1dUVjZGZjVucExYZkdhc25NRDZHck9za1RGUEtwSWZGVUI2UVFydEg1Q21Iek9ua3JBNTQ5Vkp6Q213S2ZQM0cKN2RkbXM3T3loRU9HWStWbStjMG5VOEg2TVBOM0JUMDNMWXo0WWRjdWNtNVgvSUdYUmxMcGx0TTBrMmNjTVkwUFIwZE83RwpZMGtjazFTYVArWjF4RDlpK3VETkk3Mll6b3hNbzRqdlBsbS95RjdvUFBBd2pjUS9DY296d1AzdHpGR01rZTh3T3RWcnNiCkZ5NGY2VU9KWDhmZlpCY0FBQUFUWVhWMGIySjFaMlpwZUMxdmNHVnlZWFJ2Y2dBQUFBQUFBQUFHYzJoaE5URXlBQUFFRkEKQUFBQXh5YzJFdGMyaGhNaTAxTVRJQUFBUUFCYnZVR3BnVUxpRGRmeDZtanlJaTdydWxTdmcyb0VqRFlUSVhEbHZ1Rzc5cQpmeW5XSlk1NjhwRVh1QnBxVWZIKzJ5dGJJMDJ1VkdzOE5FanowQmREMEQ3MWVzU3ZLRS9EeHR3QkV5MWJsNGVwZmN6bzhUCmdZT0JqOUZIaVBnWEdqQzBxRklVT0RNS1ZQM2pSUURreVZZOUF3Q0hHaTdHSytlVkE3NzlSMC9pUnVZVmJHalRIdzhyalUKeVZNUm9iUG1yMXhaMW92b1luK1IzbXFTYWx0SG1pK1QzZ3A1SUxqUUlxbzVUdTNmWEMyc3d4aWUrb2ZFdVEzdzIrVWRSRApnaU8weEpXK1dvOWM0dWFiZkF3aGo2YmpaMEFYdlNLVVJtaVJUWUkwaGllUUhPb1UydnZmYXEzVDBZekRsRlVxQTJLeFJVCmtIVXU0M0ZJV2o1VkZMSjNQcllRUXdXS0xIQjkyRHFPRXZ1WGdLV3dMclg1K3F4YkJVUWdnclZzNHFSQWJLWE5lWncwSlIKV0RWU1VvTWg1SEtnampJWjhmS0RXbzkvbEFEOFJyb2p0Y3pmYXF1QkhjVnp0QXRzcDhldUY1RjRGUzRub3dGZW1YUUx3TApYZVNoeWo4aGhzS3pZN2t5ZXgwRXFUL2lUK0daQVRuRDlQN2xOekM4Y3FDU2VFK3BLRjZoWW1yNVFOUHR6ME5ISXZzTE1DCmNoSDg1RWpXd3MyUStsY1djcFBYbmd1Lzc3TkQ4TGFYK0Y2eWhMMEkwR3BGM3krN2dCY1FubFhLdGJjaFJBREhDb05HaXcKdE16MmNhUGNIaUd6V09QVEtoeW5USGJTVTZSb0FRU1RuVk1GSTU3NUJSTCtIK3NZM0V0Q1hHR0hhNU80SGtGd0txZGJ2UApSV0o0OEs3Y2wrZkQrN3ZzSFNhWTRQY0lXQjBaWTdlL1FPc2dXMGd1Q3grWWtMYjRJYldkSy9WVU5SY3VUcGhCMWIvS2JUClpkdmxRQ056RlV0QVlGWHhlN3dCZExlbUFrWFNJdjB6UU5vVUIvMzF6OThzL2Q0SUtXVzI0M01hVElHcjBkQzMreWN5ajYKazFlcDFpYjh5Sk5ieHA0bW5kUEZyYkZrKzFqNGFxYUhiZlltSlZNaTFiaDlJM0lUU01mODhBQWFuNFRDeWJVWWRzM2t3QQpHKzZDNkhHL3Rldm1rUmZhNU1oMmxsZkgzM0xJazArb3VLaFFpYkJnQWo0d3g1Z3JOVWt0azFCSi9QbUp5SnZicFI4Q2QrCjMzK01SK3Zrd0ZQK2MvanZYYmgzQ2ZQaDI2bi85U2F2RHcycno5QlVLcGZhelA1ellJN1Q2Y2JueWltUmNhM3MraDRNcTUKZlVFT1hvWVRxcnM2bmhIRmhSVmxBMWplTmNUMXFka1h5Tk1ONjNOVmorYk0vaERqWFNnWUNtSXNJdXNKaDhvSVQ3VURuTgovaDJ2RU51ckxwU1pvYjBEaXQwRGtUSnpJVVA2VTlUZ2szakk1blRNajByaFYzWWF4KytMelBaeExUdXRzSG9tYWFwUVY4CjJDNXYxcmdDYTA0MElYM0xpVUI5VkhFSnhhYmJaUUdSK0JtenN4ZzgwVXRSeUFwQnNCQTU2cDFNZllrM25DU2ZHTmhOZFUKaHllbjZwcXR2cmRPbkVaR3Q0aFJ6NFl3Sml5am94elQrbUd1UmVpeklZbjRYVC9BL1g0UnB5Y2RyQlM1N2Vid1poMkJxdQo2VGdkZGdvVjI0YStEbk1VRFg5bHUwK2V0SnkzSElBMnFISUlkNG5ld2ljQjhTdDBFWVdrL2daMmpwR2QxQT09Ci0tLS0tRU5EIFNTSCBTSUdOQVRVUkUtLS0tLQo=
+    signing_payload:
+      allowed_layers:
+      - operator
+      allowed_paths:
+      - src/autobugfix/operator/constitution.yaml
+      approver: 0kelong.zx@gmail.com
+      base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+      decision: approve
+      expires_at: '2026-07-21T00:00:00Z'
+      head_sha: null
+      patch_digest: null
+      reason: Authorize constitution-only path registry expansion for SWE Eval harness
+        files
+      request_digest: 1c87702178176fd538032fdbc0fce325928401ef43bf56a8ccf49ceb691be231
+      request_id: op-constitution-path-registry-v4-v2
+      schema: autobugfix-operator-approval-v3
+      scope_version: 1
+      stage: scope
+  created_at: '2026-07-14T04:22:05Z'
+  approval_digest: db982942d3116c4167338b72f3ee7e20377f382f0b1bcd1ce1ee6323c714d3a1
+- approval_id: signed-20260714T062827-e71e9925
+  request_id: op-constitution-path-registry-v4-v2
+  request_digest: 1c87702178176fd538032fdbc0fce325928401ef43bf56a8ccf49ceb691be231
+  base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  approver: 0kelong.zx@gmail.com
+  kind: human_signed
+  stage: merge
+  decision: approve
+  reason: Authorize merge of verified constitution path registry patch
+  allowed_layers:
+  - operator
+  scope_version: 1
+  allowed_paths:
+  - src/autobugfix/operator/constitution.yaml
+  expires_at: '2026-07-21T00:00:00Z'
+  patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  head_sha: null
+  proof:
+    signature_base64: LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0KVTFOSVUwbEhBQUFBQVFBQUJCY0FBQUFIYzNOb0xYSnpZUUFBQUFNQkFBRUFBQVFCQUxWOVdrcHhoV2hQN21GYk9BRFBZbwo1bDh1eTZSeklxMUxHQWpiSkFjTU1ScHBYZDhhbGVyZ1pyeFlMdW94OTlWN2xmVHFrQ21VaktzT3d2aU94OWdWN3ZxZE0rCmM1d3VMU3J1dXpRMkxaRkJFK0gwSGJYWXV6c3RKOWh0Y1E1NzRXbTlrL2t5YU13NWF1MlEzUTlKMzIrTUllOGJGemNBU2sKUytBb0dzNldBanpsMlBTWkdEbTV5ZTdtZ1MyZ2wwV1FGckFjRUdjelZPenNaZ05PRlltc3d2dE9GY1J1ekVOU2ZRcGNlagorTDU4RnJ0aTRMNUVXYkl2YjlVaGJBKzhKdGNaUC9GeHNIZmdsVjBwcjBXcVN5ZVFsVUNRUGVUVDYzaTRNaWQzMW1aYmpwClJEYjhsU3RVZG5PNWFnMnY4LzB0dVlRT1Q4YnIwVWIvay9xazFYRjQybjlzVHRPZmlZZUM3bkl3VDVZcmNPalF6VHpoTksKWTFxenZTOWdlUHFneWk3d2ZXYUpSS0JkZXltTE9sdVBlUGlCQmw0Z081U1ZQM29ld1lvSUlLc0hLTUlCdUhzYlNoaDB2bQp3dzd0WmpML2wxTGNwb3BvdjlCNVQ1Y3UwTk02eFBmelBGaEFZVEQyajdxOFFKTW0vYzZsaHlzYytuU2FxVnBzSVVHQW5CClNWN3pqM3I4eUNuMi9IZWlZQXM2bTE1Z0hHS0tlb2FXV3BjczFRcFNRSHh3RGlZSDFGbnBDR3VCR3pRNjZBMENSM1JNcGYKbjlRR3I3MFUxQWt2MVl4WFY2aHdNNVg2Y2c3a1hoZDhVbHRqUmFpcTV5OFVZYWM5SmZYeUV0dFpmWjZYc3FqdmdITzBGVQpIb3o5dEFxekdPUVZIeFZ6MWJZU3FMMjdwakZ1UHNtRmJ1Sng3TnVhUFdYYytzalk4U0RFTmtjbnVpK1BDQlI5TkR6enI5CjYxdktuV0RxN3hwN280VlhoOWlvSGhaTm9FNkhwVTZNcWlKNWlYVTdyaU5kUksxYVRzY2pCM2NoNnBPQVQycG42ZDRocDIKQmhtOHVBYjI1UHNCa2lOWTFBRFppdCsySERTNDhkaGZta21WOFVHSjlFQkNzS3Y5eC8xYkoydUNSTzA4QnJ5bk85SUhtUgpxMXNUYk1kWFh6T0xWMXVtNldvZXVlZEIzK0RWS0U0MDZxUjNxdE1BM3o3eVFqRXJBVFEvS0JSUU5uRUtaZEx2b204SEc1CldCR29oYk5tSW9PbGZTV0tuMFA4YVJBTHN3V2VNUzRySEs4Z0tDdFQzZG9rNTY5dFF1S2xWRWRRRjU5ajgyaDJtMURsNk8KVGpTZCtncXNmdzkxQVRVUDg5dWVGdThMYnJNZ1NyU3NocWhsRWxwWkZCdGZjTklOUFprdGJMeSszcjZsaU93azJaMW9RMQpqWE9YQUVqT0V3WHFIK3pyTzBUeHVKYWFXY20xemRnTGFpQzZzZGxJdU9CemhZZUFVWmVmZ3VIUnY1T1NuVEhUNHBiamdSCmVKWFUvR1dUVjZGZjVucExYZkdhc25NRDZHck9za1RGUEtwSWZGVUI2UVFydEg1Q21Iek9ua3JBNTQ5Vkp6Q213S2ZQM0cKN2RkbXM3T3loRU9HWStWbStjMG5VOEg2TVBOM0JUMDNMWXo0WWRjdWNtNVgvSUdYUmxMcGx0TTBrMmNjTVkwUFIwZE83RwpZMGtjazFTYVArWjF4RDlpK3VETkk3Mll6b3hNbzRqdlBsbS95RjdvUFBBd2pjUS9DY296d1AzdHpGR01rZTh3T3RWcnNiCkZ5NGY2VU9KWDhmZlpCY0FBQUFUWVhWMGIySjFaMlpwZUMxdmNHVnlZWFJ2Y2dBQUFBQUFBQUFHYzJoaE5URXlBQUFFRkEKQUFBQXh5YzJFdGMyaGhNaTAxTVRJQUFBUUFqdE9TeDdmWnpieVNKSmZVL1ZlYjNtK2FhZmF1cFF6L0pYY0xaVWhOczlEVQp3QlBlSDEyT090VFZVM3JWMHlCUnkxU1lBS3U0M3RUNUduQ2wvUm5yREpHdE1MQ000QzZoSDRwMFFpYm9vWFhFMDM2SEJDCkVqaEo3ZGg2OTB0UnNPUGQ1dTlXUytzckVZQzVmTzFWUExDUGpuSTI0YmI5bEd0WnlUeDZ1c1Z3azVacXdzT0Q2d0Evc0YKcGlRK3JyOTQ3dThneTVWSWRKNG1wWkFTSEc2bTdaV1dpVTdod0RGYU9hWUdCSmpPZmRXcVUwWFBGT1BFb0o2TCtkSGE1aQpjWDk4M2wyekl6UWNyYjI0ODJsL1VFOFRJMHZ0cTBVWFdXKzJEUysrUWptTnduZzlQWkd1UHVXOTlQaWJ4d01HWk9kbUdICmNKTDFWNGdtNGV2c0x0WjdCRmFNRmRKemZvUkVsODl1cnFiYUsvN0dtWXpKL3QrcUpUazljcnYyaG12WTd1MG02ZDk4VkkKeUxIQlF3bXhtOGFrWkNUa09RMGZETmtDZUJsREc1ZXV4SWRpUFJXWU8wSlVXOFMzSkNhMEdJZzlucUxvU1VQeXhvMHpmVgpPY0NLd0JFV2Nuc2o0anhHUjIvb2tRc2VpODUrVkt5c1lET1NMa01Yc2Z1clB1b21HaVY4MFBzYVA4U1dneDZJMkFzbXNSCktiNGxScWxveUJUb3M1UVRlYlVaZTNLeW92MU9idHUyWUF4b3dxL3gxaWRvcXdKNW5qNFhRSEJETCt6Q1pzMjhwK1h5cXIKVVBFeHB0Z3RHejRSWWNIZjF6MFYxYmhuc045QksyNS83TDMxcGVrNHVpZTQwMXk5SEVqejljT3lzTmJSOHBTdlBtcWJ0eQo1Z3JxR0RNQWxUUzAwMGJTaUUxc0x0Ums5M1o5L0NRT0ViNFBkRkdHMnl3Nnp0cHhyM3h5YkpvcXZYU0dQVXdXanNHeTQ0Ck9sU3RkM2xOUk85L2MwWEF6b0MwVlg2L1ZpT1pTMWtUWU05VVN4TnY2NjlIS3Q5MEt6elY5VnB1bHFwRTU4M1ZtN0pERW8KbTErbkdYSkF5MzFETGR6WitvMnNveDRWYUxBNHpXcEtqK0RPMXkra0ZrWEJOZ2VkeEVIeXpPYU50MkdxSXhFMFgwQlNIbwozWEYvbzl3V2JmOWgyeXVOV0kvdHY1anVrVGN0c1NRU1FQT3Bmdk85Q21ZajRDRjdyM0pLMVVkNzZuRmpRSU9NVUhmd204ClM5TmFWa0x1VzFVbWJVbElIbXN1OTBIMGJlOVQwa2JzUG9aRnJiTzh5WmJuK3NSVDl4QVlPbHFPOFNSVXRaS1JhZzdmU0gKa1ErWVNzNnhxVDdSTFFmUmhCVUgzckZ1ZTJtOGEyd0RabnNTMGlSc01NaVpEYTEwNWtHelJlbWM3cXhVSU1rdVhWbzNtKwp2T05sZ3dZa05jVlpmWXI3bkRZQ2dOM2RoUThTUnJrbVpqcy9HVUgzRUEzcmszOHhFdXBTMnFiLytPWG9tWHJFQjkvcDdCCkJjVHNhZ3A3RWRhRm83S1R2Kzd5V1hvUzg3WGhZNXExR1ozTVdhYnkxU21Gb0lLbEpjM0l4SWtNVVRFL3RYOElqT0JOUS8KSXAxRUkzeEpPVnBaM3VycVZLVTd4OS9IUzlJMGNEZ0tUODV1bFF5SzJ1RGd0ajBGbE03YlFpVWhTOGFwdkR3dVZRWnNrTwpKZ2NyUmd1c0J6eDAyOHdRYVdnZU1RNmF3U3lJSXlnMTM5d0FxUkJDTjFZQ1hTazA4U3NuVWgwUWg1cmpyZz09Ci0tLS0tRU5EIFNTSCBTSUdOQVRVUkUtLS0tLQo=
+    signing_payload:
+      allowed_layers:
+      - operator
+      allowed_paths:
+      - src/autobugfix/operator/constitution.yaml
+      approver: 0kelong.zx@gmail.com
+      base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+      decision: approve
+      expires_at: '2026-07-21T00:00:00Z'
+      head_sha: null
+      patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+      reason: Authorize merge of verified constitution path registry patch
+      request_digest: 1c87702178176fd538032fdbc0fce325928401ef43bf56a8ccf49ceb691be231
+      request_id: op-constitution-path-registry-v4-v2
+      schema: autobugfix-operator-approval-v3
+      scope_version: 1
+      stage: merge
+  created_at: '2026-07-14T06:28:27Z'
+  approval_digest: 20f131c4902081c6b42a9b26068d0cdf00afd3a9cfc26e09df8b5ac1390304b6
+scope_revisions: []
+writer_runs:
+- run_id: writer-20260714T042240-59e1c035
+  request_id: op-constitution-path-registry-v4-v2
+  attempt: 1
+  status: FAILED
+  role_digest: 7b28e5287e91c8d916776fdad30707b97b2bfe6f1c2d11bc5cb3bb35c713c98b
+  scope_version: 1
+  input_digest: ac8aece353bc543d4fbb086b59dc68496ce223a3a219d53c4ed956b97ce7cac2
+  base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  head_sha: null
+  patch_digest: null
+  feedback_ids: []
+  started_at: '2026-07-14T04:22:40Z'
+  finished_at: '2026-07-14T04:22:41Z'
+  error: "Codex SDK worker failed with exit 1: Traceback (most recent call last):\n\
+    \  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen\
+    \ runpy>\", line 88, in _run_code\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk_worker.py\"\
+    , line 46, in <module>\n    raise SystemExit(main())\n                     ^^^^^^\n\
+    \  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk_worker.py\"\
+    , line 37, in main\n    result = build_backend().run(_request(request_data))\n\
+    \             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+    , line 261, in run\n    result = self._call_sdk(module, request)\n           \
+    \  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+    , line 250, in _call_sdk\n    return self._call_preview_sdk(module, request)\n\
+    \           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+    , line 189, in _call_preview_sdk\n    env=self._runtime_env(request),\n      \
+    \  ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+    , line 102, in _runtime_env\n    raise CodexSDKError(\nautobugfix.codex_sdk.CodexSDKError:\
+    \ cannot locate .autobugfix/config.yaml for SDK role; refusing to inherit global\
+    \ Codex hooks/runtime"
+  created_at: '2026-07-14T04:22:40Z'
+  record_digest: c4f68aa384c19c564d505cc71ed254724021c2b39e100ae643def1298f22621c
+- run_id: writer-20260714T042346-0aa7bd81
+  request_id: op-constitution-path-registry-v4-v2
+  attempt: 2
+  status: FAILED
+  role_digest: 7b28e5287e91c8d916776fdad30707b97b2bfe6f1c2d11bc5cb3bb35c713c98b
+  scope_version: 1
+  input_digest: 712689627cd94aca0647f387f60d1c9cf458bdae40b9e520acbcc7ecd0915de7
+  base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  head_sha: null
+  patch_digest: null
+  feedback_ids:
+  - feedback-20260714T042241-72fca7a7
+  started_at: '2026-07-14T04:23:46Z'
+  finished_at: '2026-07-14T04:23:57Z'
+  error: "Codex SDK worker failed with exit 1: Traceback (most recent call last):\n\
+    \  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen\
+    \ runpy>\", line 88, in _run_code\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk_worker.py\"\
+    , line 46, in <module>\n    raise SystemExit(main())\n                     ^^^^^^\n\
+    \  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk_worker.py\"\
+    , line 37, in main\n    result = build_backend().run(_request(request_data))\n\
+    \             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+    , line 261, in run\n    result = self._call_sdk(module, request)\n           \
+    \  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+    , line 250, in _call_sdk\n    return self._call_preview_sdk(module, request)\n\
+    \           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/autobugfix-trusted-control/src/autobugfix/codex_sdk.py\"\
+    , line 209, in _call_preview_sdk\n    return thread.run(\n           ^^^^^^^^^^^\n\
+    \  File \"/home/kelongzx/pycodes/auto_bug_fix/.venv-control/lib/python3.12/site-packages/openai_codex/api.py\"\
+    , line 569, in run\n    return _collect_turn_result(stream, turn_id=turn.id)\n\
+    \           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/kelongzx/pycodes/auto_bug_fix/.venv-control/lib/python3.12/site-packages/openai_codex/_run.py\"\
+    , line 87, in _collect_turn_result\n    _raise_for_failed_turn(completed.turn)\n\
+    \  File \"/home/kelongzx/pycodes/auto_bug_fix/.venv-control/lib/python3.12/site-packages/openai_codex/_run.py\"\
+    , line 64, in _raise_for_failed_turn\n    raise RuntimeError(turn.error.message)\n\
+    RuntimeError: {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\"\
+    ,\"message\":\"The 'gpt-5.6-sol' model requires a newer version of Codex. Please\
+    \ upgrade to the latest app or CLI and try again.\"}}"
+  created_at: '2026-07-14T04:23:46Z'
+  record_digest: bd49286c838c15a002792e5f93d5ea9ba94c92e7f550b907a461931f836fc34b
+- run_id: writer-20260714T042434-bd3ab932
+  request_id: op-constitution-path-registry-v4-v2
+  attempt: 3
+  status: COMPLETED
+  role_digest: 7df8f010560bbabba692fb785bb9de4aa4800fe4d905c785445994957919c4a1
+  scope_version: 1
+  input_digest: 1cf095fa13af28ac260cf3121dce4dcef6cae5d38712bfdc142c58f6b009c792
+  base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  head_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  feedback_ids:
+  - feedback-20260714T042241-72fca7a7
+  - feedback-20260714T042357-6cbe6c46
+  started_at: '2026-07-14T04:24:34Z'
+  finished_at: '2026-07-14T04:31:46Z'
+  error: null
+  created_at: '2026-07-14T04:24:34Z'
+  record_digest: 6f2fe9d5bbec0ac2a5f9011ab354368d66394f1298b9209f67daaa0586270a97
+check_runs:
+- check_id: check-20260714T043203-162a2eb8
+  request_id: op-constitution-path-registry-v4-v2
+  writer_run_id: writer-20260714T042434-bd3ab932
+  status: PASSED
+  mode: fast
+  base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  head_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  scope_version: 1
+  profile_names:
+  - full
+  - operator
+  command_results:
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    duration_seconds: 19.67762699900777
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - --
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    exit_code: 0
+    finished_at: '2026-07-14T04:32:23Z'
+    name: full-tests
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:32:03Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T043203-162a2eb8/01-full-tests.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T043203-162a2eb8/01-full-tests.stdout.log
+    timed_out: false
+    timeout_seconds: 300
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - -m
+    - compileall
+    - -q
+    - src
+    - tests
+    - scripts
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    duration_seconds: 0.09832459001336247
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - --
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - -m
+    - compileall
+    - -q
+    - src
+    - tests
+    - scripts
+    exit_code: 0
+    finished_at: '2026-07-14T04:32:23Z'
+    name: compileall
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:32:23Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T043203-162a2eb8/02-compileall.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T043203-162a2eb8/02-compileall.stdout.log
+    timed_out: false
+    timeout_seconds: 300
+  - argv:
+    - git
+    - diff
+    - --check
+    - ed39a39c61b21e883ba746ede351c924148bcb3e
+    - --
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    duration_seconds: 0.006692986004054546
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - --
+    - git
+    - diff
+    - --check
+    - ed39a39c61b21e883ba746ede351c924148bcb3e
+    - --
+    exit_code: 0
+    finished_at: '2026-07-14T04:32:23Z'
+    name: diff-check
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:32:23Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T043203-162a2eb8/03-diff-check.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T043203-162a2eb8/03-diff-check.stdout.log
+    timed_out: false
+    timeout_seconds: 300
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    - tests/test_operator_policy.py
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    duration_seconds: 4.936269526020624
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
+    - --
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    - tests/test_operator_policy.py
+    exit_code: 0
+    finished_at: '2026-07-14T04:32:28Z'
+    name: operator-tests
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:32:23Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T043203-162a2eb8/01-operator-tests.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T043203-162a2eb8/01-operator-tests.stdout.log
+    timed_out: false
+    timeout_seconds: 180
+  failures: []
+  semantic_verdict_id: null
+  started_at: '2026-07-14T04:32:03Z'
+  finished_at: '2026-07-14T04:32:28Z'
+  created_at: '2026-07-14T04:32:03Z'
+  record_digest: b0eb9374f9096b18d19fc34955facc0d9cb1695e9d69ceb43857741ea7f28099
+- check_id: check-20260714T044113-27065bcf
+  request_id: op-constitution-path-registry-v4-v2
+  writer_run_id: writer-20260714T042434-bd3ab932
+  status: PASSED
+  mode: full
+  base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+  patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  scope_version: 1
+  profile_names:
+  - full
+  - operator
+  command_results:
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    duration_seconds: 11.359330728009809
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    exit_code: 0
+    finished_at: '2026-07-14T04:41:24Z'
+    name: full-tests
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:41:13Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/01-full-tests.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/01-full-tests.stdout.log
+    timed_out: false
+    timeout_seconds: 300
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - -m
+    - compileall
+    - -q
+    - src
+    - tests
+    - scripts
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    duration_seconds: 0.09550301599665545
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - -m
+    - compileall
+    - -q
+    - src
+    - tests
+    - scripts
+    exit_code: 0
+    finished_at: '2026-07-14T04:41:24Z'
+    name: compileall
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:41:24Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/02-compileall.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/02-compileall.stdout.log
+    timed_out: false
+    timeout_seconds: 300
+  - argv:
+    - git
+    - diff
+    - --check
+    - ed39a39c61b21e883ba746ede351c924148bcb3e
+    - --
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    duration_seconds: 0.009949472994776443
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --
+    - git
+    - diff
+    - --check
+    - ed39a39c61b21e883ba746ede351c924148bcb3e
+    - --
+    exit_code: 0
+    finished_at: '2026-07-14T04:41:24Z'
+    name: diff-check
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:41:24Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/03-diff-check.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/03-diff-check.stdout.log
+    timed_out: false
+    timeout_seconds: 300
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    - tests/test_operator_policy.py
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    duration_seconds: 4.972593595011858
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    - tests/test_operator_policy.py
+    exit_code: 0
+    finished_at: '2026-07-14T04:41:29Z'
+    name: operator-tests
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:41:24Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/01-operator-tests.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/01-operator-tests.stdout.log
+    timed_out: false
+    timeout_seconds: 180
+  failures: []
+  semantic_verdict_id: artifact-20260714T044628-7808ce95
+  started_at: '2026-07-14T04:41:13Z'
+  finished_at: '2026-07-14T04:46:28Z'
+  created_at: '2026-07-14T04:41:13Z'
+  record_digest: 8e492a3bdf755eb23cef90f4ba01278faff68380733eec7bb9cfc830cc86f755
+gate:
+  request_id: op-constitution-path-registry-v4-v2
+  patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  scope_version: 1
+  scope: PASS
+  tests: PASS
+  semantic: PASS
+  approval: PASS
+  merge: PENDING
+  check_run_id: check-20260714T044113-27065bcf
+  created_at: '2026-07-14T04:46:28Z'
+  record_digest: f08258736936a5b996091d117dca2918011e2c2fc76b256fdc0c48ed4d84a052
+promotions:
+- before_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  candidate_head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+  candidate_release: null
+  check_run_ids:
+  - check-20260714T044113-27065bcf
+  created_at: '2026-07-14T04:49:00Z'
+  merge_sha: null
+  patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  policy_digest: 803d7cf02c9aa606cc98ba54dedefc4c05baf366209d1b2c0e666c0f895cd69a
+  previous_active_release: null
+  promotion_id: promotion-20260714T044900-786fd836
+  pull_request: null
+  record_digest: 00eccadd793ad3cf7c8906063c7d08181eaaef7908a16b04744923193ad2cb6d
+  request_id: op-constitution-path-registry-v4-v2
+  rollback_reason: null
+  status: PREPARED
+exported_at: '2026-07-14T06:28:49Z'
+bundle_digest: 904395b063ae5c564ad8815ed2adf48cd8d07131ea836b82e7a63f6a5b2bb2f8
