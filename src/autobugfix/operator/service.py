@@ -674,6 +674,16 @@ class OperatorGovernanceService:
                 writable_roots=(shadow_root,),
                 read_only_binds=self._runtime_binds(workspace),
             )
+            failed = [
+                str(item.get("name") or "command")
+                for item in results
+                if not item.get("passed")
+            ]
+            if not results or failed:
+                detail = ", ".join(failed) if failed else "no commands executed"
+                raise OperatorGovernanceError(
+                    "trusted baseline profile did not pass: " + detail
+                )
             receipt = derive_metric_receipt(
                 source="trusted_baseline_experiment",
                 profile=profile_name,

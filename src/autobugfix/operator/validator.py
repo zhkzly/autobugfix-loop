@@ -220,32 +220,50 @@ def _run_command(
                 raise OperatorValidationError(f"read-only sandbox bind does not exist: {source}")
             destination = _prepare_bind_destination(candidate_root, destination)
             wrapper.extend(["--ro-bind", str(source), str(destination)])
-            try:
-                source.relative_to(host_home)
-            except ValueError:
-                pass
-            else:
-                # Console scripts retain their Guard-venv shebang. Re-expose
-                # that exact trusted venv read-only after masking host HOME.
-                wrapper.extend(_sandbox_directory_args(host_home, source))
-                wrapper.extend(["--ro-bind", str(source), str(source)])
             if destination == candidate_venv:
+                # Console scripts retain their trusted-venv shebang. Re-expose
+                # only that exact source path after masking HOME or /tmp.
+                for masked_root in (host_home, Path("/tmp")):
+                    try:
+                        relative_source = source.relative_to(masked_root)
+                    except ValueError:
+                        continue
+                    if not relative_source.parts:
+                        raise OperatorValidationError(
+                            "trusted runtime source cannot equal a masked authority root: "
+                            f"{source}"
+                        )
+                    wrapper.extend(_sandbox_directory_args(masked_root, source))
+                    wrapper.extend(["--ro-bind", str(source), str(source)])
+                    break
                 environment["VIRTUAL_ENV"] = str(destination)
                 environment["UV_PROJECT_ENVIRONMENT"] = str(destination)
                 runtime_python = source / "bin/python"
-                if runtime_python.is_symlink():
-                    runtime_source_prefix = runtime_python.resolve().parent.parent
-                    runtime_link = Path(os.readlink(runtime_python))
-                    if not runtime_link.is_absolute():
-                        runtime_link = runtime_python.parent / runtime_link
-                    runtime_destination_prefix = runtime_link.parent.parent
+                runtime_link = runtime_python
+                visited_links: set[Path] = set()
+                while runtime_link.is_symlink() and runtime_link not in visited_links:
+                    visited_links.add(runtime_link)
+                    link_target = Path(os.readlink(runtime_link))
+                    if not link_target.is_absolute():
+                        link_target = runtime_link.parent / link_target
+                    link_target = Path(os.path.abspath(link_target))
                     try:
-                        runtime_destination_prefix.relative_to(host_home)
+                        link_target.relative_to(source)
                     except ValueError:
                         pass
                     else:
+                        runtime_link = link_target
+                        continue
+                    runtime_source_prefix = link_target.resolve().parent.parent
+                    runtime_destination_prefix = link_target.parent.parent
+                    for masked_root in (host_home, Path("/tmp")):
+                        directory_args = _sandbox_directory_args(
+                            masked_root, runtime_destination_prefix
+                        )
+                        if not directory_args:
+                            continue
                         wrapper.extend(
-                            _sandbox_directory_args(host_home, runtime_destination_prefix)
+                            directory_args
                         )
                         wrapper.extend(
                             [
@@ -254,6 +272,8 @@ def _run_command(
                                 str(runtime_destination_prefix),
                             ]
                         )
+                        break
+                    break
         command_argv = list(argv)
         executable = shutil.which(command_argv[0], path=host_environment.get("PATH"))
         if executable:
