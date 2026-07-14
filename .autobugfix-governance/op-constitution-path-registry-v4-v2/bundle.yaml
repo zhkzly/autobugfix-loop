@@ -225,19 +225,133 @@ events:
   previous_hash: 69c960106c8c342d115cacbd35265276175e0cca24de4cc77c05cd2074031c31
   created_at: '2026-07-14T04:32:28Z'
   event_hash: 663ce072b289b3cc5a28ab53eeefb4a7b9632ed15a21a26e82b2cb3763c4e739
+- event_id: 6dc107ce2139457caa49dd6678f6ef02
+  request_id: op-constitution-path-registry-v4-v2
+  kind: candidate_committed
+  actor: kelongzx
+  payload:
+    head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+    manifest: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2/.autobugfix-governance/op-constitution-path-registry-v4-v2/bundle.yaml
+    patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  previous_hash: 663ce072b289b3cc5a28ab53eeefb4a7b9632ed15a21a26e82b2cb3763c4e739
+  created_at: '2026-07-14T04:32:44Z'
+  event_hash: b458c08b1e86c59e35b8ae37015012c1c00a8701e02143be54fb217f5a2ac26e
+- event_id: 74f0370709bb41bd9f348293889424d2
+  request_id: op-constitution-path-registry-v4-v2
+  kind: patch_observed
+  actor: trusted-host
+  payload:
+    head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+    patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  previous_hash: b458c08b1e86c59e35b8ae37015012c1c00a8701e02143be54fb217f5a2ac26e
+  created_at: '2026-07-14T04:32:44Z'
+  event_hash: 983f5c2cf8dfb07f3b1ebda13e1d36e4e56bbb0efc0bd0bb2be7c1b734845104
+- event_id: 69554fe6f6e94fa0ab20dbc2d52191f0
+  request_id: op-constitution-path-registry-v4-v2
+  kind: experiment_started
+  actor: kelongzx
+  payload:
+    experiment_id: experiment-20260714T043301-71d3a964
+    profile: real-e2e
+  previous_hash: 983f5c2cf8dfb07f3b1ebda13e1d36e4e56bbb0efc0bd0bb2be7c1b734845104
+  created_at: '2026-07-14T04:33:01Z'
+  event_hash: 864af31a5004ba0c5642fce3819c6fea54b46e45433a1b5b6235c17e7f100cd1
+- event_id: 0749bb431d344622844ed354ac528990
+  request_id: op-constitution-path-registry-v4-v2
+  kind: experiment_completed
+  actor: trusted-host
+  payload:
+    experiment_id: experiment-20260714T043301-71d3a964
+    failure: null
+    passed: true
+  previous_hash: 864af31a5004ba0c5642fce3819c6fea54b46e45433a1b5b6235c17e7f100cd1
+  created_at: '2026-07-14T04:41:02Z'
+  event_hash: f0279102121639da2ac0740e051c31a2d6d927cadc3bf0e053f4ac4b1652271e
+- event_id: 599c43a188a449f79d44eff9ebb0a1de
+  request_id: op-constitution-path-registry-v4-v2
+  kind: check_started
+  actor: kelongzx
+  payload:
+    check_id: check-20260714T044113-27065bcf
+    mode: full
+  previous_hash: f0279102121639da2ac0740e051c31a2d6d927cadc3bf0e053f4ac4b1652271e
+  created_at: '2026-07-14T04:41:13Z'
+  event_hash: 6fea6d92e3c0c1bec31c0365324a4badc85400a113c8d581f23238ae18f15022
+- event_id: 6af64c82111744059c556af5c1e572c8
+  request_id: op-constitution-path-registry-v4-v2
+  kind: check_passed
+  actor: trusted-host
+  payload:
+    check_id: check-20260714T044113-27065bcf
+    failures: []
+    patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  previous_hash: 6fea6d92e3c0c1bec31c0365324a4badc85400a113c8d581f23238ae18f15022
+  created_at: '2026-07-14T04:46:28Z'
+  event_hash: c247a91dece4300c5eb46a3200f0f2d592be27769a9fc725f66c12826bbef99c
+- event_id: ee90a84c68164011978a6cfe13ab99b4
+  request_id: op-constitution-path-registry-v4-v2
+  kind: gate_updated
+  actor: trusted-host
+  payload:
+    blocked_by: []
+  previous_hash: c247a91dece4300c5eb46a3200f0f2d592be27769a9fc725f66c12826bbef99c
+  created_at: '2026-07-14T04:46:28Z'
+  event_hash: b1ab4845b6678fd6581ecda7b4c6f7f26d7da33fcdc03535b2869a9e827ab6dd
+- event_id: ae288a34afa74ca280095b09c7229197
+  request_id: op-constitution-path-registry-v4-v2
+  kind: verification_accepted
+  actor: trusted-host
+  payload:
+    check_id: check-20260714T044113-27065bcf
+    head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+    patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  previous_hash: b1ab4845b6678fd6581ecda7b4c6f7f26d7da33fcdc03535b2869a9e827ab6dd
+  created_at: '2026-07-14T04:46:28Z'
+  event_hash: 2d75b2bb3d4b7b380ac4d35186db3ff2ab330fc171bc8325abcf6ffe49f24b19
+- event_id: fea079ce99804b98be734bdb70f86168
+  request_id: op-constitution-path-registry-v4-v2
+  kind: promotion_prepared
+  actor: kelongzx
+  payload:
+    promotion_id: promotion-20260714T044900-786fd836
+    receipt_id: artifact-20260714T044900-970a912a
+  previous_hash: 2d75b2bb3d4b7b380ac4d35186db3ff2ab330fc171bc8325abcf6ffe49f24b19
+  created_at: '2026-07-14T04:49:00Z'
+  event_hash: c6529b143a67a3469c45dab38fb454bfe72833db054e02bfcbc4973862c7fc37
+- event_id: 8de2ae6757ef4eeb97e6f509d3495b1b
+  request_id: op-constitution-path-registry-v4-v2
+  kind: approval_recorded
+  actor: 0kelong.zx@gmail.com
+  payload:
+    approval_id: signed-20260714T062827-e71e9925
+    kind: human_signed
+    stage: merge
+  previous_hash: c6529b143a67a3469c45dab38fb454bfe72833db054e02bfcbc4973862c7fc37
+  created_at: '2026-07-14T06:28:27Z'
+  event_hash: cc39d275fcd4039792498e03fd2501c77f97202e97c156546c832b32d2d11d44
+- event_id: 3c58b847f090483d8b9940fa32b075ff
+  request_id: op-constitution-path-registry-v4-v2
+  kind: request_reopened
+  actor: kelongzx
+  payload:
+    reason: Refresh trusted transport bundle with patch-bound merge approval
+  previous_hash: cc39d275fcd4039792498e03fd2501c77f97202e97c156546c832b32d2d11d44
+  created_at: '2026-07-14T06:28:36Z'
+  event_hash: 7104816f766d0388d675694f94ded733a8e54b11224869085188bb5d40a149ea
 projection:
   request_id: op-constitution-path-registry-v4-v2
   state: ACTIVE
-  last_event_hash: 663ce072b289b3cc5a28ab53eeefb4a7b9632ed15a21a26e82b2cb3763c4e739
+  last_event_hash: 7104816f766d0388d675694f94ded733a8e54b11224869085188bb5d40a149ea
   workspace_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/op-constitution-path-registry-v4-v2
   patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
-  head_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
-  validation_id: check-20260714T043203-162a2eb8
+  head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+  validation_id: check-20260714T044113-27065bcf
   active_writer_run_id: null
   active_check_run_id: null
   scope_version: 1
   outcome: null
-  blocked_by: []
+  blocked_by:
+  - Refresh trusted transport bundle with patch-bound merge approval
   violations: []
 approvals:
 - approval_id: signed-20260714T042205-9c8f7fde
@@ -280,6 +394,44 @@ approvals:
       stage: scope
   created_at: '2026-07-14T04:22:05Z'
   approval_digest: db982942d3116c4167338b72f3ee7e20377f382f0b1bcd1ce1ee6323c714d3a1
+- approval_id: signed-20260714T062827-e71e9925
+  request_id: op-constitution-path-registry-v4-v2
+  request_digest: 1c87702178176fd538032fdbc0fce325928401ef43bf56a8ccf49ceb691be231
+  base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  approver: 0kelong.zx@gmail.com
+  kind: human_signed
+  stage: merge
+  decision: approve
+  reason: Authorize merge of verified constitution path registry patch
+  allowed_layers:
+  - operator
+  scope_version: 1
+  allowed_paths:
+  - src/autobugfix/operator/constitution.yaml
+  expires_at: '2026-07-21T00:00:00Z'
+  patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  head_sha: null
+  proof:
+    signature_base64: LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0KVTFOSVUwbEhBQUFBQVFBQUJCY0FBQUFIYzNOb0xYSnpZUUFBQUFNQkFBRUFBQVFCQUxWOVdrcHhoV2hQN21GYk9BRFBZbwo1bDh1eTZSeklxMUxHQWpiSkFjTU1ScHBYZDhhbGVyZ1pyeFlMdW94OTlWN2xmVHFrQ21VaktzT3d2aU94OWdWN3ZxZE0rCmM1d3VMU3J1dXpRMkxaRkJFK0gwSGJYWXV6c3RKOWh0Y1E1NzRXbTlrL2t5YU13NWF1MlEzUTlKMzIrTUllOGJGemNBU2sKUytBb0dzNldBanpsMlBTWkdEbTV5ZTdtZ1MyZ2wwV1FGckFjRUdjelZPenNaZ05PRlltc3d2dE9GY1J1ekVOU2ZRcGNlagorTDU4RnJ0aTRMNUVXYkl2YjlVaGJBKzhKdGNaUC9GeHNIZmdsVjBwcjBXcVN5ZVFsVUNRUGVUVDYzaTRNaWQzMW1aYmpwClJEYjhsU3RVZG5PNWFnMnY4LzB0dVlRT1Q4YnIwVWIvay9xazFYRjQybjlzVHRPZmlZZUM3bkl3VDVZcmNPalF6VHpoTksKWTFxenZTOWdlUHFneWk3d2ZXYUpSS0JkZXltTE9sdVBlUGlCQmw0Z081U1ZQM29ld1lvSUlLc0hLTUlCdUhzYlNoaDB2bQp3dzd0WmpML2wxTGNwb3BvdjlCNVQ1Y3UwTk02eFBmelBGaEFZVEQyajdxOFFKTW0vYzZsaHlzYytuU2FxVnBzSVVHQW5CClNWN3pqM3I4eUNuMi9IZWlZQXM2bTE1Z0hHS0tlb2FXV3BjczFRcFNRSHh3RGlZSDFGbnBDR3VCR3pRNjZBMENSM1JNcGYKbjlRR3I3MFUxQWt2MVl4WFY2aHdNNVg2Y2c3a1hoZDhVbHRqUmFpcTV5OFVZYWM5SmZYeUV0dFpmWjZYc3FqdmdITzBGVQpIb3o5dEFxekdPUVZIeFZ6MWJZU3FMMjdwakZ1UHNtRmJ1Sng3TnVhUFdYYytzalk4U0RFTmtjbnVpK1BDQlI5TkR6enI5CjYxdktuV0RxN3hwN280VlhoOWlvSGhaTm9FNkhwVTZNcWlKNWlYVTdyaU5kUksxYVRzY2pCM2NoNnBPQVQycG42ZDRocDIKQmhtOHVBYjI1UHNCa2lOWTFBRFppdCsySERTNDhkaGZta21WOFVHSjlFQkNzS3Y5eC8xYkoydUNSTzA4QnJ5bk85SUhtUgpxMXNUYk1kWFh6T0xWMXVtNldvZXVlZEIzK0RWS0U0MDZxUjNxdE1BM3o3eVFqRXJBVFEvS0JSUU5uRUtaZEx2b204SEc1CldCR29oYk5tSW9PbGZTV0tuMFA4YVJBTHN3V2VNUzRySEs4Z0tDdFQzZG9rNTY5dFF1S2xWRWRRRjU5ajgyaDJtMURsNk8KVGpTZCtncXNmdzkxQVRVUDg5dWVGdThMYnJNZ1NyU3NocWhsRWxwWkZCdGZjTklOUFprdGJMeSszcjZsaU93azJaMW9RMQpqWE9YQUVqT0V3WHFIK3pyTzBUeHVKYWFXY20xemRnTGFpQzZzZGxJdU9CemhZZUFVWmVmZ3VIUnY1T1NuVEhUNHBiamdSCmVKWFUvR1dUVjZGZjVucExYZkdhc25NRDZHck9za1RGUEtwSWZGVUI2UVFydEg1Q21Iek9ua3JBNTQ5Vkp6Q213S2ZQM0cKN2RkbXM3T3loRU9HWStWbStjMG5VOEg2TVBOM0JUMDNMWXo0WWRjdWNtNVgvSUdYUmxMcGx0TTBrMmNjTVkwUFIwZE83RwpZMGtjazFTYVArWjF4RDlpK3VETkk3Mll6b3hNbzRqdlBsbS95RjdvUFBBd2pjUS9DY296d1AzdHpGR01rZTh3T3RWcnNiCkZ5NGY2VU9KWDhmZlpCY0FBQUFUWVhWMGIySjFaMlpwZUMxdmNHVnlZWFJ2Y2dBQUFBQUFBQUFHYzJoaE5URXlBQUFFRkEKQUFBQXh5YzJFdGMyaGhNaTAxTVRJQUFBUUFqdE9TeDdmWnpieVNKSmZVL1ZlYjNtK2FhZmF1cFF6L0pYY0xaVWhOczlEVQp3QlBlSDEyT090VFZVM3JWMHlCUnkxU1lBS3U0M3RUNUduQ2wvUm5yREpHdE1MQ000QzZoSDRwMFFpYm9vWFhFMDM2SEJDCkVqaEo3ZGg2OTB0UnNPUGQ1dTlXUytzckVZQzVmTzFWUExDUGpuSTI0YmI5bEd0WnlUeDZ1c1Z3azVacXdzT0Q2d0Evc0YKcGlRK3JyOTQ3dThneTVWSWRKNG1wWkFTSEc2bTdaV1dpVTdod0RGYU9hWUdCSmpPZmRXcVUwWFBGT1BFb0o2TCtkSGE1aQpjWDk4M2wyekl6UWNyYjI0ODJsL1VFOFRJMHZ0cTBVWFdXKzJEUysrUWptTnduZzlQWkd1UHVXOTlQaWJ4d01HWk9kbUdICmNKTDFWNGdtNGV2c0x0WjdCRmFNRmRKemZvUkVsODl1cnFiYUsvN0dtWXpKL3QrcUpUazljcnYyaG12WTd1MG02ZDk4VkkKeUxIQlF3bXhtOGFrWkNUa09RMGZETmtDZUJsREc1ZXV4SWRpUFJXWU8wSlVXOFMzSkNhMEdJZzlucUxvU1VQeXhvMHpmVgpPY0NLd0JFV2Nuc2o0anhHUjIvb2tRc2VpODUrVkt5c1lET1NMa01Yc2Z1clB1b21HaVY4MFBzYVA4U1dneDZJMkFzbXNSCktiNGxScWxveUJUb3M1UVRlYlVaZTNLeW92MU9idHUyWUF4b3dxL3gxaWRvcXdKNW5qNFhRSEJETCt6Q1pzMjhwK1h5cXIKVVBFeHB0Z3RHejRSWWNIZjF6MFYxYmhuc045QksyNS83TDMxcGVrNHVpZTQwMXk5SEVqejljT3lzTmJSOHBTdlBtcWJ0eQo1Z3JxR0RNQWxUUzAwMGJTaUUxc0x0Ums5M1o5L0NRT0ViNFBkRkdHMnl3Nnp0cHhyM3h5YkpvcXZYU0dQVXdXanNHeTQ0Ck9sU3RkM2xOUk85L2MwWEF6b0MwVlg2L1ZpT1pTMWtUWU05VVN4TnY2NjlIS3Q5MEt6elY5VnB1bHFwRTU4M1ZtN0pERW8KbTErbkdYSkF5MzFETGR6WitvMnNveDRWYUxBNHpXcEtqK0RPMXkra0ZrWEJOZ2VkeEVIeXpPYU50MkdxSXhFMFgwQlNIbwozWEYvbzl3V2JmOWgyeXVOV0kvdHY1anVrVGN0c1NRU1FQT3Bmdk85Q21ZajRDRjdyM0pLMVVkNzZuRmpRSU9NVUhmd204ClM5TmFWa0x1VzFVbWJVbElIbXN1OTBIMGJlOVQwa2JzUG9aRnJiTzh5WmJuK3NSVDl4QVlPbHFPOFNSVXRaS1JhZzdmU0gKa1ErWVNzNnhxVDdSTFFmUmhCVUgzckZ1ZTJtOGEyd0RabnNTMGlSc01NaVpEYTEwNWtHelJlbWM3cXhVSU1rdVhWbzNtKwp2T05sZ3dZa05jVlpmWXI3bkRZQ2dOM2RoUThTUnJrbVpqcy9HVUgzRUEzcmszOHhFdXBTMnFiLytPWG9tWHJFQjkvcDdCCkJjVHNhZ3A3RWRhRm83S1R2Kzd5V1hvUzg3WGhZNXExR1ozTVdhYnkxU21Gb0lLbEpjM0l4SWtNVVRFL3RYOElqT0JOUS8KSXAxRUkzeEpPVnBaM3VycVZLVTd4OS9IUzlJMGNEZ0tUODV1bFF5SzJ1RGd0ajBGbE03YlFpVWhTOGFwdkR3dVZRWnNrTwpKZ2NyUmd1c0J6eDAyOHdRYVdnZU1RNmF3U3lJSXlnMTM5d0FxUkJDTjFZQ1hTazA4U3NuVWgwUWg1cmpyZz09Ci0tLS0tRU5EIFNTSCBTSUdOQVRVUkUtLS0tLQo=
+    signing_payload:
+      allowed_layers:
+      - operator
+      allowed_paths:
+      - src/autobugfix/operator/constitution.yaml
+      approver: 0kelong.zx@gmail.com
+      base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+      decision: approve
+      expires_at: '2026-07-21T00:00:00Z'
+      head_sha: null
+      patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+      reason: Authorize merge of verified constitution path registry patch
+      request_digest: 1c87702178176fd538032fdbc0fce325928401ef43bf56a8ccf49ceb691be231
+      request_id: op-constitution-path-registry-v4-v2
+      schema: autobugfix-operator-approval-v3
+      scope_version: 1
+      stage: merge
+  created_at: '2026-07-14T06:28:27Z'
+  approval_digest: 20f131c4902081c6b42a9b26068d0cdf00afd3a9cfc26e09df8b5ac1390304b6
 scope_revisions: []
 writer_runs:
 - run_id: writer-20260714T042240-59e1c035
@@ -598,18 +750,263 @@ check_runs:
   finished_at: '2026-07-14T04:32:28Z'
   created_at: '2026-07-14T04:32:03Z'
   record_digest: b0eb9374f9096b18d19fc34955facc0d9cb1695e9d69ceb43857741ea7f28099
+- check_id: check-20260714T044113-27065bcf
+  request_id: op-constitution-path-registry-v4-v2
+  writer_run_id: writer-20260714T042434-bd3ab932
+  status: PASSED
+  mode: full
+  base_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+  patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  scope_version: 1
+  profile_names:
+  - full
+  - operator
+  command_results:
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    duration_seconds: 11.359330728009809
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    exit_code: 0
+    finished_at: '2026-07-14T04:41:24Z'
+    name: full-tests
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:41:13Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/01-full-tests.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/01-full-tests.stdout.log
+    timed_out: false
+    timeout_seconds: 300
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - -m
+    - compileall
+    - -q
+    - src
+    - tests
+    - scripts
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    duration_seconds: 0.09550301599665545
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - -m
+    - compileall
+    - -q
+    - src
+    - tests
+    - scripts
+    exit_code: 0
+    finished_at: '2026-07-14T04:41:24Z'
+    name: compileall
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:41:24Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/02-compileall.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/02-compileall.stdout.log
+    timed_out: false
+    timeout_seconds: 300
+  - argv:
+    - git
+    - diff
+    - --check
+    - ed39a39c61b21e883ba746ede351c924148bcb3e
+    - --
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    duration_seconds: 0.009949472994776443
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --
+    - git
+    - diff
+    - --check
+    - ed39a39c61b21e883ba746ede351c924148bcb3e
+    - --
+    exit_code: 0
+    finished_at: '2026-07-14T04:41:24Z'
+    name: diff-check
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:41:24Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/03-diff-check.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/03-diff-check.stdout.log
+    timed_out: false
+    timeout_seconds: 300
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    - tests/test_operator_policy.py
+    cwd: /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    duration_seconds: 4.972593595011858
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-v3
+    - --tmpfs
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts
+    - --bind
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --chdir
+    - /tmp/autobugfix-trusted-control/.autobugfix/operator-worktrees/.verification/check-20260714T044113-27065bcf
+    - --
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    - tests/test_operator_policy.py
+    exit_code: 0
+    finished_at: '2026-07-14T04:41:29Z'
+    name: operator-tests
+    passed: true
+    sandbox: bubblewrap
+    started_at: '2026-07-14T04:41:24Z'
+    stderr_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/01-operator-tests.stderr.log
+    stdout_path: /tmp/autobugfix-trusted-control/.autobugfix/operator-artifacts/op-constitution-path-registry-v4-v2/checks/check-20260714T044113-27065bcf/01-operator-tests.stdout.log
+    timed_out: false
+    timeout_seconds: 180
+  failures: []
+  semantic_verdict_id: artifact-20260714T044628-7808ce95
+  started_at: '2026-07-14T04:41:13Z'
+  finished_at: '2026-07-14T04:46:28Z'
+  created_at: '2026-07-14T04:41:13Z'
+  record_digest: 8e492a3bdf755eb23cef90f4ba01278faff68380733eec7bb9cfc830cc86f755
 gate:
   request_id: op-constitution-path-registry-v4-v2
   patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
   scope_version: 1
   scope: PASS
   tests: PASS
-  semantic: SKIPPED
+  semantic: PASS
   approval: PASS
   merge: PENDING
-  check_run_id: check-20260714T043203-162a2eb8
-  created_at: '2026-07-14T04:32:28Z'
-  record_digest: a32eaf4b06337ad0696a11a60b3ca80f56b88e905128b2444e53bf03a26f9537
-promotions: []
-exported_at: '2026-07-14T04:32:44Z'
-bundle_digest: 06fcf7c9be6a27a837705cd823b9871f7771e860af286acbcb3b00af731cf890
+  check_run_id: check-20260714T044113-27065bcf
+  created_at: '2026-07-14T04:46:28Z'
+  record_digest: f08258736936a5b996091d117dca2918011e2c2fc76b256fdc0c48ed4d84a052
+promotions:
+- before_sha: ed39a39c61b21e883ba746ede351c924148bcb3e
+  candidate_head_sha: f09803ef12652505231ab5b23bca1de8c1e0d754
+  candidate_release: null
+  check_run_ids:
+  - check-20260714T044113-27065bcf
+  created_at: '2026-07-14T04:49:00Z'
+  merge_sha: null
+  patch_digest: 5f65171847c6f83c687eb15e3785160291171421b53c1c56964f5b9950e2ec22
+  policy_digest: 803d7cf02c9aa606cc98ba54dedefc4c05baf366209d1b2c0e666c0f895cd69a
+  previous_active_release: null
+  promotion_id: promotion-20260714T044900-786fd836
+  pull_request: null
+  record_digest: 00eccadd793ad3cf7c8906063c7d08181eaaef7908a16b04744923193ad2cb6d
+  request_id: op-constitution-path-registry-v4-v2
+  rollback_reason: null
+  status: PREPARED
+exported_at: '2026-07-14T06:28:49Z'
+bundle_digest: 904395b063ae5c564ad8815ed2adf48cd8d07131ea836b82e7a63f6a5b2bb2f8
