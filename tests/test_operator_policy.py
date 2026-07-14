@@ -553,10 +553,11 @@ def test_sandbox_remaps_read_only_runtime_venv_environment(tmp_path: Path):
             "python",
             "-c",
             (
-                "import os; from pathlib import Path; import autobugfix; "
+                "import os, subprocess; from pathlib import Path; import autobugfix; "
                 f"assert os.environ['VIRTUAL_ENV'] == {str(destination)!r}; "
                 f"assert os.environ['UV_PROJECT_ENVIRONMENT'] == {str(destination)!r}; "
                 "assert autobugfix.ORIGIN == 'candidate'; "
+                "assert subprocess.run(['uv', '--version'], capture_output=True).returncode == 0; "
                 "assert not Path('.venv/candidate-controlled').exists(); "
                 "p = Path('.venv/guard-write-probe'); "
                 "\ntry: p.write_text('forbidden')\nexcept OSError: pass\n"

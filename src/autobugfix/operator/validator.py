@@ -306,6 +306,13 @@ def _run_command(
                             str(sandbox_executable),
                         ]
                     )
+                    sandbox_bin = str(sandbox_executable.parent)
+                    inherited_path = environment.get("PATH")
+                    environment["PATH"] = (
+                        f"{sandbox_bin}{os.pathsep}{inherited_path}"
+                        if inherited_path
+                        else sandbox_bin
+                    )
                     command_argv[0] = str(sandbox_executable)
         environment["AUTOBUGFIX_PROCESS_SANDBOX"] = "bubblewrap"
         wrapper.extend(["--chdir", str(candidate_root), "--"])
