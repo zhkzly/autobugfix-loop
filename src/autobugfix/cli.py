@@ -19,6 +19,7 @@ from autobugfix.eval.runner import run_eval, score_path
 from autobugfix.eval.benchmarks.service import EvalBenchmarkService
 from autobugfix.eval.baselines.raw_codex import RawCodexBaselineService
 from autobugfix.eval.baselines.swe_raw_codex import SWERawCodexBaselineService
+from autobugfix.eval.swe_holdout_guard import SWEHoldoutGuardService
 from autobugfix.eval.supervision import supervision_note
 from autobugfix.gradio_app import launch as launch_ui
 from autobugfix.memory.service import MemoryService
@@ -375,6 +376,35 @@ def command_eval(args: argparse.Namespace) -> int:
             )
             _print_yaml(report)
             return 0 if report["eligible"] else 1
+        if args.benchmark_action == "qualify-swe-holdout-cohort":
+            if not sys.stdin.isatty():
+                raise RuntimeError(
+                    "SWE Holdout cohort qualification requires an interactive Guard terminal"
+                )
+            secret = getpass.getpass(
+                "SWE Guard secret (at least 16 bytes; never stored): "
+            )
+
+            def show_progress(progress) -> None:
+                aggregate = progress.aggregate()
+                print(
+                    "SWE Guard qualification progress: "
+                    f"attempted={aggregate['attempted_count']} "
+                    f"eligible={aggregate['eligible_count']}/6 "
+                    f"repositories={aggregate['repository_count']}/6 "
+                    f"languages={aggregate['language_count']}/4+",
+                    flush=True,
+                )
+
+            report = SWEHoldoutGuardService(Path.cwd()).qualify_cohort(
+                Path(args.protocol),
+                guard_root=Path(args.guard_root),
+                guard_secret=secret,
+                max_candidates=args.max_candidates,
+                progress=show_progress,
+            )
+            _print_yaml(report)
+            return 0
         if args.benchmark_action == "run-swe-development":
             report = service.run_swe_development_case(
                 Path(args.protocol),
@@ -1173,6 +1203,15 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_qualify_swe.add_argument("--instance", required=True)
     benchmark_qualify_swe.add_argument("--guard-root")
     benchmark_qualify_swe.set_defaults(func=command_eval)
+    benchmark_qualify_swe_holdout = benchmark_sub.add_parser(
+        "qualify-swe-holdout-cohort"
+    )
+    benchmark_qualify_swe_holdout.add_argument("--protocol", required=True)
+    benchmark_qualify_swe_holdout.add_argument("--guard-root", required=True)
+    benchmark_qualify_swe_holdout.add_argument(
+        "--max-candidates", type=int, default=24
+    )
+    benchmark_qualify_swe_holdout.set_defaults(func=command_eval)
     benchmark_run_swe_development = benchmark_sub.add_parser(
         "run-swe-development"
     )

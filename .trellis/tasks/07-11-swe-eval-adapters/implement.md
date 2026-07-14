@@ -93,11 +93,14 @@ uv run --cache-dir /tmp/uv-cache pytest -q tests/test_subject_broker.py tests/te
       broken cases.
 - [ ] Select ten Verified Optimization cases and six unseen-repository Live
       Holdout cases satisfying coverage constraints.
+- [x] Add one interactive external-Guard cohort command that secret-orders
+      Live candidates, excludes Operator-visible identities, resumes encrypted
+      receipts, and emits no case IDs.
 - [x] Encrypt/authenticate Holdout state and emit public 3/8/16 projections
       without case-identity leakage.
 
 Public status: all ten protocol-pinned Verified Optimization cases are eligible
-under runtime `sha256:e83ab8521188fd47492b443a504116ff8d3bcfe77fba4c2990c8e1b8e87533cc`.
+under runtime `sha256:3eb9ba95dbf997c098c1bb893a6123e66e2ebf5f90b7d7be4d0d52ffe4fb5083`.
 The six Live cases remain a human-Guard action, so the two cohort items above
 must stay open until their encrypted receipts exist.
 
@@ -105,6 +108,7 @@ Real commands:
 
 ```text
 uv run --cache-dir /tmp/uv-cache autobugfix eval benchmark qualify-swe --protocol benchmarks/swe-experiment-2.yaml --adapter <adapter> --instance <instance> [--guard-root <external-root>]
+uv run --cache-dir /tmp/uv-cache autobugfix eval benchmark qualify-swe-holdout-cohort --protocol benchmarks/swe-experiment-2.yaml --guard-root <external-root> --max-candidates 24
 uv run --cache-dir /tmp/uv-cache autobugfix eval benchmark prepare-swe --protocol benchmarks/swe-experiment-2.yaml --guard-root <external-root>
 uv run --cache-dir /tmp/uv-cache autobugfix eval benchmark seal-swe --prepared <prepared> --guard-root <external-root>
 ```
@@ -134,8 +138,9 @@ Development acceptance `raw-swe-dev-20260713-002` used
 `gpt-5.4-mini` through `openai-codex==0.1.0b3`, produced a one-file patch,
 froze SDK request/events/result and process logs before scoring, passed the
 official SWE-bench 4.1.0 Docker scorer, and passed noninterference. The trusted
-runtime remained
-`sha256:e83ab8521188fd47492b443a504116ff8d3bcfe77fba4c2990c8e1b8e87533cc`.
+runtime for that historical development acceptance was
+`sha256:e83ab8521188fd47492b443a504116ff8d3bcfe77fba4c2990c8e1b8e87533cc`;
+current qualification authority is the later runtime recorded above.
 The final evidence whitelist reduced one case from an invalid roughly 1 GiB
 Codex-home copy to 212 KiB and retained no auth bridge or mutable Codex home.
 This development result is harness acceptance only and is excluded from the

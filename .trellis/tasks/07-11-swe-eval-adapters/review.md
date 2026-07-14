@@ -93,3 +93,80 @@ Passed for public infrastructure and one real production case:
 The six private Live qualifications, encrypted 10+6 preparation, sealing, and
 formal H0/H_general study remain pending human-held Guard authority and are not
 claimed complete.
+
+## 2026-07-15 external Guard cohort review
+
+This delta was implemented in Trellis Codex inline mode. No reviewer subagent
+was dispatched or claimed; the main agent performed the required passes
+sequentially.
+
+### Execution reviewer
+
+- Decision: pass.
+- Scope: `src/autobugfix/eval/swe_holdout_guard.py`, CLI dispatch, existing
+  `EvalBenchmarkService.qualify_swe` boundary, and focused tests.
+- Confirmed: cohort qualification makes no SDK call, mutates no Execution task,
+  and does not alter Writer/verifier/evaluator feedback. Formal generation still
+  enters the exact-subject broker only after preparation and sealing.
+- Risk: none introduced to target checkout/worktree ownership.
+
+### Memory reviewer
+
+- Decision: pass.
+- Scope: imports and data flow of the new Guard service and Operator skill.
+- Confirmed: no Memory service, packet, proposal, approval, skill activation,
+  or Memory snapshot is read or written. Gold qualification cannot enter
+  Memory.
+- Risk: none.
+
+### Eval reviewer
+
+- Decision: pass.
+- Scope: secret-keyed ordering, encrypted qualification resume, visible
+  identity exclusion, official `qualify_swe`, and aggregate projection.
+- Confirmed: six eligible cases must be repository-unique, span at least four
+  languages, avoid Optimization repositories, and exclude any pinned Live ID
+  found in an Operator-visible path or nested record. Candidate selection uses
+  no gold/test/oracle field. Each selected case still runs two official gold
+  scorer attempts and materialization through the existing adapter.
+- Risk: the six real qualifications remain a Human Guard action and are not
+  claimed complete.
+
+### Codex runtime reviewer
+
+- Decision: pass.
+- Scope: new imports, CLI, current `SWERuntime.runtime_id`, and SDK call graph.
+- Confirmed: no Codex SDK path changed and no `codex exec` path was added. The
+  new module is outside the scorer/runtime digest source set; the measured
+  current runtime remains
+  `sha256:3eb9ba95dbf997c098c1bb893a6123e66e2ebf5f90b7d7be4d0d52ffe4fb5083`.
+- Risk: none.
+
+### Portability and privacy reviewer
+
+- Decision: pass with documented operational assumption.
+- Scope: external-root validation, AES-GCM catalog, HMAC ordering, CLI argv,
+  progress/result schemas, path/content contamination audit, and skill text.
+- Confirmed: no user path or repository is hardcoded; the command has no
+  `--instance`; public output contains only counts, runtime/protocol/report
+  digests, and encrypted catalog digest. Exceptions suppress case-level text.
+- Risk: a shared Docker daemon can expose image/process metadata to a
+  concurrently running host Operator. The skill now requires a dedicated Guard
+  Docker context/host or no concurrent Operator process during private runs.
+
+### Acceptance reviewer
+
+- Decision: pass for this implementation delta; formal cohort remains pending.
+- Evidence:
+  - `uv run --cache-dir /tmp/uv-cache pytest -q` -> `248 passed`.
+  - nested `harnesses/swebench` pytest -> `1 passed`.
+  - focused Guard tests -> `14 passed`.
+  - root and nested compileall -> pass.
+  - `git diff --check` -> pass.
+  - `scripts/validate_role_skills.py` -> `role skills valid`.
+  - real Live Docker doctor -> passed against dataset revision
+    `608f7ae9ab8ea1f9f0d030fe04562cf6bd1a0c8b`, 743 rows, and Docker 29.6.1.
+  - current eligible Verified qualifications -> `10` under runtime `3eb9...`.
+- Remaining action: Human Guard runs the external cohort command, then
+  `prepare-swe` and `seal-swe`; those results must be recorded before the task
+  is complete.

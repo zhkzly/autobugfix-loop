@@ -204,6 +204,16 @@ repository uniqueness, task-type coverage, source size, and supported
 language. The trusted qualifier then runs each candidate's official gold patch
 and may repeat the official baseline to detect infrastructure instability.
 
+The Live cohort is selected only inside an external human Guard command. Its
+ordering is HMAC-derived from the human secret and protocol digest, so an
+Operator that knows the public dataset and source code cannot reconstruct the
+chosen identities. The command excludes Optimization repositories and every
+Live identity previously written to Operator-visible Eval evidence, resumes the
+encrypted qualification catalog, and projects only aggregate counts plus the
+encrypted catalog digest. Candidate IDs never appear in the human command's
+argv or public output; official scorer child processes and their raw logs stay
+inside the external Guard authority plane.
+
 The selected ten Verified Optimization records become a visible manifest. The
 six Live records are serialized into one canonical bundle, encrypted with the
 human Guard secret, authenticated with associated data binding benchmark,
