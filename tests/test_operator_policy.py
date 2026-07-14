@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -21,6 +22,7 @@ from autobugfix.operator.models import OperatorModelError, digest_payload
 from autobugfix.operator.service import OperatorGovernanceError, OperatorGovernanceService
 from autobugfix.operator.store import OperatorStoreError
 from autobugfix.operator.trusted import load_trusted_policy
+from autobugfix.operator.validator import OperatorValidationError, _run_command
 from autobugfix.operator.workspace import create_operator_workspace
 
 
@@ -493,9 +495,184 @@ def test_remote_operator_gate_fetches_history_and_preserves_authoritative_logs()
         encoding="utf-8"
     )
 
-    assert workflow.count("fetch-depth: 0") == 2
+    assert "pull_request_review" not in workflow
+    assert "branches: [main]" in workflow
+    assert "github.event_name == 'pull_request_target'" in workflow
+    assert "runs-on: ubuntu-24.04" in workflow
+    assert workflow.count("fetch-depth: 0") == 3
+    assert "ref: ${{ github.workflow_sha }}" in workflow
+    assert "path: guard" in workflow
+    assert "Resolve signed frozen authority base" in workflow
+    assert "yaml.safe_load" in workflow
+    assert "ref: ${{ steps.frozen-base.outputs.sha }}" in workflow
+    assert "merge-base --is-ancestor" in workflow
+    assert "kernel.unprivileged_userns_clone=1" in workflow
+    assert 'profile autobugfix-bwrap /usr/bin/bwrap flags=(unconfined)' in workflow
+    assert 'sudo apparmor_parser -r "$profile"' in workflow
+    assert "--unshare-net" in workflow
+    assert "bwrap --die-with-parent --unshare-user --ro-bind / /" in workflow
+    assert "guard/.venv/bin/python guard/scripts/validate_operator_pr.py" in workflow
+    assert "--runtime-venv guard/.venv" in workflow
+    assert "--expected-guard-sha ${{ github.workflow_sha }}" in workflow
+    assert "--expected-base-sha ${{ steps.frozen-base.outputs.sha }}" in workflow
+    assert "--skip-live-experiment" in workflow
+    assert "GH_TOKEN" not in workflow
+    assert "pull-requests: read" not in workflow
+    assert "kernel.apparmor_restrict_unprivileged_userns=0" not in workflow
+    assert workflow.index("--unshare-net") < workflow.index(
+        "Validate candidate with trusted base policy"
+    )
     assert "actions/upload-artifact@v4" in workflow
     assert "trusted/.autobugfix/operator-pr" in workflow
+
+
+def test_sandbox_remaps_read_only_runtime_venv_environment(tmp_path: Path):
+    if os.environ.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap":
+        pytest.skip("runtime overlay is owned by the inherited admission sandbox")
+    if shutil.which("bwrap") is None:
+        pytest.skip("Bubblewrap is unavailable")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    destination = candidate / ".venv"
+    destination.mkdir()
+    (destination / "candidate-controlled").write_text("untrusted\n", encoding="utf-8")
+    package = candidate / "src/autobugfix"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text('ORIGIN = "candidate"\n', encoding="utf-8")
+    runtime_venv = Path(sys.prefix).resolve()
+
+    result = _run_command(
+        candidate,
+        tmp_path / "logs",
+        "runtime-venv",
+        [
+            "uv",
+            "run",
+            "--cache-dir",
+            "/tmp/uv-cache",
+            "python",
+            "-c",
+            (
+                "import os; from pathlib import Path; import autobugfix; "
+                f"assert os.environ['VIRTUAL_ENV'] == {str(destination)!r}; "
+                f"assert os.environ['UV_PROJECT_ENVIRONMENT'] == {str(destination)!r}; "
+                "assert autobugfix.ORIGIN == 'candidate'; "
+                "assert not Path('.venv/candidate-controlled').exists(); "
+                "p = Path('.venv/guard-write-probe'); "
+                "\ntry: p.write_text('forbidden')\nexcept OSError: pass\n"
+                "else: raise AssertionError('trusted runtime venv is writable')"
+            ),
+        ],
+        30,
+        process_sandbox="bubblewrap",
+        require_process_sandbox=True,
+        network_access=False,
+        hidden_roots=(),
+        writable_roots=(),
+        read_only_binds=((runtime_venv, destination),),
+    )
+
+    assert result["passed"], Path(result["stderr_path"]).read_text(encoding="utf-8")
+    argv = result["executed_argv"]
+    candidate_bind = argv.index(str(candidate))
+    runtime_bind = argv.index(str(runtime_venv))
+    assert candidate_bind < runtime_bind
+
+    console_script = _run_command(
+        candidate,
+        tmp_path / "console-logs",
+        "runtime-console-script",
+        ["uv", "run", "--cache-dir", "/tmp/uv-cache", "pytest", "--version"],
+        30,
+        process_sandbox="bubblewrap",
+        require_process_sandbox=True,
+        network_access=False,
+        hidden_roots=(),
+        writable_roots=(),
+        read_only_binds=((runtime_venv, destination),),
+    )
+    assert console_script["passed"], Path(console_script["stderr_path"]).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_sandbox_blocks_secrets_and_host_docker_daemon_across_nested_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    if shutil.which("bwrap") is None:
+        pytest.skip("Bubblewrap is unavailable")
+    monkeypatch.setenv("AUTOBUGFIX_REVIEW_API_KEY", "must-not-enter-sandbox")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    nested = _run_command(
+        candidate,
+        tmp_path / "nested-logs",
+        "nested-userns",
+        [
+            "/bin/sh",
+            "-c",
+            "test -z \"${AUTOBUGFIX_REVIEW_API_KEY:-}\" && "
+            "bwrap --die-with-parent --unshare-user --ro-bind / / -- "
+            "/bin/sh -c 'test -z \"${AUTOBUGFIX_REVIEW_API_KEY:-}\"'",
+        ],
+        30,
+        process_sandbox="bubblewrap",
+        require_process_sandbox=True,
+        network_access=False,
+        hidden_roots=(),
+        writable_roots=(),
+        read_only_binds=(),
+    )
+    assert nested["passed"], Path(nested["stderr_path"]).read_text(encoding="utf-8")
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker client is unavailable")
+    host = subprocess.run(
+        ["docker", "version"], text=True, capture_output=True, check=False, timeout=30
+    )
+    if host.returncode != 0:
+        pytest.skip("host Docker daemon is unavailable")
+    docker = _run_command(
+        candidate,
+        tmp_path / "docker-logs",
+        "docker-daemon",
+        ["docker", "version"],
+        30,
+        process_sandbox="bubblewrap",
+        require_process_sandbox=True,
+        network_access=False,
+        hidden_roots=(),
+        writable_roots=(),
+        read_only_binds=(),
+    )
+    assert not docker["passed"], "sandbox connected to the host Docker daemon"
+
+
+def test_sandbox_rejects_candidate_runtime_symlink(tmp_path: Path):
+    if os.environ.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap":
+        pytest.skip("runtime destination is prepared by the inherited admission sandbox")
+    if shutil.which("bwrap") is None:
+        pytest.skip("Bubblewrap is unavailable")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (candidate / ".venv").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OperatorValidationError, match="traverses a symlink"):
+        _run_command(
+            candidate,
+            tmp_path / "logs",
+            "runtime-symlink",
+            ["/bin/true"],
+            30,
+            process_sandbox="bubblewrap",
+            require_process_sandbox=True,
+            network_access=False,
+            hidden_roots=(),
+            writable_roots=(),
+            read_only_binds=((Path(sys.prefix), candidate / ".venv"),),
+        )
 
 
 def test_real_state_machine_uses_sandboxed_checks_and_advisory_manifest(tmp_path: Path):
@@ -712,6 +889,20 @@ def test_behavior_scope_requires_baseline_and_patch_bound_experiment(tmp_path: P
     assert remote["allowed"]
     assert remote["regression"]["ok"]
     assert remote["metric_receipt"]["source"] == "trusted_pr_admission_experiment"
+
+    deterministic_only = validate_bundle(
+        manifest,
+        manifest.parents[2],
+        trusted,
+        run_profiles=True,
+        run_experiments=False,
+        trusted_baseline_root=root,
+    )
+    assert deterministic_only["allowed"]
+    assert deterministic_only["experiments_deferred"]
+    assert deterministic_only["experiment_results"] == []
+    assert deterministic_only["metric_receipt"] is None
+    assert deterministic_only["regression"] is None
 
 
 def test_committed_baseline_rejects_later_behavior_commit(tmp_path: Path):

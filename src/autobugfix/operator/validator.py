@@ -28,6 +28,87 @@ class OperatorValidationError(RuntimeError):
     pass
 
 
+_SANDBOX_ENV_ALLOWLIST = (
+    "CI",
+    "FORCE_COLOR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "NO_COLOR",
+    "PATH",
+    "PYTHONHASHSEED",
+    "PYTHONIOENCODING",
+    "PYTHONUNBUFFERED",
+    "TERM",
+    "TZ",
+    "USER",
+)
+_HOME_AUTHORITY_DIRS = (
+    ".aws",
+    ".azure",
+    ".codex",
+    ".config/containers",
+    ".config/gcloud",
+    ".config/gh",
+    ".docker",
+    ".gnupg",
+    ".kube",
+    ".ssh",
+)
+
+
+def _host_authority_roots(host_environment: Mapping[str, str]) -> tuple[Path, ...]:
+    roots = [Path("/run")]
+    home = Path(host_environment.get("HOME") or str(Path.home())).expanduser()
+    roots.extend(home / relative for relative in _HOME_AUTHORITY_DIRS)
+    runner_temp = host_environment.get("RUNNER_TEMP")
+    if runner_temp:
+        roots.append(Path(runner_temp))
+    for key in ("GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH", "GITHUB_STEP_SUMMARY"):
+        value = host_environment.get(key)
+        if value:
+            roots.append(Path(value).parent)
+    return tuple(roots)
+
+
+def _prepare_bind_destination(candidate_root: Path, destination: Path) -> Path:
+    lexical = Path(os.path.abspath(destination))
+    try:
+        relative = lexical.relative_to(candidate_root)
+    except ValueError as exc:
+        raise OperatorValidationError(
+            f"read-only sandbox destination is outside candidate: {lexical}"
+        ) from exc
+    cursor = candidate_root
+    for part in relative.parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise OperatorValidationError(
+                f"read-only sandbox destination traverses a symlink: {cursor}"
+            )
+    if lexical.exists() and not lexical.is_dir():
+        raise OperatorValidationError(
+            f"read-only sandbox destination is not a directory: {lexical}"
+        )
+    lexical.mkdir(parents=True, exist_ok=True)
+    return lexical
+
+
+def _sandbox_directory_args(masked_root: Path, destination: Path) -> list[str]:
+    """Recreate directory mountpoints hidden by a parent tmpfs."""
+    try:
+        relative = destination.relative_to(masked_root)
+    except ValueError:
+        return []
+    args: list[str] = []
+    cursor = masked_root
+    for part in relative.parts:
+        cursor /= part
+        args.extend(["--dir", str(cursor)])
+    return args
+
+
 def _format_argv(argv: list[Any], values: Mapping[str, str]) -> list[str]:
     return [str(item).format_map(values) for item in argv]
 
@@ -51,37 +132,58 @@ def _run_command(
     writable_roots: tuple[Path, ...],
     read_only_binds: tuple[tuple[Path, Path], ...],
 ) -> dict[str, Any]:
+    candidate_root = candidate_root.resolve()
     started_at = utc_now()
     started_monotonic = time.monotonic()
     timed_out = False
+    host_environment = dict(os.environ)
     environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not any(marker in key.upper() for marker in ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY"))
+        key: host_environment[key]
+        for key in _SANDBOX_ENV_ALLOWLIST
+        if key in host_environment
     }
+    environment["HOME"] = "/tmp/autobugfix-home"
+    environment["TMPDIR"] = "/tmp"
+    environment["XDG_CACHE_HOME"] = "/tmp/autobugfix-home/.cache"
+    environment["XDG_CONFIG_HOME"] = "/tmp/autobugfix-home/.config"
+    environment["XDG_DATA_HOME"] = "/tmp/autobugfix-home/.local/share"
     environment["UV_NO_SYNC"] = "1"
     candidate_src = candidate_root / "src"
     python_path = environment.get("PYTHONPATH")
+    project_python_path = os.pathsep.join((str(candidate_src), str(candidate_root)))
     environment["PYTHONPATH"] = (
-        f"{candidate_src}{os.pathsep}{python_path}" if python_path else str(candidate_src)
+        f"{project_python_path}{os.pathsep}{python_path}"
+        if python_path
+        else project_python_path
     )
     sandboxed = False
     executed_argv = list(argv)
     if process_sandbox not in {"auto", "bubblewrap", "none"}:
         raise OperatorValidationError(f"unsupported process sandbox: {process_sandbox}")
+    inherited_sandbox = host_environment.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap"
     bubblewrap = shutil.which("bwrap") if process_sandbox in {"auto", "bubblewrap"} else None
-    if bubblewrap:
+    if inherited_sandbox:
         sandboxed = True
+        environment["AUTOBUGFIX_PROCESS_SANDBOX"] = "bubblewrap"
+    elif bubblewrap:
+        sandboxed = True
+        candidate_venv = candidate_root / ".venv"
+        host_home = Path(host_environment.get("HOME") or str(Path.home())).expanduser().resolve()
         wrapper = [
             bubblewrap,
             "--die-with-parent",
             "--new-session",
+            "--unshare-user",
             "--unshare-pid",
             "--ro-bind",
             "/",
             "/",
             "--tmpfs",
             "/tmp",
+            "--tmpfs",
+            str(host_home),
+            "--dir",
+            "/tmp/autobugfix-home",
             "--proc",
             "/proc",
             "--dev",
@@ -89,28 +191,105 @@ def _run_command(
         ]
         if not network_access:
             wrapper.append("--unshare-net")
-        for root in hidden_roots:
+        # Mount the broad candidate first. Authority masks and exact runtime
+        # grants must remain visible as more-specific overlays.
+        wrapper.extend(_sandbox_directory_args(host_home, candidate_root))
+        wrapper.extend(["--bind", str(candidate_root), str(candidate_root)])
+        masked_roots: set[Path] = set()
+        for root in (*_host_authority_roots(host_environment), *hidden_roots):
             resolved = root.resolve()
-            if resolved.exists():
+            if resolved.exists() and resolved not in masked_roots:
                 try:
-                    candidate_root.resolve().relative_to(resolved)
+                    resolved.relative_to(host_home)
+                    continue
+                except ValueError:
+                    pass
+                try:
+                    candidate_root.relative_to(resolved)
                 except ValueError:
                     wrapper.extend(["--tmpfs", str(resolved)])
+                    masked_roots.add(resolved)
         for root in writable_roots:
             resolved = root.resolve()
             resolved.mkdir(parents=True, exist_ok=True)
+            wrapper.extend(_sandbox_directory_args(host_home, resolved))
             wrapper.extend(["--bind", str(resolved), str(resolved)])
         for source, destination in read_only_binds:
             source = source.resolve()
-            destination = destination.resolve()
             if not source.exists():
                 raise OperatorValidationError(f"read-only sandbox bind does not exist: {source}")
-            destination.mkdir(parents=True, exist_ok=True)
+            destination = _prepare_bind_destination(candidate_root, destination)
             wrapper.extend(["--ro-bind", str(source), str(destination)])
-        wrapper.extend(
-            ["--bind", str(candidate_root), str(candidate_root), "--chdir", str(candidate_root), "--"]
-        )
-        executed_argv = [*wrapper, *argv]
+            try:
+                source.relative_to(host_home)
+            except ValueError:
+                pass
+            else:
+                # Console scripts retain their Guard-venv shebang. Re-expose
+                # that exact trusted venv read-only after masking host HOME.
+                wrapper.extend(_sandbox_directory_args(host_home, source))
+                wrapper.extend(["--ro-bind", str(source), str(source)])
+            if destination == candidate_venv:
+                environment["VIRTUAL_ENV"] = str(destination)
+                environment["UV_PROJECT_ENVIRONMENT"] = str(destination)
+                runtime_python = source / "bin/python"
+                if runtime_python.is_symlink():
+                    runtime_source_prefix = runtime_python.resolve().parent.parent
+                    runtime_link = Path(os.readlink(runtime_python))
+                    if not runtime_link.is_absolute():
+                        runtime_link = runtime_python.parent / runtime_link
+                    runtime_destination_prefix = runtime_link.parent.parent
+                    try:
+                        runtime_destination_prefix.relative_to(host_home)
+                    except ValueError:
+                        pass
+                    else:
+                        wrapper.extend(
+                            _sandbox_directory_args(host_home, runtime_destination_prefix)
+                        )
+                        wrapper.extend(
+                            [
+                                "--ro-bind",
+                                str(runtime_source_prefix),
+                                str(runtime_destination_prefix),
+                            ]
+                        )
+        command_argv = list(argv)
+        executable = shutil.which(command_argv[0], path=host_environment.get("PATH"))
+        if executable:
+            resolved_executable = Path(executable).resolve()
+            try:
+                resolved_executable.relative_to(host_home)
+            except ValueError:
+                pass
+            else:
+                executable_prefix = resolved_executable.parent.parent
+                if (
+                    resolved_executable.name.startswith("python")
+                    and (executable_prefix / "lib").is_dir()
+                ):
+                    wrapper.extend(_sandbox_directory_args(host_home, executable_prefix))
+                    wrapper.extend(
+                        ["--ro-bind", str(executable_prefix), str(executable_prefix)]
+                    )
+                    command_argv[0] = str(resolved_executable)
+                else:
+                    sandbox_executable = (
+                        Path("/tmp/autobugfix-bin") / resolved_executable.name
+                    )
+                    wrapper.extend(
+                        [
+                            "--dir",
+                            str(sandbox_executable.parent),
+                            "--ro-bind",
+                            str(resolved_executable),
+                            str(sandbox_executable),
+                        ]
+                    )
+                    command_argv[0] = str(sandbox_executable)
+        environment["AUTOBUGFIX_PROCESS_SANDBOX"] = "bubblewrap"
+        wrapper.extend(["--chdir", str(candidate_root), "--"])
+        executed_argv = [*wrapper, *command_argv]
     elif require_process_sandbox:
         raise OperatorValidationError(
             "authoritative command execution requires Bubblewrap; install bwrap or configure a supported sandbox"
@@ -145,6 +324,7 @@ def _run_command(
         "argv": argv,
         "executed_argv": executed_argv,
         "sandbox": "bubblewrap" if sandboxed else "none",
+        "sandbox_inherited": inherited_sandbox,
         "cwd": str(candidate_root),
         "timeout_seconds": timeout_seconds,
         "timed_out": timed_out,

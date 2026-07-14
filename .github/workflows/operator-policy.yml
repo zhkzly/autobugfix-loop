@@ -2,23 +2,22 @@ name: Operator Governance
 
 on:
   pull_request_target:
+    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
-  pull_request_review:
-    types: [submitted, dismissed]
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   trusted-operator-gate:
-    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout trusted base
+      - name: Checkout trusted Guard runtime
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: trusted
+          ref: ${{ github.workflow_sha }}
+          path: guard
           fetch-depth: 0
           persist-credentials: false
 
@@ -44,23 +43,106 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
-      - name: Install trusted dependencies
-        working-directory: trusted
+      - name: Install trusted Guard dependencies
+        working-directory: guard
         run: uv sync --locked
+
+      - name: Resolve signed frozen authority base
+        id: frozen-base
+        shell: bash
+        run: |
+          set -euo pipefail
+          guard/.venv/bin/python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          import yaml
+
+          candidate = Path("candidate").resolve()
+          bundles = sorted(candidate.glob(".autobugfix-governance/*/bundle.yaml"))
+          if len(bundles) != 1:
+              raise SystemExit(f"expected exactly one Operator bundle, found {len(bundles)}")
+          bundle = bundles[0]
+          if bundle.is_symlink() or bundle.stat().st_size > 2_000_000:
+              raise SystemExit("Operator bundle must be a regular file no larger than 2 MB")
+          data = yaml.safe_load(bundle.read_text(encoding="utf-8")) or {}
+          base_sha = str((data.get("request") or {}).get("base_sha") or "")
+          if re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
+              raise SystemExit("Operator bundle request has an invalid base SHA")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"sha={base_sha}\n")
+          PY
+
+      - name: Checkout frozen trusted authority
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.frozen-base.outputs.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify frozen authority ancestry
+        env:
+          FROZEN_BASE_SHA: ${{ steps.frozen-base.outputs.sha }}
+          CURRENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          test "$(git -C trusted rev-parse HEAD)" = "$FROZEN_BASE_SHA"
+          git -C trusted merge-base --is-ancestor "$FROZEN_BASE_SHA" "$CURRENT_BASE_SHA"
 
       - name: Install process sandbox
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
 
+      - name: Enable Linux user namespaces for Bubblewrap
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+
+          # Ubuntu 24.04's AppArmor gate strips the capabilities Bubblewrap
+          # needs to configure the isolated namespace's loopback interface.
+          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            profile="$(mktemp)"
+            printf '%s\n' \
+              'abi <abi/4.0>,' \
+              'include <tunables/global>' \
+              'profile autobugfix-bwrap /usr/bin/bwrap flags=(unconfined) {' \
+              '  userns,' \
+              '}' > "$profile"
+            sudo apparmor_parser -r "$profile"
+            rm -f "$profile"
+          fi
+
+          sandbox="$(command -v bwrap)"
+          "$sandbox" \
+            --die-with-parent \
+            --new-session \
+            --unshare-user \
+            --unshare-pid \
+            --ro-bind / / \
+            --tmpfs /run \
+            --proc /proc \
+            --dev /dev \
+            --unshare-net \
+            -- /bin/sh -c \
+              'test ! -S /run/docker.sock && test ! -S /var/run/docker.sock && bwrap --die-with-parent --unshare-user --ro-bind / / -- /bin/true'
+
       - name: Validate candidate with trusted base policy
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: >-
-          uv run --project trusted python trusted/scripts/validate_operator_pr.py
+          guard/.venv/bin/python guard/scripts/validate_operator_pr.py
           --trusted-root trusted
           --candidate-root candidate
-          --expected-base-sha ${{ github.event.pull_request.base.sha }}
+          --runtime-venv guard/.venv
+          --expected-guard-sha ${{ github.workflow_sha }}
+          --expected-base-sha ${{ steps.frozen-base.outputs.sha }}
           --repository ${{ github.repository }}
           --pull-request ${{ github.event.pull_request.number }}
+          --skip-live-experiment
 
       - name: Preserve trusted Operator gate artifacts
         if: always()
