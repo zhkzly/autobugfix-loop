@@ -31,6 +31,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Materialize frozen candidate branch identity
+        env:
+          CANDIDATE_BRANCH: ${{ github.event.pull_request.head.ref }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git check-ref-format --branch "$CANDIDATE_BRANCH"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git -C candidate checkout -B "$CANDIDATE_BRANCH" "$CANDIDATE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
