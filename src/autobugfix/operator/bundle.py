@@ -78,6 +78,7 @@ def validate_bundle(
     *,
     allowed_signers: Path | None = None,
     run_profiles: bool = True,
+    run_experiments: bool = True,
     expected_base_sha: str | None = None,
     expected_github_repository: str | None = None,
     expected_pull_request: int | None = None,
@@ -196,7 +197,7 @@ def validate_bundle(
         except Exception as exc:
             violations.append(f"trusted-base validation harness failed: {exc}")
 
-        if not violations and baseline is not None:
+        if not violations and baseline is not None and run_experiments:
             profile = baseline["profile_contract"]
             profile_values = {
                 str(key): str(value)
@@ -261,6 +262,7 @@ def validate_bundle(
         "trusted_external_approvals": [item.to_dict() for item in approvals],
         "command_results": command_results,
         "experiment_results": experiment_results,
+        "experiments_deferred": bool(run_profiles and baseline is not None and not run_experiments),
         "metric_receipt": metric_receipt,
         "regression": regression,
         "violations": violations,
