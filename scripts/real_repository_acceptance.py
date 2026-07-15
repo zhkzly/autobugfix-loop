@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -20,6 +21,8 @@ ENCODING_PATH = Path("src/itsdangerous/encoding.py")
 TEST_PATH = Path("tests/test_itsdangerous/test_encoding.py")
 HEALTHY_LINE = 'return base64.urlsafe_b64encode(string).rstrip(b"=")'
 BUGGY_LINE = "return base64.urlsafe_b64encode(string)"
+UPSTREAM_CLONE_ATTEMPTS = 3
+UPSTREAM_CLONE_TIMEOUT_SECONDS = 120
 
 
 def run(
@@ -28,17 +31,30 @@ def run(
     *,
     input_text: str | None = None,
     env: dict[str, str] | None = None,
+    timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     print("$ " + " ".join(shlex.quote(value) for value in argv))
-    result = subprocess.run(
-        argv,
-        cwd=cwd,
-        input=input_text,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=cwd,
+            input=input_text,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+        if stdout:
+            print(stdout)
+        if stderr:
+            print(stderr)
+        raise RuntimeError(
+            f"command timed out after {timeout_seconds}s: {' '.join(argv)}"
+        ) from exc
     if result.stdout:
         print(result.stdout)
     if result.stderr:
@@ -87,6 +103,33 @@ def resolve_test_python(source_root: Path) -> Path:
     raise RuntimeError("real repository acceptance requires a project Python environment containing pytest")
 
 
+def clone_upstream(seed: Path) -> None:
+    argv = [
+        "git",
+        "-c",
+        "http.version=HTTP/1.1",
+        "clone",
+        "--no-checkout",
+        UPSTREAM_URL,
+        str(seed),
+    ]
+    for attempt in range(1, UPSTREAM_CLONE_ATTEMPTS + 1):
+        if seed.exists():
+            shutil.rmtree(seed)
+        try:
+            run(argv, timeout_seconds=UPSTREAM_CLONE_TIMEOUT_SECONDS)
+            return
+        except RuntimeError:
+            if attempt == UPSTREAM_CLONE_ATTEMPTS:
+                raise
+            delay_seconds = 2 ** (attempt - 1)
+            print(
+                f"upstream clone attempt {attempt} failed; retrying in {delay_seconds}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay_seconds)
+
+
 def prepare_real_repository(root: Path, runtime_python: Path) -> tuple[Path, str]:
     if root.exists():
         shutil.rmtree(root)
@@ -95,7 +138,7 @@ def prepare_real_repository(root: Path, runtime_python: Path) -> tuple[Path, str
     remote = root / "fixture-remote.git"
     main_checkout = root / "main-checkout"
 
-    run(["git", "clone", "--no-checkout", UPSTREAM_URL, str(seed)])
+    clone_upstream(seed)
     run(["git", "-C", str(seed), "checkout", "-B", "main", UPSTREAM_COMMIT])
     observed = run(["git", "-C", str(seed), "rev-parse", "HEAD"]).stdout.strip()
     if observed != UPSTREAM_COMMIT:
