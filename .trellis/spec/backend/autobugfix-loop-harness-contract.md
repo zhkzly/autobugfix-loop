@@ -30,7 +30,9 @@
   - `MemoryService.collect(task_id) -> Path`
   - `MemoryService.digest(task_id) -> Path`
   - `MemoryService.maintain(task_id) -> Path`
-  - `MemoryService.approve(proposal_id, note) -> Path`
+  - `MemoryService.approve(proposal_id, note, confirm_review_digest) -> Path`
+  - `MemoryService.approve_skill(proposal_id, skill_name, description, note,
+    confirm_review_digest) -> Path`
 - Eval entrypoints:
   - `run_eval(project_root, dataset, out, ...) -> Path`
   - `score_path(path) -> Path`
@@ -72,8 +74,13 @@
   - Given a configured target repo, bug/problem, and evidence/context, produce
     a real candidate fix in an isolated task worktree.
   - Writer may edit only the task worktree.
+  - Writer receives no writable target Git metadata. Before verification and
+    every human gate, Execution revalidates the task branch/common Git identity
+    and a frozen patch digest.
   - Verifier runs the target repo's configured real commands.
-  - Evaluator is read-only by default.
+  - Verifier uses an independent checkout so verifier commands cannot mutate
+    target-repository Git authority. Evaluator is read-only by default and
+    malformed or ambiguous evaluator output fails closed.
   - Human gate owns PPE approval, acceptance, and archive.
 - Memory loop purpose:
   - Convert execution evidence into precompiled memory, LLM wiki content, and
@@ -84,6 +91,16 @@
     target worktrees.
   - Memory proposals require explicit approval before becoming active memory or
     approved skills.
+  - A reviewed proposal has one activation target. Human approval may append it
+    to active wiki memory or publish one validated approved skill, but cannot do
+    both or overwrite an existing skill.
+  - `memory review` exposes one immutable review digest over proposal identity,
+    accepted packet, deterministic digest, and patch. Human approval must echo
+    that digest; changing any bound content invalidates the approval.
+  - Memory authority reads and writes use descriptor-relative no-follow I/O and
+    reject symlinks, non-regular files, and traversal. Wiki approval, skill
+    activation, and rejection transitions are journaled and recoverable after
+    a process interruption; no transition may duplicate content.
 - Eval loop purpose:
   - Build reproducible benchmark/historical-case harnesses that call the real
     execution loop and measure system behavior.
@@ -142,6 +159,14 @@
     configured trusted ref and bind its Git tree, machine constitution, and
     harness digest. Operator may import only a human-secret-signed aggregate
     whose Study/line/budget binding matches current service state.
+  - A candidate Holdout binding closes its experiment line before scoring;
+    aggregate pass/fail can never become feedback for another Writer attempt on
+    that Study. Visible Optimization feedback reaches line-bound Writer roles
+    only through Study/cohort/treatment/subject-bound evidence records.
+  - The SWE Guard uses a persistent dedicated-VM Docker authority under the
+    external Guard root. Socket/daemon/profile drift fails closed, benchmark
+    cache content is read-only to official scorer code, and only per-run client
+    state is writable.
   - Production Codex SDK nodes run in bounded Python worker processes. The
     parent service enforces timeouts and retains request/result/stdout/stderr;
     no production path may replace this with `codex exec` or an in-process
@@ -155,6 +180,15 @@
     child is nested below a hidden authority root, mount order is broad
     ancestor, hidden authority, then exact allowed child; sibling authority
     state must remain absent.
+  - The current preview SDK requires the SDK process to read a private per-call
+    auth copy. Hooks, apps, delegation, inherited credential variables, and tool
+    network are disabled; output leakage scans and recursive cleanup fail
+    closed. Every production launch path, including the cancellable Operator
+    Writer worker, applies the same pre-publication scan to changed worktree
+    files and private worker output. The scan treats the complete auth document
+    and secret-bearing token/key/password fields as credentials without
+    misclassifying ordinary SDK account metadata. This is credential confinement
+    on a trusted Linux/WSL host, not a separate credential broker.
 
 ### 4. Validation & Error Matrix
 

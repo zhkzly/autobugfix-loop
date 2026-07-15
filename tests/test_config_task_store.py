@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 import yaml
 
@@ -101,6 +103,19 @@ def test_config_rejects_disabling_isolated_codex_role_runtime(tmp_path):
         load_config(project_root)
 
 
+def test_config_rejects_remote_guard_docker_endpoint(tmp_path):
+    project_root, _ = make_service_project(tmp_path)
+    path = project_root / ".autobugfix/config.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data.setdefault("eval", {}).setdefault("benchmarks", {}).setdefault(
+        "guard", {}
+    )["docker_host"] = "tcp://guard.example.test:2376"
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="absolute local unix"):
+        load_config(project_root)
+
+
 def test_config_rejects_benchmark_roots_in_source_or_target_repo(tmp_path):
     project_root, main = make_service_project(tmp_path)
     path = project_root / ".autobugfix/config.yaml"
@@ -178,6 +193,54 @@ def test_config_rejects_nested_operator_authority_roots(tmp_path):
 
     with pytest.raises(ConfigError, match="runtime roots must not overlap"):
         load_config(project_root)
+
+
+@pytest.mark.parametrize(
+    ("section", "root_value"),
+    [
+        ("state", ".autobugfix-memory/operator-state"),
+        ("worktrees", ".autobugfix/tasks/operator-worktrees"),
+    ],
+)
+def test_config_rejects_operator_roots_overlapping_memory_or_execution(
+    tmp_path, section, root_value
+):
+    project_root, _ = make_service_project(tmp_path)
+    path = project_root / ".autobugfix/config.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data.setdefault("operator", {}).setdefault(section, {})["root"] = root_value
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="protected state or data plane"):
+        load_config(project_root)
+
+
+def test_config_protects_real_git_common_dir_from_linked_worktree(tmp_path):
+    project_root, _ = make_service_project(tmp_path)
+    subprocess.run(["git", "init", "-b", "main"], cwd=project_root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=project_root,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, check=True)
+    subprocess.run(["git", "add", "."], cwd=project_root, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=project_root, check=True)
+    linked = tmp_path / "linked-control"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "linked", str(linked), "HEAD"],
+        cwd=project_root,
+        check=True,
+    )
+    config_path = linked / ".autobugfix/config.yaml"
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data.setdefault("operator", {}).setdefault("state", {})["root"] = str(
+        project_root / ".git/operator-state"
+    )
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="project_git"):
+        load_config(linked)
 
 
 def test_config_rejects_experiment_line_template_without_study_identity(tmp_path):

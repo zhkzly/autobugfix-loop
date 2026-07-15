@@ -187,12 +187,26 @@ def verification_worktree(
     if destination.exists():
         raise WorktreeError(f"verification worktree already exists: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    run_git(
-        repo.main_checkout,
-        ["worktree", "add", "--detach", str(destination), base_ref],
-        check=True,
+    cloned = subprocess.run(
+        [
+            "git",
+            "clone",
+            "--no-checkout",
+            "--no-hardlinks",
+            str(repo.main_checkout),
+            str(destination),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
     )
+    if cloned.returncode != 0:
+        raise WorktreeError(
+            "failed to clone isolated verification repository: "
+            + (cloned.stderr.strip() or cloned.stdout.strip())
+        )
     try:
+        run_git(destination, ["checkout", "--detach", base_ref], check=True)
         if patch_text:
             applied = subprocess.run(
                 [
@@ -216,13 +230,4 @@ def verification_worktree(
                 )
         yield destination
     finally:
-        removed = run_git(
-            repo.main_checkout,
-            ["worktree", "remove", "--force", str(destination)],
-            check=False,
-        )
-        if removed.returncode != 0:
-            raise WorktreeError(
-                "failed to remove verification worktree: "
-                + (removed.stderr.strip() or removed.stdout.strip())
-            )
+        shutil.rmtree(destination, ignore_errors=False)

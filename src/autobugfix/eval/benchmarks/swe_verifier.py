@@ -121,6 +121,8 @@ class SWEDockerVisibleVerifier:
             artifact_dir=root / name,
             name=name,
             timeout_seconds=timeout_seconds,
+            env=self.runtime.command_env(),
+            inherit_env=False,
         )
 
     def run(
@@ -224,7 +226,9 @@ class SWEDockerVisibleVerifier:
                         stderr=_bounded_log(Path(apply.stderr_path)),
                         started_at=started_at,
                         finished_at=utc_now(),
-                        outcome="repair_failure",
+                        outcome=(
+                            "harness_error" if apply.timed_out else "repair_failure"
+                        ),
                     )
             command = visible_command(self.instance.language)
             test = self._docker_step(
@@ -254,16 +258,25 @@ class SWEDockerVisibleVerifier:
                 started_at=started_at,
                 finished_at=utc_now(),
                 outcome=(
-                    "passed" if test.exit_code == 0 else "repair_failure"
+                    "harness_error"
+                    if test.timed_out
+                    else "passed"
+                    if test.exit_code == 0
+                    else "repair_failure"
                 ),
             )
         finally:
-            self._docker_step(
+            cleanup = self._docker_step(
                 [docker, "rm", "-f", container],
                 root,
                 "container-remove",
                 120,
             )
+            if not cleanup.passed:
+                raise SWERuntimeError(
+                    "failed to remove visible verifier container; "
+                    "the run is not isolated"
+                )
 
 
 class SWEVerifierServer(AbstractContextManager["SWEVerifierServer"]):

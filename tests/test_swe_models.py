@@ -47,7 +47,20 @@ def test_experiment_protocol_pins_h0_upstreams_and_split() -> None:
     assert protocol.optimization_count == 10
     assert protocol.holdout_count == 6
     assert protocol.model == "gpt-5.4-mini"
+    assert protocol.holdout_excluded_instances == (
+        "formbricks__formbricks-6413",
+    )
     assert len(protocol.protocol_digest) == 64
+
+
+def test_experiment_protocol_requires_explicit_holdout_exposure_ledger() -> None:
+    protocol = SWEExperimentProtocol.from_yaml(
+        ROOT / "benchmarks/swe-experiment-2.yaml"
+    ).to_dict()
+    protocol["holdout"]["excluded_instances"] = []  # type: ignore[index]
+
+    with pytest.raises(BenchmarkContractError, match="exposure exclusion ledger"):
+        SWEExperimentProtocol.from_dict(protocol)
 
 
 def test_experiment_protocol_rejects_upstream_drift() -> None:

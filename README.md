@@ -35,6 +35,15 @@ fake backend for `autobugfix run`. Each SDK call runs in an isolated Python
 worker process so the parent service can enforce the configured timeout and
 retain request/result/stdout/stderr artifacts.
 
+With `bridge_auth: true`, each call copies only the local Codex authentication
+file and minimal installation metadata into a fresh mode-0700 runtime home.
+Project hooks, apps, delegation, tool network access, and inherited shell
+credentials are disabled; role-controlled outputs are scanned/redacted and the
+call home is recursively removed after completion. This is credential
+confinement for the current preview SDK, not a separate credential broker: the
+SDK process itself must still read its private auth copy. Run production roles
+only on a trusted Linux/WSL host until the SDK provides brokered credentials.
+
 ## Configure A Target Repo
 
 Create `.autobugfix/config.yaml` in this control project:
@@ -206,6 +215,15 @@ uv run autobugfix memory init
 uv run autobugfix memory collect <task-id>
 uv run autobugfix memory digest <task-id>
 uv run autobugfix memory maintain <task-id>
+uv run autobugfix memory review <proposal-id>
+uv run autobugfix memory approve <proposal-id> --note "reviewed" \
+  --confirm-review-digest <digest-from-review>
+# Or activate the same reviewed proposal as one reusable skill, never both:
+uv run autobugfix memory approve-skill <proposal-id> \
+  --skill-name preserve-verifier-evidence \
+  --description "Preserve verifier evidence before accepting a repair." \
+  --note "reviewed as a reusable procedure" \
+  --confirm-review-digest <digest-from-review>
 
 uv run autobugfix dataset build-raw --repo target_repo --out raw.jsonl
 uv run autobugfix eval run --dataset problem_prompts.jsonl --out .autobugfix-evals/runs

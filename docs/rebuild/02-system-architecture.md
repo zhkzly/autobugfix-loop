@@ -99,7 +99,14 @@ eval case artifact cwd;
 artifact-only scoring;
 does not inspect arbitrary source trees unless the eval contract gives it
 artifacts.
-Role instructions are loaded from project-owned role skills and injected through SDK developer instructions. Do not isolate by replacing the user's Codex auth home; local auth must continue to work.
+Role instructions are loaded from project-owned role skills and injected
+through SDK developer instructions. Production roles never run from the
+user's global Codex home. With auth bridging enabled, the trusted parent copies
+only the minimum local auth/install files into a fresh private per-call
+`CODEX_HOME`, disables hooks/apps/delegation/network, scans role-controlled
+outputs for credential material, and destroys that home after the call. The
+preview SDK process still reads this private auth copy; this is not an
+independent credential broker and therefore requires a trusted Linux/WSL host.
 Memory Components
 Required modules:
 src/autobugfix/memory/store.py
@@ -137,6 +144,17 @@ Memory state:
   worker.log
 
 Memory is deterministic except for the maintainer proposal text generation. Even the LLM maintainer must write into an isolated run directory; deterministic code validates and copies proposal files into the memory store.
+
+`memory review` computes an immutable review digest over proposal identity,
+accepted Execution packet, deterministic digest, and proposal patch. Approval
+requires a human to echo that exact digest. The human chooses exactly one
+activation target: `memory approve` appends to active wiki memory, while
+`memory approve-skill` creates a named `skills/approved/<name>/SKILL.md` with
+validated frontmatter. Neither path can overwrite an existing skill or replay
+the proposal. Authority reads and writes use descriptor-relative no-follow I/O
+and reject symlinks, non-regular files, and traversal; approval, skill
+activation, and rejection are journaled atomic transitions so interruption
+cannot silently duplicate or partially activate a proposal.
 Evaluation Components
 Required modules:
 src/autobugfix/dataset.py

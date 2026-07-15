@@ -2,171 +2,169 @@
 
 ## Constitutional scope
 
-Autobugfix remains a repo-agnostic loop/harness control system. Execution owns
-real target-repository repair in isolated worktrees. Memory only compiles
-accepted Execution evidence into reviewed wiki/skills. Eval owns benchmark
-materialization, complete Execution invocation, frozen submission, and
-independent official scoring. Operator owns governed Autobugfix improvement on
-non-main branches and cannot mutate Eval, Memory, or Execution state directly.
+Autobugfix remains a repo-agnostic loop-engineering and harness-engineering
+control system. Execution owns real target-repository repair in isolated task
+worktrees. Memory compiles accepted Execution evidence into human-reviewed
+wiki/skills and cannot mutate Execution state or approve itself. Eval owns
+dataset adaptation, isolated generation, frozen submissions, and independent
+official scoring. Operator diagnoses and improves Autobugfix on governed
+non-main experiment lines; trusted services, Git facts, deterministic checks,
+external Guard authority, and humans own state transitions.
 
-This task changes Eval and shared runtime, with protected Operator policy
-updates needed to classify and validate the new harness. Eval service and the
-external Guard own benchmark state. Execution service owns each inner repair
-task. No benchmark oracle result is an Execution transition input.
+This candidate changes Eval, Memory, Operator governance, Codex runtime
+isolation, and shared configuration. It does not change the four loop purposes.
+Benchmark oracle/gold/hidden results remain downstream of frozen generation and
+cannot become Execution Writer feedback.
 
-## Independent reviews actually performed
+## Final hardening decisions
 
-- Eval/acceptance reviewer `Singer` reviewed official scoring, experiment
-  separation, and artifact requirements. Findings were addressed in the exact
-  subject broker, official image binding, patch freeze, encrypted Guard, and
-  formal runner.
-- Codex runtime/privacy reviewer `Kant` reviewed SDK and sandbox boundaries.
-  Findings were addressed by one-call credential cleanup, trusted worker-source
-  snapshots, Docker socket masking, project-root masking, Git authority
-  fingerprints, and failure-evidence freezing.
+- Raw is a standalone direct `openai-codex` SDK comparator. Its process imports
+  no Autobugfix Execution, Memory, Evaluator, or production backend. A private
+  one-call `CODEX_HOME` is removed after publication of allowlisted evidence.
+- Production Codex roles use private broker/call homes. Host code publishes
+  logs after worker exit and scrubs credentials even when publication fails.
+  The shared Guard fingerprints the complete auth document and secret-bearing
+  fields while treating ordinary account metadata as non-secret. Both the
+  standard SDK worker and cancellable Operator Writer scan changed worktree
+  files and private output before publication, redact matches, and fail closed.
+- Memory packet/proposal provenance is digest-bound. Approval uses a
+  cross-process lock, crash-recoverable activation journal, atomic replacement,
+  and a final approved status; rejection shares the same lock. Proposal IDs
+  cannot escape their authority root, and activation hashes and consumes one
+  immutable patch byte sequence rather than reopening the path.
+- Candidate Holdout binding, not later metric import, closes the experiment
+  line with CAS before scoring. Failed, abandoned, or passing metrics therefore
+  cannot become feedback for another Writer attempt. Passing metrics may create
+  the immutable H_bug/H_general checkpoint; rollback preserves Git history.
+- Public Optimization feedback enters line-bound triage only through a trusted,
+  content-addressed Study evidence record bound to Study, cohort, treatment,
+  subject SHA, binding digest, and source-record digest. Arbitrary evidence
+  paths and cross-treatment transfer are rejected and WriterView revalidates
+  the artifact. The registry accepts either an official SWE formal case or a
+  repo-agnostic formal Optimization case containing a real command exit status,
+  stdout/stderr digests, and noninterference proof.
+- Human Guard Docker authority is a persistent mode-0600 Unix socket under the
+  external mode-0700 Guard root. Its independently administered VM daemon must
+  publish `autobugfix.guard.isolation=dedicated-vm-v1`; socket fingerprint,
+  daemon ID/profile, and authority digest are pinned across all phases. The
+  daemon must differ from regular Eval.
+- Official SWE scorer code runs in Bubblewrap with host home, runtime state,
+  Memory, Trellis, Codex config, and external Guard roots hidden. It receives
+  only read-only source/runtime/cache mounts, a per-run output/client-state
+  root, and the pinned dedicated-VM Docker socket; scorer network is unshared.
+- Operator-visible Live identity audit scans instance and repository identities
+  in path names and every regular file
+  as bytes, including SQLite and opaque artifacts, across Eval, Raw, Operator
+  state/worktrees/checkpoints/active releases/promotions, and Trellis roots.
+- A formal unresolved case is a valid measurement. CLI failure status is
+  reserved for harness failure; official verdicts are not execution control
+  signals.
 
-No additional subagents were used after inline implementation mode was
-required. The main agent performed the remaining passes below sequentially.
+## Independent reviews
 
-## Main-agent sequential passes
+Earlier independent security reviewer `Averroes` and acceptance reviewer
+`Aristotle` found the candidate-metric feedback window, mutable Docker authority,
+credential-cleanup gaps, Raw backend coupling, incomplete binary contamination
+audit, non-atomic Memory activation, and invalid formal CLI exit semantics.
+Final acceptance reviewer `Jason` then found that candidate Holdout output was
+still visible while the line remained open and that arbitrary triage paths
+could transfer evidence between H_bug/H_general. Final security reviewer
+`Erdos` independently found the same Holdout window plus cross-phase Docker
+authority replacement, unsafe socket trust without a VM contract, writable
+benchmark cache, repository-level Holdout contamination, Memory patch TOCTOU
+and proposal path escape, and Raw cleanup-failure residue. All concrete findings
+are addressed in source and focused tests; these reviewer passes are findings,
+not merge approval.
 
-### Execution
+The final main-agent sequential pass covered Execution, Memory, Eval, Codex
+runtime, portability/privacy, and acceptance after those independent reviews.
+No new subagent tool was available for this last delta, so no additional
+independent reviewer is claimed. The Codex runtime pass found one remaining
+custom-path defect: the cancellable Operator Writer cleaned its private call
+home but did not scan output before publication. The shared Guard and a real
+Bubblewrap worker regression now cover that path. The portability pass found
+only deliberately forbidden examples in rebuild guardrail docs; production
+source contains no internal repository, user, company, or local absolute path.
 
-Passed. The production acceptance ledger
-`autobugfix-swe-execution-ledger-v2` records one Writer call, one configured
-Docker visible-verifier call, and one read-only Evaluator call. Every transition
-is bound to patch SHA
-`372fc6522c35a89fbaa8605910b7784e4e72d31dbff77ac866d2dbf31b167c9f`;
-the terminal phase is `evaluator_completed`. The target main checkout remains
-clean and all edits occur in the task worktree.
+## Current real evidence
 
-### Memory
-
-Passed. SWE Eval reads only frozen Memory/skill digests for subject identity.
-It does not propose, approve, or activate Memory and does not write Execution
-task state. Official scorer output is absent from Writer/Evaluator input.
-
-### Eval
-
-Passed with one finding fixed. Guard aggregate metrics previously copied the
-requested subject SHA after case execution. They now derive one actual subject
-SHA from all case reports and reject missing, mixed, or unexpected subjects.
-The current runtime was requalified after this change.
-
-### Operator governance
-
-Code boundaries pass unit validation, but publication has an external authority
-gate. `origin/main` does not yet contain the trusted `pr2-real-e2e` baseline;
-the candidate copy cannot authorize itself. A human or trusted CI must seed or
-approve that baseline before trusted-base PR admission can succeed. No bundle
-or baseline authority will be fabricated in this task.
-
-### Portability and privacy
-
-Passed. No target repository, user home, company command, or internal path is
-hardcoded. Generic Windows path examples in the Trellis session hook are not
-runtime identities. Runtime roots are config-derived. Holdout records and
-case-level artifacts are AES-GCM encrypted under a disjoint mode-0700 external
-Guard root; public manifests contain only counts, digests, Optimization cases,
-and opaque wave authority.
-
-### Acceptance
-
-Passed for public infrastructure and one real production case:
-
-- Root tests: `218 passed`.
-- Nested official harness tests: `1 passed`.
-- Verified and Live doctors pass on Docker Engine 29.6.1.
+- Root suite: `315 passed` after the final production-service and acceptance
+  fixes.
+- Standalone Raw SDK suite: `6 passed`.
+- Locked SWE harness suite: `1 passed`.
+- Root and nested compileall: passed.
+- `git diff --check`: passed on the candidate and is rerun after documentation
+  changes before commit.
+- Role-skill validator: `role skills valid`.
+- Trellis task context validator: all entries valid.
+- Verified doctor: passed against SWE-bench 4.1.0, dataset revision
+  `c104f840cc67f8b6eec6f759ebc8b2693d585d4a`, 500 rows, Docker 29.6.1,
+  and Bubblewrap.
+- Live doctor: passed against revision
+  `608f7ae9ab8ea1f9f0d030fe04562cf6bd1a0c8b`, 743 rows, pinned Live/launch
+  commits, Docker 29.6.1, and Bubblewrap.
 - Current runtime:
-  `sha256:e83ab8521188fd47492b443a504116ff8d3bcfe77fba4c2990c8e1b8e87533cc`.
-- Protocol digest:
-  `ededcd5303e279b9e8b318428b4af255efc7227503243bda6120a17c0a391892`.
-- All ten public Optimization cases passed two official gold qualification
-  runs and source materialization.
-- Real `gpt-5.4-mini` development acceptance on
-  `astropy__astropy-12907` completed the full Execution loop, froze submission
-  `929bb7b3b547f83c00c9048cac6532ee6a1c9afb1f26994066323c90a6f81e71`,
-  and independently scored `resolved=true` with no harness error.
-- Noninterference digest:
-  `99bbb3b407e3879d1d60574637caf0185ea385ee06d361f21d2369b12c64a585`.
+  `sha256:3f6445541a9490719b70b37dba9b47d21333c0b61923c713462156ac603cc8f7`.
+- Current protocol:
+  `a2f8e4d30a1b9d542b802367fd7c25cd6ecd0f5d2fbf7d3dc00855d36b66bd40`.
+- `astropy__astropy-12907` passed two isolated official gold scorer runs and
+  source materialization. Qualification receipt:
+  `4abcab1192e3f76e3fb10065008960a46cdaffe8baf824d761993f81f1ff8bc9`.
+- Real public-repository acceptance passed against pinned ItsDangerous commit
+  `672971d66a2ef9f85151e53283113f33d642dabd`: production `gpt-5.4-mini`
+  repaired only `src/itsdangerous/encoding.py` in one Execution iteration,
+  the configured pytest command reported `9 passed`, the target main checkout
+  stayed clean at the injected fixture SHA, Memory produced a pending proposal,
+  and the frozen isolated Eval decision was `pass`.
+- Real Operator acceptance passed with production `gpt-5.4-mini`: request
+  `operator-real`, Writer run `writer-20260715T110226-a2f61d33`, integration
+  `integration-20260715T110357-694f0f4b`, terminal `CLOSED` line, and immutable
+  checkpoint `operator-acceptance-study-H_bug`. The protected main branch stayed
+  at H0.
 
-The six private Live qualifications, encrypted 10+6 preparation, sealing, and
-formal H0/H_general study remain pending human-held Guard authority and are not
-claimed complete.
+The first sandboxed qualification attempt failed because the hidden home also
+hid the locked harness venv's uv-managed CPython runtime. That run was correctly
+recorded as `eligible: false` with a harness error. The harness was fixed by
+read-only mounting only that pinned CPython runtime, and a fresh two-attempt
+qualification then passed. No model or Writer consumed either result.
 
-## 2026-07-15 external Guard cohort review
+The Operator acceptance initially failed closed before Writer because its
+expected-failing task tests were incorrectly reused as a passing performance
+baseline and because its line-bound triage used an unregistered path. A later
+full check rejected a candidate experiment whose profile did not match the
+performance baseline. The harness now separates the always-pass H0/candidate
+performance profile from the task-success validation profile, registers the
+real pre-repair command result as digest-bound generic Study evidence, and
+terminalizes the line before candidate scoring. These were deterministic
+Operator harness corrections; no oracle result or Writer patch was converted
+into task feedback or a skill answer.
 
-This delta was implemented in Trellis Codex inline mode. No reviewer subagent
-was dispatched or claimed; the main agent performed the required passes
-sequentially.
+A later production acceptance exposed a credential-Guard false positive:
+preview SDK events legitimately repeat `account_id`, while the first scanner
+classified every auth JSON string as a secret. The scanner now classifies the
+whole auth document and secret-bearing fields instead; token and whole-file
+leaks remain blocked. The final runtime review then found that Operator's
+custom cancellable Writer publisher had not called the scanner at all. A real
+isolated worker test proves that path now redacts a deliberately copied token,
+records a failed WriterRun, and emits trusted feedback without credential
+content. A fresh normal Operator acceptance passed after both corrections.
 
-### Execution reviewer
+## Claims not made
 
-- Decision: pass.
-- Scope: `src/autobugfix/eval/swe_holdout_guard.py`, CLI dispatch, existing
-  `EvalBenchmarkService.qualify_swe` boundary, and focused tests.
-- Confirmed: cohort qualification makes no SDK call, mutates no Execution task,
-  and does not alter Writer/verifier/evaluator feedback. Formal generation still
-  enters the exact-subject broker only after preparation and sealing.
-- Risk: none introduced to target checkout/worktree ownership.
+- The other nine current-runtime Verified qualifications have not run.
+- The six Human Guard Live cases have not been selected or qualified.
+- The encrypted 10+6 preparation and sealing have not run.
+- Formal H0, Raw, or H_general experiments have not run.
+- Historical Raw pilots used superseded wiring and are not acceptance evidence
+  for the current direct-SDK comparator.
+- PR 10 is not merge-authorized by candidate-authored state. Trusted-base
+  bootstrap approval and the base/main validator remain external human/CI
+  gates.
 
-### Memory reviewer
+## Remaining acceptance
 
-- Decision: pass.
-- Scope: imports and data flow of the new Guard service and Operator skill.
-- Confirmed: no Memory service, packet, proposal, approval, skill activation,
-  or Memory snapshot is read or written. Gold qualification cannot enter
-  Memory.
-- Risk: none.
-
-### Eval reviewer
-
-- Decision: pass.
-- Scope: secret-keyed ordering, encrypted qualification resume, visible
-  identity exclusion, official `qualify_swe`, and aggregate projection.
-- Confirmed: six eligible cases must be repository-unique, span at least four
-  languages, avoid Optimization repositories, and exclude any pinned Live ID
-  found in an Operator-visible path or nested record. Candidate selection uses
-  no gold/test/oracle field. Each selected case still runs two official gold
-  scorer attempts and materialization through the existing adapter.
-- Risk: the six real qualifications remain a Human Guard action and are not
-  claimed complete.
-
-### Codex runtime reviewer
-
-- Decision: pass.
-- Scope: new imports, CLI, current `SWERuntime.runtime_id`, and SDK call graph.
-- Confirmed: no Codex SDK path changed and no `codex exec` path was added. The
-  new module is outside the scorer/runtime digest source set; the measured
-  current runtime remains
-  `sha256:3eb9ba95dbf997c098c1bb893a6123e66e2ebf5f90b7d7be4d0d52ffe4fb5083`.
-- Risk: none.
-
-### Portability and privacy reviewer
-
-- Decision: pass with documented operational assumption.
-- Scope: external-root validation, AES-GCM catalog, HMAC ordering, CLI argv,
-  progress/result schemas, path/content contamination audit, and skill text.
-- Confirmed: no user path or repository is hardcoded; the command has no
-  `--instance`; public output contains only counts, runtime/protocol/report
-  digests, and encrypted catalog digest. Exceptions suppress case-level text.
-- Risk: a shared Docker daemon can expose image/process metadata to a
-  concurrently running host Operator. The skill now requires a dedicated Guard
-  Docker context/host or no concurrent Operator process during private runs.
-
-### Acceptance reviewer
-
-- Decision: pass for this implementation delta; formal cohort remains pending.
-- Evidence:
-  - `uv run --cache-dir /tmp/uv-cache pytest -q` -> `248 passed`.
-  - nested `harnesses/swebench` pytest -> `1 passed`.
-  - focused Guard tests -> `14 passed`.
-  - root and nested compileall -> pass.
-  - `git diff --check` -> pass.
-  - `scripts/validate_role_skills.py` -> `role skills valid`.
-  - real Live Docker doctor -> passed against dataset revision
-    `608f7ae9ab8ea1f9f0d030fe04562cf6bd1a0c8b`, 743 rows, and Docker 29.6.1.
-  - current eligible Verified qualifications -> `10` under runtime `3eb9...`.
-- Remaining action: Human Guard runs the external cohort command, then
-  `prepare-swe` and `seal-swe`; those results must be recorded before the task
-  is complete.
+1. Re-run current Verified/Live doctors if benchmark runtime source changes.
+2. Qualify the remaining nine public cases and run the Human Guard Live cohort.
+3. Prepare/seal the 10+6 manifest, then run frozen H0, independent Raw, and the
+   separately governed H_general experiment without oracle feedback.
+4. Obtain trusted-base authorization before merging PR 10.

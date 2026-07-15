@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import subprocess
+import socket
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +19,11 @@ from autobugfix.eval.benchmarks.service import (
 )
 from autobugfix.eval.benchmarks.swe_guard import SWEGuardStore, SWEGuardStoreError
 from autobugfix.eval.benchmarks.swe_materialize import SWEMaterializedRepository
+from autobugfix.eval.benchmarks.swe_runtime import (
+    SWEDockerAuthority,
+    SWERuntime,
+    SWERuntimeError,
+)
 from autobugfix.eval.benchmarks.swe_models import (
     SWEInstance,
     SWEOptimizationSelection,
@@ -83,6 +91,35 @@ def test_guard_store_keeps_holdout_record_and_artifacts_encrypted(
             assert b"private patch" not in path.read_bytes()
 
 
+def test_guard_exposure_ledger_is_encrypted_and_append_only(tmp_path: Path) -> None:
+    store = guard_store(tmp_path)
+    revision = "live-revision-1"
+    instance = "sealed-owner__repo-123"
+    repository = "sealed-owner/repo"
+
+    store.write_exposure_ledger(
+        instance_ids={instance},
+        repositories={repository},
+        secret=SECRET,
+        dataset_revision=revision,
+    )
+    assert store.load_exposure_ledger(
+        secret=SECRET,
+        dataset_revision=revision,
+    ) == ({instance}, {repository})
+    encrypted = next((store.root / "exposure-ledgers").glob("*.abfg"))
+    assert instance.encode() not in encrypted.read_bytes()
+    assert repository.encode() not in encrypted.read_bytes()
+
+    with pytest.raises(SWEGuardStoreError, match="cannot remove"):
+        store.write_exposure_ledger(
+            instance_ids=set(),
+            repositories=set(),
+            secret=SECRET,
+            dataset_revision=revision,
+        )
+
+
 def test_guard_store_detects_encrypted_qualification_artifact_tampering(
     tmp_path: Path,
 ) -> None:
@@ -148,6 +185,238 @@ def test_guard_store_rejects_operator_visible_root(tmp_path: Path) -> None:
         SWEGuardStore(project / ".autobugfix/guard", forbidden_roots=(project,))
 
 
+def test_service_guard_store_rejects_raw_baseline_runtime(tmp_path: Path) -> None:
+    project, _ = make_service_project(tmp_path)
+    service = EvalBenchmarkService(project)
+
+    with pytest.raises(SWEGuardStoreError, match="must be disjoint"):
+        service._swe_guard_store(
+            service.config.eval.benchmarks.raw_codex.runtime_root / "guard"
+        )
+
+
+def test_guard_docker_authority_rejects_same_daemon_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project, _ = make_service_project(tmp_path)
+    service = EvalBenchmarkService(project)
+    service.config.eval.benchmarks.guard.docker_host = "unix:///tmp/guard.sock"
+    store = service._swe_guard_store(tmp_path / "external-guard")
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setattr("autobugfix.eval.benchmarks.service.shutil.which", lambda name: "/usr/bin/docker")
+
+    def fake_run(argv, *, artifact_dir, **kwargs):
+        del kwargs
+        artifact_dir.mkdir(parents=True)
+        output = artifact_dir / "stdout.log"
+        if "{{json .}}" in argv:
+            output.write_text(
+                json.dumps(
+                    {
+                        "ID": "same-daemon-id",
+                        "Labels": [
+                            "autobugfix.guard.isolation=dedicated-vm-v1"
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            output.write_text("same-daemon-id\n", encoding="utf-8")
+        return SimpleNamespace(passed=True, stdout_path=str(output))
+
+    monkeypatch.setattr("autobugfix.eval.benchmarks.service.run_command", fake_run)
+
+    with pytest.raises(EvalBenchmarkServiceError, match="regular Eval daemon"):
+        service._verify_swe_guard_daemon(store)
+
+
+def test_guard_docker_authority_pins_private_socket_and_daemon(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    with tempfile.TemporaryDirectory(prefix="abfg-", dir="/tmp") as guard_dir:
+        store = SWEGuardStore(Path(guard_dir), forbidden_roots=(project,))
+        socket_path = store.root / "docker" / "d.sock"
+        socket_path.parent.mkdir(mode=0o700)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(socket_path))
+        socket_path.chmod(0o600)
+        authority = SWEDockerAuthority.capture(
+            endpoint=f"unix://{socket_path}",
+            guard_root=store.root,
+            daemon_id="guard-daemon-id",
+            docker_executable="/usr/bin/docker",
+            isolation_label="autobugfix.guard.isolation=dedicated-vm-v1",
+            daemon_profile_digest="a" * 64,
+        )
+
+        monkeypatch.setattr(
+            "autobugfix.eval.benchmarks.swe_runtime.subprocess.run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout="guard-daemon-id\n",
+                stderr="",
+            ),
+        )
+        authority.assert_current(
+            {"DOCKER_HOST": authority.endpoint, "PATH": "/usr/bin"}
+        )
+        server.close()
+        socket_path.unlink()
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        replacement.bind(str(socket_path))
+        socket_path.chmod(0o600)
+        try:
+            with pytest.raises(SWERuntimeError, match="authority changed"):
+                authority.assert_current(
+                    {"DOCKER_HOST": authority.endpoint, "PATH": "/usr/bin"}
+                )
+        finally:
+            replacement.close()
+
+
+def test_guard_docker_authority_is_persistent_across_runtime_phases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _ = make_service_project(tmp_path)
+    external = tmp_path / "external-guard"
+    service = EvalBenchmarkService(project)
+    store = service._swe_guard_store(external)
+    socket_path = store.root / "docker/d.sock"
+    socket_path.parent.mkdir(mode=0o700)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(socket_path))
+    socket_path.chmod(0o600)
+    service.config.eval.benchmarks.guard.docker_host = f"unix://{socket_path}"
+    daemon_id = {"value": "guard-daemon-1"}
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.service.shutil.which",
+        lambda name: "/usr/bin/docker",
+    )
+
+    def fake_run(argv, *, artifact_dir, **kwargs):
+        del kwargs
+        artifact_dir.mkdir(parents=True)
+        output = artifact_dir / "stdout.log"
+        if "{{json .}}" in argv:
+            output.write_text(
+                json.dumps(
+                    {
+                        "ID": daemon_id["value"],
+                        "Name": "guard-vm",
+                        "OperatingSystem": "Guard VM",
+                        "OSType": "linux",
+                        "Architecture": "x86_64",
+                        "DockerRootDir": "/var/lib/docker",
+                        "Driver": "overlay2",
+                        "SecurityOptions": [],
+                        "Labels": [
+                            "autobugfix.guard.isolation=dedicated-vm-v1"
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            output.write_text("regular-daemon\n", encoding="utf-8")
+        return SimpleNamespace(passed=True, stdout_path=str(output))
+
+    monkeypatch.setattr("autobugfix.eval.benchmarks.service.run_command", fake_run)
+    try:
+        _, first = service._verify_swe_guard_daemon(store)
+        assert (store.root / "docker-authority/authority.yaml").is_file()
+        _, second = service._verify_swe_guard_daemon(store)
+        assert first.authority_digest == second.authority_digest
+
+        daemon_id["value"] = "guard-daemon-2"
+        with pytest.raises(EvalBenchmarkServiceError, match="changed after"):
+            service._verify_swe_guard_daemon(store)
+    finally:
+        server.close()
+
+
+def test_guard_docker_authority_requires_dedicated_vm_attestation(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "docker-info.json"
+    evidence.write_text(json.dumps({"ID": "guard-daemon", "Labels": []}))
+
+    with pytest.raises(EvalBenchmarkServiceError, match="independently administered VM"):
+        EvalBenchmarkService._docker_daemon_profile(evidence)
+
+
+def test_swe_runtime_uses_private_client_home(tmp_path: Path, monkeypatch) -> None:
+    project, _ = make_service_project(tmp_path)
+    service = EvalBenchmarkService(project)
+    monkeypatch.setenv("HOME", "/host/home/with-codex-auth")
+    monkeypatch.setenv("DOCKER_CONFIG", "/host/docker-config")
+
+    environment = SWERuntime(project, service.config.eval.benchmarks).command_env()
+
+    assert environment["HOME"].endswith("/client-home")
+    assert environment["DOCKER_CONFIG"].endswith("/client-home/.docker")
+    assert environment["HOME"] != "/host/home/with-codex-auth"
+    assert environment["DOCKER_CONFIG"] != "/host/docker-config"
+
+
+def test_official_scorer_process_hides_host_authority_roots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project, _ = make_service_project(tmp_path)
+    service = EvalBenchmarkService(project)
+    runtime = SWERuntime(project, service.config.eval.benchmarks)
+    runtime.command_env()
+    official_root = project / ".autobugfix/official-case"
+    official_root.mkdir(parents=True)
+    prediction = official_root.parent / "prediction.jsonl"
+    prediction.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_runtime.shutil.which",
+        lambda name: "/usr/bin/bwrap" if name == "bwrap" else None,
+    )
+
+    argv = runtime.isolated_official_argv(
+        ["python", "-m", "swebench.harness.run_evaluation"],
+        cwd=official_root,
+        writable_roots=(official_root,),
+        readable_roots=(prediction,),
+    )
+    encoded = "\n".join(argv)
+
+    assert "--unshare-net" in argv
+    assert "/home" in argv
+    assert "/srv" in argv
+    assert str(project / ".autobugfix") in argv
+    assert argv[-4:] == [
+        "--",
+        "python",
+        "-m",
+        "swebench.harness.run_evaluation",
+    ]
+    assert any(
+        argv[index : index + 3]
+        == ["--ro-bind", str(project.resolve()), str(project.resolve())]
+        for index in range(len(argv) - 2)
+    )
+    cache_root = str(runtime.cache_root)
+    assert any(
+        argv[index : index + 3] == ["--ro-bind", cache_root, cache_root]
+        for index in range(len(argv) - 2)
+    )
+    assert not any(
+        argv[index : index + 3] == ["--bind", cache_root, cache_root]
+        for index in range(len(argv) - 2)
+    )
+    assert any(
+        argv[index : index + 3]
+        == ["--ro-bind", str(prediction), str(prediction)]
+        for index in range(len(argv) - 2)
+    )
+
+
 def test_guard_metric_subject_is_derived_from_case_reports() -> None:
     subject = "a" * 40
     assert (
@@ -195,6 +464,8 @@ def test_swe_seal_publishes_no_holdout_plaintext_or_wave_tokens(
             "preparation_id": preparation_id,
             "protocol_digest": PROTOCOL,
             "runtime_id": RUNTIME,
+            "guard_runtime_id": RUNTIME,
+            "docker_authority_digest": "e" * 64,
             "h0_subject": "a" * 40,
             "cases": [
                 {"role": "optimization", "instance_id": f"visible-{index}"}
@@ -223,6 +494,8 @@ def test_swe_seal_publishes_no_holdout_plaintext_or_wave_tokens(
             "preparation_id": preparation_id,
             "protocol_digest": PROTOCOL,
             "runtime_id": RUNTIME,
+            "guard_runtime_id": RUNTIME,
+            "docker_authority_digest": "e" * 64,
             "h0_subject": "a" * 40,
             "h0_tree": "b" * 40,
             "optimization_cases": [
@@ -342,6 +615,7 @@ def test_prepare_swe_builds_10_plus_6_without_plaintext_holdout(
             self.snapshot = SimpleNamespace(revision="dataset-revision")
             self.runtime = SimpleNamespace(
                 runtime_id=RUNTIME,
+                docker_authority_digest="e" * 64,
                 cache_root=external / "runtime-cache",
                 config=SimpleNamespace(
                     swebench_commit="swebench-commit",

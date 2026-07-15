@@ -79,6 +79,46 @@ def materializer(tmp_path: Path) -> SWEImageMaterializer:
     return SWEImageMaterializer(runner)
 
 
+def test_materializer_fails_closed_when_container_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = SimpleNamespace(
+        project_root=tmp_path,
+        cache_root=tmp_path / "cache",
+        config=SimpleNamespace(platform="linux"),
+        benchmark_config=SimpleNamespace(command_timeout_seconds=30),
+        command_env=lambda: {},
+    )
+    runner = cast(
+        SWEOfficialRunner,
+        SimpleNamespace(
+            runtime=runtime,
+            image_id=lambda *args, **kwargs: "sha256:" + "1" * 64,
+        ),
+    )
+    subject = SWEImageMaterializer(runner)
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_materialize.shutil.which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+
+    def fake_run(*args, name: str, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(passed=name != "docker-remove-materializer")
+
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_materialize.run_command", fake_run
+    )
+    monkeypatch.setattr(
+        subject,
+        "_repo_root",
+        lambda root: (_ for _ in ()).throw(SWERuntimeError("copy unavailable")),
+    )
+
+    with pytest.raises(SWERuntimeError, match="failed to remove"):
+        subject.materialize(instance("a" * 40), tmp_path / "artifacts")
+
+
 class OfficialRuntime:
     def __init__(self, root: Path) -> None:
         self.project_root = root
@@ -103,8 +143,29 @@ class OfficialRuntime:
             row_count=1,
         )
 
-    def command_env(self) -> dict[str, str]:
+    def command_env(self, writable_state_root: Path | None = None) -> dict[str, str]:
+        if writable_state_root is not None:
+            assert writable_state_root.is_dir()
         return {}
+
+    def live_command_env(
+        self,
+        writable_state_root: Path | None = None,
+    ) -> dict[str, str]:
+        return self.command_env(writable_state_root)
+
+    def isolated_official_argv(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path,
+        writable_roots: tuple[Path, ...],
+        readable_roots: tuple[Path, ...] = (),
+    ) -> list[str]:
+        assert cwd in writable_roots
+        for path in readable_roots:
+            assert path.is_file()
+        return argv
 
 
 def submission(patch: str = "") -> SWESubmission:

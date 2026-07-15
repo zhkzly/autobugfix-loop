@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from autobugfix.cli import main
+from autobugfix.cli import build_parser, main
 from tests.helpers import make_service_project
 
 
@@ -50,6 +50,28 @@ def test_eval_cli_does_not_expose_a_production_fake_backend():
                 "fake",
             ]
         )
+
+
+def test_memory_approve_skill_cli_requires_human_review_binding() -> None:
+    args = build_parser().parse_args(
+        [
+            "memory",
+            "approve-skill",
+            "proposal-1",
+            "--skill-name",
+            "preserve-verifier-evidence",
+            "--description",
+            "Preserve verifier evidence before accepting a repair.",
+            "--note",
+            "reviewed",
+            "--confirm-review-digest",
+            "a" * 64,
+        ]
+    )
+
+    assert args.memory_action == "approve-skill"
+    assert args.skill_name == "preserve-verifier-evidence"
+    assert args.confirm_review_digest == "a" * 64
 
 
 def test_defects4j_run_case_cli_forwards_bounded_production_options(
@@ -102,6 +124,40 @@ def test_defects4j_run_case_cli_forwards_bounded_production_options(
         "max_attempts": 2,
     }
     assert "decision: pass" in capsys.readouterr().out
+
+
+def test_formal_swe_optimization_unresolved_is_a_valid_measurement(
+    tmp_path, monkeypatch, capsys
+):
+    project_root, _ = make_service_project(tmp_path)
+    monkeypatch.chdir(project_root)
+    monkeypatch.setattr(
+        "autobugfix.cli.EvalBenchmarkService.run_swe_optimization_case",
+        lambda *args, **kwargs: {
+            "resolved": False,
+            "harness_error": False,
+            "record_digest": "a" * 64,
+        },
+    )
+
+    exit_code = main(
+        [
+            "eval",
+            "benchmark",
+            "run-swe-optimization",
+            "--manifest",
+            "manifest.yaml",
+            "--case",
+            "public-case",
+            "--study-binding",
+            "binding.yaml",
+            "--run-id",
+            "h-general-public-case",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "resolved: false" in capsys.readouterr().out
 
 
 def test_raw_codex_baseline_cli_delegates_all_state_changes_to_service(

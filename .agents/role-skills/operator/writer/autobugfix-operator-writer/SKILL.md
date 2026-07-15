@@ -37,6 +37,11 @@ remains the read-only WriterView supplied by the service. A quota or model
 error is feedback to the Operator; do not switch from `gpt-5.4-mini` or launch
 an unmetered replacement call.
 
+The Writer receives registered Optimization evidence through WriterView, not
+arbitrary Eval paths. Treat the official score as diagnosis evidence for the
+Operator treatment, never as same-case Execution feedback or permission to
+start an extra repair attempt.
+
 The project Operator hook belongs to `operator_host` and is disabled in this
 SDK role. Do not treat the absence of a hook as permission to cross the
 candidate worktree or service boundary.

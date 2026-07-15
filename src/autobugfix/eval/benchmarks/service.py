@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import shutil
@@ -20,7 +21,12 @@ from autobugfix.eval.benchmarks.authority import (
     resolve_guard_code_identity,
 )
 from autobugfix.eval.benchmarks.defects4j import Defects4JRuntime
-from autobugfix.eval.benchmarks.swe_runtime import SWERuntime
+from autobugfix.eval.benchmarks.swe_runtime import (
+    SWE_GUARD_DAEMON_ISOLATION_LABEL,
+    SWEDockerAuthority,
+    SWERuntime,
+    SWERuntimeError,
+)
 from autobugfix.eval.benchmarks.swe_guard import SWEGuardStore, SWEGuardStoreError
 from autobugfix.eval.benchmarks.subject_broker import SWESubjectBroker
 from autobugfix.eval.benchmarks.swe_live import SWELiveAdapter
@@ -64,16 +70,21 @@ from autobugfix.eval.benchmarks.models import (
 )
 from autobugfix.eval.artifacts import write_yaml
 from autobugfix.eval.benchmarks.store import BenchmarkStore
+from autobugfix.eval.benchmarks.runtime import run_command
 from autobugfix.eval.benchmarks.verify import (
     managed_verifier_for_receipt,
     official_oracle_for_receipt,
 )
 from autobugfix.eval.runner import run_eval
 from autobugfix.eval.reporting import write_evaluation_report
-from autobugfix.eval.scorers import normalize_diff
 from autobugfix.git_utils import rev_parse, run_git
 from autobugfix.models import utc_now
+from autobugfix.operator.service import (
+    OperatorGovernanceError,
+    OperatorGovernanceService,
+)
 from autobugfix.role_config import resolve_role
+from autobugfix.study_binding import StudyBindingError, validate_study_binding_shape
 
 
 class EvalBenchmarkServiceError(RuntimeError):
@@ -154,27 +165,216 @@ class EvalBenchmarkService:
         raise EvalBenchmarkServiceError(f"unsupported SWE adapter: {adapter}")
 
     def _swe_guard_store(self, guard_root: Path) -> SWEGuardStore:
+        codex_runtime = self.config.codex.role_runtime.runtime_root
+        if not codex_runtime.is_absolute():
+            codex_runtime = self.project_root / codex_runtime
+        task_root = self.config.task_root
+        if not task_root.is_absolute():
+            task_root = self.project_root / task_root
+        forbidden_roots = [
+            self.project_root,
+            task_root,
+            self.config.archive_root,
+            self.config.eval.benchmarks.cache_root,
+            self.config.eval.benchmarks.trusted_case_root,
+            self.config.eval.benchmarks.visible_manifest_root,
+            self.config.eval.benchmarks.raw_codex.runtime_root,
+            self.config.operator.state.root,
+            self.config.operator.artifacts.root,
+            self.config.operator.worktrees.root,
+            self.config.operator.experiment_lines.root,
+            self.config.operator.experiment_lines.checkpoint_root,
+            self.config.operator.experiment_lines.active_release_root,
+            self.config.operator.promotion.release_root,
+            self.config.operator.promotion.active_release_link,
+            self.project_root / ".autobugfix-memory",
+            codex_runtime,
+        ]
+        for repo in self.config.repos.values():
+            forbidden_roots.append(repo.main_checkout)
+            if repo.worktree_root is not None:
+                forbidden_roots.append(repo.worktree_root)
         return SWEGuardStore(
             guard_root,
-            forbidden_roots=(
-                self.project_root,
-                self.config.eval.benchmarks.cache_root,
-                self.config.eval.benchmarks.trusted_case_root,
-                self.config.eval.benchmarks.visible_manifest_root,
-                self.config.operator.state.root,
-                self.config.operator.artifacts.root,
-                self.project_root / ".autobugfix-memory",
-            ),
+            forbidden_roots=forbidden_roots,
         )
 
-    def _swe_guard_adapter(self, adapter: str, store: SWEGuardStore):
+    def _swe_guard_docker_environment(self) -> dict[str, str]:
+        guard_host = self.config.eval.benchmarks.guard.docker_host
+        if not guard_host:
+            raise EvalBenchmarkServiceError(
+                "SWE Holdout Guard requires eval.benchmarks.guard.docker_host"
+            )
+        regular_host = os.environ.get("DOCKER_HOST") or "unix:///var/run/docker.sock"
+        aliases = {
+            "/var/run/docker.sock": "unix:///var/run/docker.sock",
+            "unix:///var/run/docker.sock": "unix:///var/run/docker.sock",
+        }
+        if aliases.get(guard_host, guard_host) == aliases.get(
+            regular_host, regular_host
+        ):
+            raise EvalBenchmarkServiceError(
+                "SWE Holdout Guard Docker endpoint must differ from the regular Eval endpoint"
+            )
+        return {"DOCKER_HOST": guard_host}
+
+    @staticmethod
+    def _docker_daemon_id(evidence_path: Path) -> str:
+        value = evidence_path.read_text(encoding="utf-8", errors="replace").strip()
+        if not value or any(character.isspace() for character in value):
+            raise EvalBenchmarkServiceError("Docker daemon did not expose one stable ID")
+        return value
+
+    @staticmethod
+    def _docker_daemon_profile(
+        evidence_path: Path,
+    ) -> tuple[str, dict[str, Any], str]:
+        try:
+            raw = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise EvalBenchmarkServiceError(
+                "Guard Docker daemon did not expose valid JSON authority"
+            ) from exc
+        if not isinstance(raw, Mapping):
+            raise EvalBenchmarkServiceError("Guard Docker authority must be a mapping")
+        daemon_id = str(raw.get("ID") or "").strip()
+        labels = sorted(str(item) for item in (raw.get("Labels") or []))
+        if not daemon_id or any(character.isspace() for character in daemon_id):
+            raise EvalBenchmarkServiceError("Guard Docker daemon ID is invalid")
+        if SWE_GUARD_DAEMON_ISOLATION_LABEL not in labels:
+            raise EvalBenchmarkServiceError(
+                "Guard Docker daemon must be an independently administered VM and "
+                f"publish label {SWE_GUARD_DAEMON_ISOLATION_LABEL!r}"
+            )
+        profile = {
+            "id": daemon_id,
+            "name": str(raw.get("Name") or ""),
+            "operating_system": str(raw.get("OperatingSystem") or ""),
+            "os_type": str(raw.get("OSType") or ""),
+            "architecture": str(raw.get("Architecture") or ""),
+            "docker_root_dir": str(raw.get("DockerRootDir") or ""),
+            "driver": str(raw.get("Driver") or ""),
+            "security_options": sorted(
+                str(item) for item in (raw.get("SecurityOptions") or [])
+            ),
+            "labels": labels,
+        }
+        return daemon_id, profile, digest_payload(profile)
+
+    @staticmethod
+    def _write_private_authority(path: Path, record: Mapping[str, Any]) -> None:
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(yaml.safe_dump(dict(record), sort_keys=False))
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def _verify_swe_guard_daemon(
+        self,
+        store: SWEGuardStore,
+    ) -> tuple[dict[str, str], SWEDockerAuthority]:
+        environment = self._swe_guard_docker_environment()
+        docker = shutil.which("docker")
+        if not docker:
+            raise EvalBenchmarkServiceError("docker executable is unavailable")
+        authority_root = store.root / "docker-authority"
+        artifact_root = authority_root / "checks" / uuid.uuid4().hex
+        regular = run_command(
+            [docker, "info", "--format", "{{.ID}}"],
+            cwd=self.project_root,
+            artifact_dir=artifact_root / "regular",
+            name="regular-docker-daemon-id",
+            timeout_seconds=60,
+            env=SWERuntime(self.project_root, self.config.eval.benchmarks).command_env(),
+            inherit_env=False,
+        )
+        guarded_runtime = SWERuntime(
+            self.project_root,
+            self.config.eval.benchmarks,
+            docker_environment=environment,
+        )
+        guarded = run_command(
+            [docker, "info", "--format", "{{json .}}"],
+            cwd=self.project_root,
+            artifact_dir=artifact_root / "guard",
+            name="guard-docker-daemon-id",
+            timeout_seconds=60,
+            env=guarded_runtime.command_env(),
+            inherit_env=False,
+        )
+        if not regular.passed or not guarded.passed:
+            raise EvalBenchmarkServiceError(
+                "regular and Guard Docker daemons must both be reachable"
+            )
+        regular_id = self._docker_daemon_id(Path(regular.stdout_path))
+        guarded_id, daemon_profile, daemon_profile_digest = (
+            self._docker_daemon_profile(Path(guarded.stdout_path))
+        )
+        if regular_id == guarded_id:
+            raise EvalBenchmarkServiceError(
+                "SWE Holdout Guard Docker endpoint resolves to the regular Eval daemon"
+            )
+        try:
+            authority = SWEDockerAuthority.capture(
+                endpoint=environment["DOCKER_HOST"],
+                guard_root=store.root,
+                daemon_id=guarded_id,
+                docker_executable=docker,
+                isolation_label=SWE_GUARD_DAEMON_ISOLATION_LABEL,
+                daemon_profile_digest=daemon_profile_digest,
+            )
+        except SWERuntimeError as exc:
+            raise EvalBenchmarkServiceError(str(exc)) from exc
+        authority_record = record_with_digest(
+            {
+                "schema": "autobugfix-swe-docker-authority-v2",
+                "authority": authority.to_dict(),
+                "daemon_profile": daemon_profile,
+            }
+        )
+        pinned_path = authority_root / "authority.yaml"
+        if pinned_path.exists():
+            if pinned_path.is_symlink():
+                raise EvalBenchmarkServiceError(
+                    "pinned Guard Docker authority was redirected"
+                )
+            pinned = yaml.safe_load(pinned_path.read_text(encoding="utf-8")) or {}
+            if not isinstance(pinned, Mapping):
+                raise EvalBenchmarkServiceError(
+                    "pinned Guard Docker authority is invalid"
+                )
+            verify_record(pinned)
+            if dict(pinned) != authority_record:
+                raise EvalBenchmarkServiceError(
+                    "Guard Docker authority changed after its first qualification"
+                )
+        else:
+            self._write_private_authority(pinned_path, authority_record)
+        write_yaml(artifact_root / "observed-authority.yaml", authority_record)
+        return environment, authority
+
+    def _swe_guard_runtime(self, store: SWEGuardStore) -> SWERuntime:
+        environment, authority = self._verify_swe_guard_daemon(store)
         private_config = replace(
             self.config.eval.benchmarks,
             cache_root=store.root / "runtime-cache",
             trusted_case_root=store.root / "runtime-state",
             visible_manifest_root=store.root / "visible-projection",
         )
-        runtime = SWERuntime(self.project_root, private_config)
+        return SWERuntime(
+            self.project_root,
+            private_config,
+            docker_environment=environment,
+            docker_authority=authority,
+        )
+
+    def _swe_guard_adapter(self, adapter: str, store: SWEGuardStore):
+        runtime = self._swe_guard_runtime(store)
         if adapter == "swebench_live":
             return SWELiveAdapter(runtime)
         if adapter == "swebench_verified":
@@ -346,6 +546,7 @@ class EvalBenchmarkService:
                 "dataset_revision": runner.snapshot.revision,
                 "dataset_snapshot_sha256": runner.snapshot.sha256,
                 "runtime_id": runner.runtime.runtime_id,
+                "docker_authority_digest": runner.runtime.docker_authority_digest,
                 "official_attempts": official_attempts,
                 "official_result_digest": official_attempts[-1]["record_digest"],
                 "official_result_path": official_attempts[-1]["record_path"],
@@ -628,25 +829,57 @@ class EvalBenchmarkService:
             raise EvalBenchmarkServiceError("unsupported formal SWE manifest")
         return dict(raw)
 
-    @staticmethod
     def _load_swe_study_binding(
+        self,
         path: Path,
         public_manifest: Mapping[str, Any],
+        *,
+        expected_kinds: set[str],
     ) -> dict[str, Any]:
+        if not path.is_file() or path.is_symlink():
+            raise EvalBenchmarkServiceError("SWE Study binding is missing or redirected")
         raw = yaml.safe_load(path.resolve().read_text(encoding="utf-8")) or {}
         if not isinstance(raw, Mapping):
             raise EvalBenchmarkServiceError("SWE Study binding is invalid")
         verify_record(raw)
+        try:
+            validate_study_binding_shape(raw)
+        except StudyBindingError as exc:
+            raise EvalBenchmarkServiceError(str(exc)) from exc
         if (
-            raw.get("schema") != "autobugfix-guard-study-binding-v1"
+            raw.get("kind") not in expected_kinds
             or raw.get("manifest_digest") != public_manifest.get("record_digest")
             or raw.get("target_checkpoint_name") != "H_general"
             or raw.get("primary_model") != "gpt-5.4-mini"
+            or not raw.get("cohort_id")
         ):
             raise EvalBenchmarkServiceError(
                 "SWE Study binding differs from the sealed experiment"
             )
-        return dict(raw)
+        operator = OperatorGovernanceService(self.project_root)
+        try:
+            authoritative = operator.verify_guard_study_binding(raw)
+            baseline = operator.study_baseline_identity(str(raw["study_id"]))
+        except (OperatorGovernanceError, StudyBindingError) as exc:
+            raise EvalBenchmarkServiceError(
+                "SWE Study binding is not derived from trusted Operator state"
+            ) from exc
+        raw_guard = public_manifest.get("guard")
+        code_identity = (
+            raw_guard.get("code_identity")
+            if isinstance(raw_guard, Mapping)
+            else None
+        )
+        if (
+            baseline["subject_sha"] != public_manifest.get("h0_subject")
+            or baseline["subject_tree"] != public_manifest.get("h0_tree")
+            or not isinstance(code_identity, Mapping)
+            or baseline["harness_sha"] != code_identity.get("trusted_commit")
+        ):
+            raise EvalBenchmarkServiceError(
+                "SWE Study H0 subject or trusted harness differs from the sealed experiment"
+            )
+        return authoritative
 
     def _execute_formal_swe_case(
         self,
@@ -665,6 +898,41 @@ class EvalBenchmarkService:
     ) -> dict[str, Any]:
         subject_sha = str(study_binding["subject_sha"])
         subject_tree = str(study_binding["subject_tree"])
+        try:
+            memory_snapshot = OperatorGovernanceService(
+                self.project_root
+            ).study_memory_snapshot(
+                str(study_binding["study_id"]),
+                expected_digest=str(study_binding["memory_digest"]),
+            )
+        except OperatorGovernanceError as exc:
+            raise EvalBenchmarkServiceError(
+                "SWE Study Memory is not available from trusted Operator state"
+            ) from exc
+        codex_backend_factory = None
+        if experiment_role == "optimization":
+            operator = OperatorGovernanceService(self.project_root)
+            try:
+                grant = operator.validate_optimization_case_binding(
+                    study_binding,
+                    case_id=instance.instance_id,
+                    first_wave=visible.first_wave,
+                )
+            except OperatorGovernanceError as exc:
+                raise EvalBenchmarkServiceError(
+                    "SWE Optimization case is outside trusted Operator budget"
+                ) from exc
+            execution_id = f"swe:{run_id}:{instance.instance_id}"
+
+            def codex_backend_factory(role: str, attempt: int, sequence: int):
+                return operator.metered_codex_backend(
+                    grant_id=grant.grant_id,
+                    call_key=f"{execution_id}:{sequence}:{role}",
+                    execution_id=execution_id,
+                    case_id=instance.instance_id,
+                    attempt=attempt,
+                )
+
         frozen = SWESubjectBroker(
             self.project_root,
             runner.runtime,
@@ -683,6 +951,8 @@ class EvalBenchmarkService:
             timeout_seconds=900,
             experiment_role=experiment_role,
             study_binding=study_binding,
+            memory_snapshot=memory_snapshot,
+            codex_backend_factory=codex_backend_factory,
         )
         frozen_before = frozen.identity()
         official = runner.score(
@@ -703,6 +973,9 @@ class EvalBenchmarkService:
                 "schema": "autobugfix-swe-formal-case-v1",
                 "case_token": visible.case_token,
                 "experiment_role": experiment_role,
+                "study_id": study_binding["study_id"],
+                "cohort_id": study_binding["cohort_id"],
+                "treatment": study_binding["target_checkpoint_name"],
                 "study_binding_digest": study_binding["record_digest"],
                 "executed_subject_sha": frozen.submission.subject_sha,
                 "executed_subject_tree": frozen.submission.subject_tree,
@@ -726,7 +999,11 @@ class EvalBenchmarkService:
         run_id: str,
     ) -> dict[str, Any]:
         public = self._load_swe_public_manifest(public_manifest_path)
-        binding = self._load_swe_study_binding(study_binding_path, public)
+        binding = self._load_swe_study_binding(
+            study_binding_path,
+            public,
+            expected_kinds={"OPTIMIZATION"},
+        )
         current_identity = self.guard_authority()
         raw_guard = public.get("guard")
         if not isinstance(raw_guard, Mapping):
@@ -822,7 +1099,11 @@ class EvalBenchmarkService:
         run_id: str,
     ) -> dict[str, Any]:
         public = self._load_swe_public_manifest(public_manifest_path)
-        binding = self._load_swe_study_binding(study_binding_path, public)
+        binding = self._load_swe_study_binding(
+            study_binding_path,
+            public,
+            expected_kinds={"BASELINE", "CANDIDATE"},
+        )
         raw_guard = public.get("guard")
         if not isinstance(raw_guard, Mapping):
             raise EvalBenchmarkServiceError("SWE Guard projection is invalid")
@@ -834,7 +1115,7 @@ class EvalBenchmarkService:
                 expected_sha256=str(raw_guard.get("bundle_sha256") or ""),
                 secret=guard_secret,
                 protocol_digest=str(public["protocol_digest"]),
-                runtime_id=str(public["runtime_id"]),
+                runtime_id=str(public["guard_runtime_id"]),
             )
         except SWEGuardStoreError as exc:
             raise EvalBenchmarkServiceError(str(exc)) from exc
@@ -888,9 +1169,20 @@ class EvalBenchmarkService:
         if len(selected) != expected_count:
             raise EvalBenchmarkServiceError("SWE Guard wave selection contract is invalid")
         runner = self._swe_guard_adapter("swebench_live", guard_store)
-        if runner.runtime.runtime_id != public.get("runtime_id"):
+        if (
+            runner.runtime.runtime_id != public.get("guard_runtime_id")
+            or runner.runtime.docker_authority_digest
+            != public.get("docker_authority_digest")
+            or bundle.get("guard_runtime_id") != public.get("guard_runtime_id")
+            or bundle.get("docker_authority_digest")
+            != public.get("docker_authority_digest")
+        ):
             raise EvalBenchmarkServiceError("SWE Guard runtime identity drift")
         output = out_root.resolve()
+        if not output.is_relative_to(guard_store.root):
+            raise EvalBenchmarkServiceError(
+                "SWE Guard output must remain under the external Guard authority root"
+            )
         output.mkdir(parents=True, exist_ok=True)
         run_name = safe_component(run_id, "run_id")
         encrypted_artifacts = output / f"{run_name}.artifacts.abfg"
@@ -982,7 +1274,8 @@ class EvalBenchmarkService:
                 )
         if fatal is not None:
             raise EvalBenchmarkServiceError(
-                f"SWE Guard run failed after encrypting partial evidence: {fatal}"
+                "SWE Guard run failed; partial evidence was encrypted under "
+                "the external Guard root"
             ) from fatal
         passed = sum(1 for report in reports if report.get("resolved") is True)
         failed = len(reports) - passed
@@ -1366,6 +1659,8 @@ class EvalBenchmarkService:
                 "preparation_id": preparation_id,
                 "protocol_digest": protocol.protocol_digest,
                 "runtime_id": verified_runner.runtime.runtime_id,
+                "guard_runtime_id": live_runner.runtime.runtime_id,
+                "docker_authority_digest": live_runner.runtime.docker_authority_digest,
                 "h0_subject": protocol.h0_subject,
                 "cases": private_cases,
                 "created_at": utc_now(),
@@ -1376,7 +1671,7 @@ class EvalBenchmarkService:
             private_record,
             secret=guard_secret,
             protocol_digest=protocol.protocol_digest,
-            runtime_id=verified_runner.runtime.runtime_id,
+            runtime_id=live_runner.runtime.runtime_id,
         )
         guard_temporary.cleanup()
         prepared = record_with_digest(
@@ -1385,6 +1680,8 @@ class EvalBenchmarkService:
                 "preparation_id": preparation_id,
                 "protocol_digest": protocol.protocol_digest,
                 "runtime_id": verified_runner.runtime.runtime_id,
+                "guard_runtime_id": live_runner.runtime.runtime_id,
+                "docker_authority_digest": live_runner.runtime.docker_authority_digest,
                 "h0_subject": protocol.h0_subject,
                 "h0_tree": rev_parse(
                     self.project_root, f"{protocol.h0_subject}^{{tree}}"
@@ -1452,7 +1749,7 @@ class EvalBenchmarkService:
                 expected_sha256=str(prepared["encrypted_preparation_sha256"]),
                 secret=guard_secret,
                 protocol_digest=str(prepared["protocol_digest"]),
-                runtime_id=str(prepared["runtime_id"]),
+                runtime_id=str(prepared["guard_runtime_id"]),
             )
         except SWEGuardStoreError as exc:
             raise EvalBenchmarkServiceError(str(exc)) from exc
@@ -1463,6 +1760,9 @@ class EvalBenchmarkService:
             private.get("preparation_id") != prepared.get("preparation_id")
             or private.get("protocol_digest") != prepared.get("protocol_digest")
             or private.get("runtime_id") != prepared.get("runtime_id")
+            or private.get("guard_runtime_id") != prepared.get("guard_runtime_id")
+            or private.get("docker_authority_digest")
+            != prepared.get("docker_authority_digest")
             or private.get("h0_subject") != prepared.get("h0_subject")
             or not isinstance(private_cases, list)
             or len(private_cases) != 16
@@ -1494,6 +1794,8 @@ class EvalBenchmarkService:
                 "preparation_digest": prepared["record_digest"],
                 "protocol_digest": prepared["protocol_digest"],
                 "runtime_id": prepared["runtime_id"],
+                "guard_runtime_id": prepared["guard_runtime_id"],
+                "docker_authority_digest": prepared["docker_authority_digest"],
                 "code_identity": code_identity.to_dict(),
                 "wave_tokens": wave_tokens,
                 "private_cohort": private,
@@ -1504,7 +1806,7 @@ class EvalBenchmarkService:
             guard_bundle,
             secret=guard_secret,
             protocol_digest=str(prepared["protocol_digest"]),
-            runtime_id=str(prepared["runtime_id"]),
+            runtime_id=str(prepared["guard_runtime_id"]),
         )
         public_manifest = record_with_digest(
             {
@@ -1513,6 +1815,8 @@ class EvalBenchmarkService:
                 "preparation_digest": prepared["record_digest"],
                 "protocol_digest": prepared["protocol_digest"],
                 "runtime_id": prepared["runtime_id"],
+                "guard_runtime_id": prepared["guard_runtime_id"],
+                "docker_authority_digest": prepared["docker_authority_digest"],
                 "h0_subject": prepared["h0_subject"],
                 "h0_tree": prepared["h0_tree"],
                 "optimization_cases": list(prepared["optimization_cases"]),
@@ -2401,12 +2705,6 @@ class EvalBenchmarkService:
         report = yaml.safe_load(
             (run_dir / receipt.case_id / "report.yaml").read_text(encoding="utf-8")
         ) or {}
-        generated = (run_dir / receipt.case_id / "generated.diff").read_text(
-            encoding="utf-8"
-        )
-        gold = Path(receipt.gold_patch_path).read_text(encoding="utf-8")
-        report["gold_diff_equal"] = normalize_diff(generated) == normalize_diff(gold)
-        write_yaml(run_dir / receipt.case_id / "report.yaml", report)
         return {
             "run_dir": str(run_dir),
             "dataset": str(dataset),
@@ -2769,11 +3067,17 @@ class EvalBenchmarkService:
 
         if fatal is not None:
             raise EvalBenchmarkServiceError(
-                f"Guard run failed after encrypting partial evidence: {fatal}"
+                "Guard run failed; partial evidence was encrypted under the "
+                "external Guard root"
             ) from fatal
         passed = sum(1 for report in reports if report.get("decision") == "pass")
         failed = sum(1 for report in reports if report.get("decision") == "fail")
         errors = len(reports) - passed - failed
+        if errors:
+            raise EvalBenchmarkServiceError(
+                "Guard run contained harness errors; encrypted evidence was "
+                "retained and no metric authority was issued"
+            )
         metric = signed_metric(
             metric_payload(
                 guard_id=bundle.guard_id,

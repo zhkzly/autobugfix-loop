@@ -202,6 +202,7 @@ class SWEBenchmarkConfig:
 @dataclass(slots=True)
 class EvalGuardConfig:
     trusted_ref: str = "origin/main"
+    docker_host: str | None = None
 
 
 @dataclass(slots=True)

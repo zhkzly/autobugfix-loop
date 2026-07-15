@@ -22,6 +22,7 @@ from autobugfix.eval.benchmarks.swe_codex import (
 )
 from autobugfix.eval.benchmarks.swe_materialize import SWEMaterializedRepository
 from autobugfix.eval.benchmarks.swe_verifier import (
+    SWEDockerVisibleVerifier,
     SWEVerifierServer,
     VISIBLE_VERIFIER_COMMAND_ID,
     visible_command,
@@ -325,6 +326,12 @@ def test_codex_broker_rebuilds_trusted_role_request_and_rejects_extra_authority(
             "Autobugfix trusted test role.\n", encoding="utf-8"
         )
     backend = FakeCodexBackend(edit=False)
+    factory_calls: list[tuple[str, int, int]] = []
+
+    def backend_factory(role: str, attempt: int, sequence: int):
+        factory_calls.append((role, attempt, sequence))
+        return backend
+
     ledger = SWEExecutionLedger(2)
     socket_path = tmp_path / "codex.sock"
     with SWECodexServer(
@@ -339,6 +346,7 @@ def test_codex_broker_rebuilds_trusted_role_request_and_rejects_extra_authority(
         model="gpt-5.4-mini",
         ledger=ledger,
         backend=cast(Any, backend),
+        backend_factory=backend_factory,
     ):
         denied = request(
             socket_path,
@@ -363,6 +371,7 @@ def test_codex_broker_rebuilds_trusted_role_request_and_rejects_extra_authority(
     assert "unauthorized fields" in denied["error"]
     assert allowed["result"]["text"] == "NO_CHANGE\n"
     assert len(backend.calls) == 1
+    assert factory_calls == [("writer", 1, 1)]
     trusted = backend.calls[0]
     assert trusted.model == "gpt-5.4-mini"
     assert trusted.sandbox == "workspace-write"
@@ -390,6 +399,11 @@ def test_subject_outer_sandbox_masks_git_credentials_network_and_main_write(
 ) -> None:
     project, _ = make_service_project(tmp_path)
     subject_broker = broker(project)
+    external_guard = tmp_path / "external-guard"
+    external_guard.mkdir()
+    guard_canary = external_guard / "sealed-case-id.txt"
+    guard_canary.write_text("private-case\n", encoding="utf-8")
+    subject_broker.trusted_root = external_guard.resolve()
     subject = tmp_path / "subject"
     control = tmp_path / "isolated-control"
     target = tmp_path / "isolated-target"
@@ -399,6 +413,7 @@ def test_subject_outer_sandbox_masks_git_credentials_network_and_main_write(
         subject / ".git",
         control / ".autobugfix",
         control / ".agents",
+        control / ".autobugfix-memory",
         target / "main/.git",
         target / "remote.git",
         capability,
@@ -423,6 +438,7 @@ def test_subject_outer_sandbox_masks_git_credentials_network_and_main_write(
                 "remote_head": str(target / "remote.git/HEAD"),
                 "socket": str(socket_path),
                 "project_canary": str(project_canary),
+                "guard_canary": str(guard_canary),
             }
         ),
         encoding="utf-8",
@@ -460,6 +476,7 @@ Path(args.result).write_text(json.dumps({
     "openai_key_visible": "OPENAI_API_KEY" in os.environ,
     "codex_key_visible": "CODEX_API_KEY" in os.environ,
     "trusted_project_visible": Path(data["project_canary"]).exists(),
+    "guard_visible": Path(data["guard_canary"]).exists(),
     "wsl_docker_visible": Path("/mnt/wsl/docker-desktop-bind-mounts").exists(),
     "capability_reply": capability_reply,
 }))
@@ -504,11 +521,125 @@ Path(args.result).write_text(json.dumps({
     assert result == {
         "subject_git_visible": False,
         "main_writable": False,
-        "main_git_writable": True,
+        "main_git_writable": False,
         "remote_writable": False,
         "openai_key_visible": False,
         "codex_key_visible": False,
         "trusted_project_visible": False,
+        "guard_visible": False,
         "wsl_docker_visible": False,
         "capability_reply": "ok",
     }
+
+
+def test_subject_broker_copies_only_active_reviewed_memory(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    active = snapshot / "active/user-preferences.md"
+    approved = snapshot / "skills/approved/fix/SKILL.md"
+    pending = snapshot / "proposals/pending/patch.md"
+    for path, content in (
+        (active, "accepted memory\n"),
+        (approved, "# Accepted Skill\n"),
+        (pending, "unreviewed proposal\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    control = tmp_path / "control"
+    control.mkdir()
+
+    copied = SWESubjectBroker._copy_study_memory(snapshot, control)
+
+    assert (copied / "active/user-preferences.md").read_text() == "accepted memory\n"
+    assert (copied / "skills/approved/fix/SKILL.md").is_file()
+    assert not (copied / "proposals").exists()
+
+
+def _docker_evidence(root: Path, name: str, *, passed: bool, timed_out: bool = False):
+    step = root / name
+    step.mkdir(parents=True, exist_ok=True)
+    stdout = step / "stdout.log"
+    stderr = step / "stderr.log"
+    stdout.write_text("", encoding="utf-8")
+    stderr.write_text("", encoding="utf-8")
+    return SimpleNamespace(
+        passed=passed,
+        timed_out=timed_out,
+        exit_code=0 if passed else None if timed_out else 1,
+        stdout_path=str(stdout),
+        stderr_path=str(stderr),
+    )
+
+
+def _visible_verifier(tmp_path: Path) -> SWEDockerVisibleVerifier:
+    verifier = object.__new__(SWEDockerVisibleVerifier)
+    verifier.runtime = SimpleNamespace(
+        project_root=tmp_path,
+        config=SimpleNamespace(
+            platform="linux/amd64",
+            memory_limit="1g",
+            cpu_limit=1,
+            pids_limit=128,
+        ),
+    )
+    verifier.instance = SimpleNamespace(language="python")
+    verifier.repo = SimpleNamespace()
+    verifier.artifact_root = tmp_path / "verifier-artifacts"
+    verifier.image_id = "sha256:" + "1" * 64
+    verifier._sequence = 0
+    verifier._validate_worktree = lambda path: path.resolve()
+    return verifier
+
+
+def test_visible_verifier_timeout_is_harness_error_not_writer_feedback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _visible_verifier(tmp_path)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_verifier.diff_for_task",
+        lambda *args: "",
+    )
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def fake_step(argv, root, name, timeout_seconds):
+        del argv, timeout_seconds
+        evidence = _docker_evidence(
+            root,
+            name,
+            passed=name != "visible-command",
+            timed_out=name == "visible-command",
+        )
+        if name == "image-inspect":
+            Path(evidence.stdout_path).write_text(verifier.image_id + "\n", encoding="utf-8")
+        return evidence
+
+    verifier._docker_step = fake_step
+    result = verifier.run(worktree, tmp_path / "ignored", 30)
+
+    assert result.outcome == "harness_error"
+    assert result.exit_code == 124
+
+
+def test_visible_verifier_cleanup_failure_invalidates_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _visible_verifier(tmp_path)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_verifier.diff_for_task",
+        lambda *args: "",
+    )
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def fake_step(argv, root, name, timeout_seconds):
+        del argv, timeout_seconds
+        evidence = _docker_evidence(root, name, passed=name != "container-remove")
+        if name == "image-inspect":
+            Path(evidence.stdout_path).write_text(verifier.image_id + "\n", encoding="utf-8")
+        return evidence
+
+    verifier._docker_step = fake_step
+    with pytest.raises(SWERuntimeError, match="run is not isolated"):
+        verifier.run(worktree, tmp_path / "ignored", 30)

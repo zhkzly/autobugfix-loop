@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from autobugfix.codex_runtime import build_codex_request
-from autobugfix.git_utils import git_common_dir, git_dir
+from autobugfix.git_utils import git_common_dir
 from tests.helpers import make_service_project, run
 
 
@@ -71,9 +71,9 @@ def test_codex_runtime_mounts_only_service_owned_linked_worktree_metadata(tmp_pa
         expected_git_common_dir=git_common_dir(main),
     )
 
-    assert writer.readable_paths == (git_common_dir(main),)
-    assert writer.writable_paths == (git_dir(worktree),)
-    assert evaluator.readable_paths == (git_common_dir(main),)
+    assert writer.readable_paths == (git_common_dir(main), worktree / ".git")
+    assert writer.writable_paths == ()
+    assert evaluator.readable_paths == (git_common_dir(main), worktree / ".git")
     assert evaluator.writable_paths == ()
 
     unrelated = tmp_path / "unrelated"

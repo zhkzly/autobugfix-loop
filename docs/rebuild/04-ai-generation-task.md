@@ -55,7 +55,11 @@ autobugfix memory status
 autobugfix memory proposals
 autobugfix memory review <proposal-id>
 autobugfix memory show <proposal-id>
-autobugfix memory approve <proposal-id> --note <text>
+autobugfix memory approve <proposal-id> --note <text> \
+  --confirm-review-digest <digest-from-memory-review>
+autobugfix memory approve-skill <proposal-id> --skill-name <name> \
+  --description <one-line-text> --note <text> \
+  --confirm-review-digest <digest-from-memory-review>
 autobugfix memory reject <proposal-id> --reason <text>
 autobugfix memory lint
 autobugfix memory search <query>

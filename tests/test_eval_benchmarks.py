@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -231,6 +232,9 @@ def test_doctor_and_command_evidence_are_digest_bound(tmp_path):
     assert command.passed
     assert Path(command.stdout_path).read_text(encoding="utf-8") == "ok"
     verify_record(command.to_dict())
+    assert stat.S_IMODE((tmp_path / "command").stat().st_mode) == 0o700
+    assert stat.S_IMODE(Path(command.stdout_path).stat().st_mode) == 0o600
+    assert stat.S_IMODE(Path(command.stderr_path).stat().st_mode) == 0o600
 
     report = DoctorReport(
         adapter="defects4j",
@@ -241,6 +245,31 @@ def test_doctor_and_command_evidence_are_digest_bound(tmp_path):
     )
     assert report.passed
     verify_record(report.to_dict())
+
+
+def test_benchmark_command_strips_host_and_explicit_credentials(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "host-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "host-token")
+    command = run_command(
+        [
+            "/bin/sh",
+            "-c",
+            "printf '%s:%s:%s' \"${OPENAI_API_KEY-unset}\" "
+            "\"${GITHUB_TOKEN-unset}\" \"${SAFE_VALUE-unset}\"",
+        ],
+        cwd=tmp_path,
+        artifact_dir=tmp_path / "private-environment",
+        name="private-environment",
+        timeout_seconds=10,
+        env={"SAFE_VALUE": "visible", "CODEX_API_KEY": "explicit-secret"},
+    )
+
+    assert command.passed
+    assert Path(command.stdout_path).read_text(encoding="utf-8") == (
+        "unset:unset:visible"
+    )
 
 
 def test_guard_envelope_and_metric_reject_wrong_key_and_tampering(tmp_path):

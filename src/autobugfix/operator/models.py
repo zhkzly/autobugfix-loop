@@ -39,6 +39,7 @@ VALID_CHECKPOINT_NAMES: tuple[str, ...] = ("H0", "H_bug", "H_general")
 VALID_BUDGET_WAVES: tuple[int, ...] = (3, 8, 16)
 VALID_USAGE_STATUSES: tuple[str, ...] = ("RESERVED", "COMPLETED", "INDETERMINATE")
 VALID_STUDY_METRIC_KINDS: tuple[str, ...] = ("BASELINE", "CANDIDATE")
+VALID_STUDY_EVIDENCE_KINDS: tuple[str, ...] = ("optimization_case",)
 
 
 class OperatorModelError(ValueError):
@@ -884,6 +885,81 @@ class StudyRecord:
 
 
 @dataclass(slots=True, frozen=True)
+class StudyEvidenceRecord:
+    evidence_id: str
+    study_id: str
+    cohort_id: str
+    treatment: str
+    source_kind: str
+    subject_sha: str
+    binding_digest: str
+    source_record_digest: str
+    artifact_path: str
+    artifact_sha256: str
+    created_at: str = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.evidence_id, "evidence_id"),
+            (self.study_id, "study_id"),
+            (self.cohort_id, "cohort_id"),
+            (self.treatment, "treatment"),
+            (self.source_kind, "source_kind"),
+            (self.subject_sha, "subject_sha"),
+            (self.binding_digest, "binding_digest"),
+            (self.source_record_digest, "source_record_digest"),
+            (self.artifact_path, "artifact_path"),
+            (self.artifact_sha256, "artifact_sha256"),
+        ):
+            _required(value, name)
+        _choice(self.treatment, ("H_bug", "H_general"), "treatment")
+        _choice(self.source_kind, VALID_STUDY_EVIDENCE_KINDS, "source_kind")
+        if len(self.subject_sha) != 40:
+            raise OperatorModelError("study evidence subject_sha must be a Git SHA")
+        for value, name in (
+            (self.binding_digest, "binding_digest"),
+            (self.source_record_digest, "source_record_digest"),
+            (self.artifact_sha256, "artifact_sha256"),
+        ):
+            if len(value) != 64:
+                raise OperatorModelError(f"{name} must be sha256")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _record_dict(
+            {
+                "evidence_id": self.evidence_id,
+                "study_id": self.study_id,
+                "cohort_id": self.cohort_id,
+                "treatment": self.treatment,
+                "source_kind": self.source_kind,
+                "subject_sha": self.subject_sha,
+                "binding_digest": self.binding_digest,
+                "source_record_digest": self.source_record_digest,
+                "artifact_path": self.artifact_path,
+                "artifact_sha256": self.artifact_sha256,
+                "created_at": self.created_at,
+            }
+        )
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "StudyEvidenceRecord":
+        _verify_required_record(data)
+        return cls(
+            evidence_id=str(data["evidence_id"]),
+            study_id=str(data["study_id"]),
+            cohort_id=str(data["cohort_id"]),
+            treatment=str(data["treatment"]),
+            source_kind=str(data["source_kind"]),
+            subject_sha=str(data["subject_sha"]),
+            binding_digest=str(data["binding_digest"]),
+            source_record_digest=str(data["source_record_digest"]),
+            artifact_path=str(data["artifact_path"]),
+            artifact_sha256=str(data["artifact_sha256"]),
+            created_at=str(data.get("created_at") or utc_now()),
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class StudyMetricRecord:
     metric_id: str
     study_id: str
@@ -925,8 +1001,10 @@ class StudyMetricRecord:
                 raise OperatorModelError("candidate metric requires a budget grant and wave")
             if self.wave not in VALID_BUDGET_WAVES:
                 raise OperatorModelError("candidate metric wave is invalid")
-            if self.success_contract_passed is not True:
-                raise OperatorModelError("candidate metric must pass the success contract")
+            if not isinstance(self.success_contract_passed, bool):
+                raise OperatorModelError(
+                    "candidate metric must record the success-contract verdict"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return _record_dict({

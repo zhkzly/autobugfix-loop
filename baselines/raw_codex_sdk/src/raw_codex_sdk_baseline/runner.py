@@ -209,7 +209,9 @@ def run_case(
                     )
                     stream.flush()
                     event_count += 1
-                    method, observed_usage, observed_final = _event_fields(event_value)
+                    method, observed_usage, observed_final = _event_fields(
+                        event_value
+                    )
                     if observed_usage is not None:
                         usage = observed_usage
                     if observed_final is not None:

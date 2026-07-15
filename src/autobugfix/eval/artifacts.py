@@ -7,6 +7,7 @@ from typing import Any
 
 import yaml
 
+from autobugfix.codex_sdk import write_private_text
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -18,13 +19,15 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def write_yaml(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    path.parent.chmod(0o700)
+    write_private_text(path, yaml.safe_dump(data, sort_keys=False))
 
 
 def write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    path.parent.chmod(0o700)
+    write_private_text(path, text)
 
 
 def copy_role_skills(project_root: Path, control_root: Path) -> bool:

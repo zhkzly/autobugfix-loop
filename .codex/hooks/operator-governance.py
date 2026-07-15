@@ -50,7 +50,10 @@ def main() -> int:
     command = _command(payload)
     if not command:
         return 0
-    direct_merge = re.search(r"(?:^|[;&|]\s*)(?:\S*/)?git\s+merge\b", command)
+    direct_merge = re.search(
+        r"(?:^|[;&|]\s*)(?:\S*/)?git\s+merge(?!-base\b)\b",
+        command,
+    )
     gh_merge = re.search(r"(?:^|[;&|]\s*)gh\s+pr\s+merge\b", command)
     if direct_merge or gh_merge:
         _deny("Operator candidates must use promotion and a reviewed pull request; direct merge is blocked.")

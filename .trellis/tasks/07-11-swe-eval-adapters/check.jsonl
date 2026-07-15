@@ -1,1 +1,5 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file":".trellis/spec/backend/autobugfix-loop-harness-contract.md","reason":"Review loop boundaries, state owners, worktree isolation, and oracle noninterference."}
+{"file":".trellis/spec/backend/operator-governance-policy.md","reason":"Review trusted authority, scope classification, approvals, and promotion gates."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Review tests, error handling, portability, and maintainability."}
+{"file":".trellis/tasks/07-11-swe-eval-adapters/design.md","reason":"Check implementation against the approved benchmark architecture."}
+{"file":".trellis/tasks/07-11-swe-eval-adapters/research.md","reason":"Check upstream revisions and official scorer assumptions."}

@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from autobugfix.eval.benchmarks.models import digest_file, digest_payload
+from autobugfix.credential_guard import (
+    credential_markers,
+    redact_credential_leaks,
+    snapshot_regular_files,
+)
 from autobugfix.models import RawCodexBaselineConfig
 
 
@@ -59,12 +64,10 @@ def _private_write(path: Path, content: str) -> None:
 
 def _allowed_environment() -> dict[str, str]:
     allowed = {
-        "CODEX_API_KEY",
         "HTTPS_PROXY",
         "HTTP_PROXY",
         "LANG",
         "NO_PROXY",
-        "OPENAI_API_KEY",
         "REQUESTS_CA_BUNDLE",
         "SSL_CERT_FILE",
     }
@@ -194,6 +197,18 @@ class RawCodexProcessSandbox:
                 {
                     self.project_root,
                     self.runtime_root,
+                    *(
+                        path.resolve()
+                        for path in (
+                            Path("/home"),
+                            Path("/root"),
+                            Path("/mnt"),
+                            Path("/media"),
+                            Path("/srv"),
+                            Path("/var/lib/docker"),
+                        )
+                        if path.is_dir()
+                    ),
                     *(path.resolve() for path in hidden_roots),
                 },
                 key=lambda path: (len(path.parts), str(path)),
@@ -336,58 +351,84 @@ class RawCodexProcessSandbox:
     ) -> Path:
         destination.mkdir(parents=True, mode=0o700, exist_ok=False)
         destination.chmod(0o700)
-        source_home = self.host_home / ".codex"
-        copied_auth = False
-        for name in (
-            "auth.json",
-            "version.json",
-            "installation_id",
-            ".personality_migration",
-        ):
-            source = source_home / name
-            if not source.is_file():
-                continue
-            target = destination / name
-            target.write_bytes(source.read_bytes())
-            target.chmod(0o600)
-            copied_auth = copied_auth or name == "auth.json"
-        if not copied_auth and not (
-            os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY")
-        ):
-            raise RawCodexIsolationError(
-                "Raw Codex runner has neither bridged auth.json nor an API key"
+        try:
+            source_auth = self.host_home / ".codex/auth.json"
+            if not source_auth.is_file() or source_auth.is_symlink():
+                raise RawCodexIsolationError(
+                    "Raw Codex direct SDK treatment requires host Codex auth.json"
+                )
+            auth_descriptor = os.open(
+                destination / "auth.json",
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
             )
+            with os.fdopen(auth_descriptor, "wb") as stream:
+                stream.write(source_auth.read_bytes())
+                stream.flush()
+                os.fsync(stream.fileno())
 
-        def scalar(value: object) -> str:
-            if isinstance(value, bool):
-                return "true" if value else "false"
-            return json.dumps(value, ensure_ascii=True)
+            def scalar(value: object) -> str:
+                if isinstance(value, bool):
+                    return "true" if value else "false"
+                return json.dumps(value, ensure_ascii=True)
 
-        lines = [
-            f"model_reasoning_effort = {scalar(reasoning_effort)}",
-            "disable_response_storage = true",
-            'approval_policy = "never"',
-            'sandbox_mode = "workspace-write"',
-        ]
-        if service_tier is not None:
-            lines.append(f"service_tier = {scalar(service_tier)}")
-        lines.extend(
-            (
-                "",
-                "[features]",
-                "hooks = false",
-                "multi_agent = false",
-                "",
-                "[sandbox_workspace_write]",
-                "network_access = false",
-                "",
-                f"[projects.{json.dumps(str(worktree.resolve()))}]",
-                'trust_level = "trusted"',
-                "",
+            lines = [
+                f"model_reasoning_effort = {scalar(reasoning_effort)}",
+                "disable_response_storage = true",
+                'approval_policy = "never"',
+                'sandbox_mode = "workspace-write"',
+                "allow_login_shell = false",
+                'web_search = "disabled"',
+            ]
+            if service_tier is not None:
+                lines.append(f"service_tier = {scalar(service_tier)}")
+            lines.extend(
+                (
+                    "",
+                    "[features]",
+                    "hooks = false",
+                    "multi_agent = false",
+                    "apps = false",
+                    "browser_use = false",
+                    "browser_use_external = false",
+                    "computer_use = false",
+                    "",
+                    "[sandbox_workspace_write]",
+                    "network_access = false",
+                    "exclude_tmpdir_env_var = false",
+                    "exclude_slash_tmp = false",
+                    "",
+                    "[shell_environment_policy]",
+                    'inherit = "none"',
+                    "ignore_default_excludes = false",
+                    'include_only = ["PATH", "HOME", "LANG", "LC_*"]',
+                    "set = { "
+                    + f'PATH = {json.dumps(_allowed_environment().get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))}, '
+                    + f'HOME = {json.dumps(str(worktree.resolve()))}'
+                    + " }",
+                    "",
+                    f"[projects.{json.dumps(str(worktree.resolve()))}]",
+                    'trust_level = "trusted"',
+                    "",
+                )
             )
-        )
-        _private_write(destination / "config.toml", "\n".join(lines))
-        return destination
+            _private_write(destination / "config.toml", "\n".join(lines))
+            return destination
+        except BaseException:
+            self._scrub_codex_credentials(destination)
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+
+    @staticmethod
+    def _scrub_codex_credentials(codex_home: Path) -> None:
+        if not codex_home.is_dir():
+            return
+        for credential in codex_home.rglob("auth.json"):
+            if credential.is_symlink() or credential.is_file():
+                credential.unlink(missing_ok=True)
 
     def _sandbox_argv(
         self,
@@ -436,11 +477,13 @@ class RawCodexProcessSandbox:
             self.bwrap,
             "--die-with-parent",
             "--new-session",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
             "--ro-bind",
             "/",
             "/",
-            "--dev-bind",
-            "/dev",
+            "--dev",
             "/dev",
             "--proc",
             "/proc",
@@ -455,9 +498,6 @@ class RawCodexProcessSandbox:
                 home,
             ),
         ]
-        for authority_root in (Path("/mnt/wsl"), Path("/var/lib/docker")):
-            if authority_root.is_dir():
-                argv.extend(("--tmpfs", str(authority_root)))
         for hidden_root in self.hidden_roots:
             if hidden_root == home or not hidden_root.is_dir():
                 continue
@@ -548,14 +588,13 @@ class RawCodexProcessSandbox:
         retained_config.write_bytes(launch_config_bytes)
         retained_config.chmod(0o600)
         environment = _allowed_environment()
-        if (codex_home / "auth.json").is_file():
-            environment.pop("OPENAI_API_KEY", None)
-            environment.pop("CODEX_API_KEY", None)
         environment["CODEX_HOME"] = str(codex_home)
         environment["PATH"] = (
             f"{runner_metadata.environment / 'bin'}:"
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
+        markers = credential_markers(codex_home / "auth.json", environment)
+        worktree_before = snapshot_regular_files(worktree)
         stdout_path = artifact_root / "worker.stdout.log"
         stderr_path = artifact_root / "worker.stderr.log"
         argv = self._sandbox_argv(
@@ -576,6 +615,7 @@ class RawCodexProcessSandbox:
         stderr = ""
         return_code: int | None = None
         config_unchanged = False
+        leak_paths: tuple[Path, ...] = ()
         try:
             process = subprocess.Popen(
                 argv,
@@ -596,17 +636,29 @@ class RawCodexProcessSandbox:
                 stdout, stderr = process.communicate()
             return_code = None if timed_out else process.returncode
         finally:
-            auth_bridge = codex_home / "auth.json"
-            if auth_bridge.is_file() or auth_bridge.is_symlink():
-                auth_bridge.unlink()
             config_unchanged = (
                 launch_config.is_file()
                 and not launch_config.is_symlink()
                 and launch_config.read_bytes() == launch_config_bytes
             )
-            shutil.rmtree(codex_home, ignore_errors=False)
-        stdout_path.write_text(stdout or "", encoding="utf-8")
-        stderr_path.write_text(stderr or "", encoding="utf-8")
+            try:
+                stdout_path.write_text(stdout or "", encoding="utf-8")
+                stderr_path.write_text(stderr or "", encoding="utf-8")
+                leak_paths = redact_credential_leaks(
+                    (worktree, sdk_output_parent, stdout_path, stderr_path),
+                    markers,
+                    baseline=worktree_before,
+                )
+            finally:
+                try:
+                    self._scrub_codex_credentials(codex_home)
+                finally:
+                    shutil.rmtree(codex_home, ignore_errors=False)
+        if leak_paths:
+            raise RawCodexIsolationError(
+                "Raw Codex role attempted to publish credential material; "
+                "affected files were redacted"
+            )
         if not config_unchanged:
             raise RawCodexIsolationError(
                 "Raw Codex worker changed its trusted launch configuration"

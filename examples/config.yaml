@@ -28,6 +28,11 @@ eval:
     min_free_disk_gb: 10
     guard:
       trusted_ref: origin/main
+      # Required for human SWE Holdout operations. Use a mode-0600 unix socket
+      # inside the external Guard root for a separately administered VM daemon.
+      # The daemon must be distinct from regular Eval and publish the label
+      # autobugfix.guard.isolation=dedicated-vm-v1.
+      docker_host: null
     raw_codex:
       runner_project: baselines/raw_codex_sdk
       runtime_root: .autobugfix/raw-codex-baseline

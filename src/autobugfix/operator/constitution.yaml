@@ -56,6 +56,25 @@ loops:
     may_write: [transition_requests, diagnoses, candidate_via_writer]
     forbidden: [set_state, write_main, write_authority_store, self_approval, direct_merge]
 
+memory_authority:
+  state_owner: MemoryService
+  proposal_identity: directory_id_matches_review_metadata
+  deterministic_evidence:
+    - raw_packet_digest_matches_accepted_execution_evidence
+    - rendered_digest_matches_raw_packet
+    - proposal_patch_digest_matches_review_record
+  approval:
+    authority: interactive_human
+    required_binding: immutable_review_digest
+    self_approval: forbidden
+  filesystem:
+    authority_files: regular_files_only
+    symlink_or_path_traversal: reject
+    active_memory_read: no_follow
+  transitions:
+    approve: journaled_and_recoverable
+    reject: journaled_and_recoverable
+
 operator_roles:
   operator_supervisor:
     purpose: Diagnose failures and request legal transitions.
@@ -143,6 +162,19 @@ hook_assignments:
     trusted control root. Reopening one allowed child below a hidden authority
     root must not expose sibling authority state.
 
+execution_candidate_authority:
+  state_owner: AutobugfixService
+  writer_git_authority: read_only
+  verification_checkout: independent_clone
+  frozen_candidate:
+    binding: task_worktree_patch_sha256
+    required_before: [ppe_approval, ppe_deploy, acceptance]
+  feedback:
+    terminal_task_reopen: forbidden
+  evaluator_output:
+    schema: exact_yaml_decision_and_reason
+    malformed_or_ambiguous: needs_changes
+
 transition_contract:
   request_phases: [REQUESTED, ACTIVE, VERIFIED, CLOSED]
   commands:
@@ -200,6 +232,39 @@ experiment_governance:
     operator_store_case_level_results: forbidden
     operator_role_filesystem: absent
     allowed_release: aggregate_metric_receipt_only
+    candidate_binding_requires_terminal_line: true
+    terminalize_before_scoring: true
+    post_terminal_writer_or_scope_change: forbidden
+  visible_optimization_evidence:
+    registration_owner: trusted_operator_service
+    accepted_reference_scheme: study-evidence
+    accepted_report_schemas:
+      - autobugfix-formal-optimization-case-v1
+      - autobugfix-swe-formal-case-v1
+    generic_report_requires:
+      - real_verification_argv
+      - returncode
+      - stdout_sha256
+      - stderr_sha256
+      - noninterference_passed
+    swe_report_requires:
+      - official_result
+      - noninterference_passed
+    required_bindings:
+      - study_id
+      - cohort_id
+      - treatment
+      - subject_sha
+      - study_binding_digest
+      - source_record_digest
+    arbitrary_path_in_line_bound_request: forbidden
+    transfer_between_studies_or_treatments: forbidden
+  guard_runtime:
+    docker_authority_record: persistent_external_guard_state
+    docker_authority_change_after_qualification: reject
+    required_isolation_label: autobugfix.guard.isolation=dedicated-vm-v1
+    official_scorer_benchmark_cache: read_only
+    per_run_client_state: isolated_writable_root
   lines:
     update: compare_and_swap
     expected_inputs: [head_sha, generation]
@@ -367,6 +432,8 @@ layers:
       - src/autobugfix/codex_runtime.py
       - src/autobugfix/codex_sdk.py
       - src/autobugfix/codex_sdk_worker.py
+      - src/autobugfix/credential_guard.py
+      - src/autobugfix/study_binding.py
       - src/autobugfix/cli.py
       - src/autobugfix/controller.py
       - src/autobugfix/gradio_app.py
@@ -546,7 +613,9 @@ static_invariants:
     - hooks = false
     - multi_agent = false
     - module_names = ("openai_codex",)
-    - default_hidden.append(home)
+    - default_hidden = [Path("/run"), runtime_root]
+    - Path("/home"),
+    - Path("/srv"),
     - request.sandbox == "read-only"
     - workspace-write Codex role cannot use the trusted control root
     - Codex path cannot be both hidden and mounted

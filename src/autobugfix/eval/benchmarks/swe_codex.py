@@ -8,8 +8,9 @@ import socket
 import threading
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
+from autobugfix.codex_backend import CodexBackend
 from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.codex_runtime import build_codex_request
 from autobugfix.config import load_config
@@ -224,6 +225,7 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
         model: str,
         ledger: SWEExecutionLedger,
         backend: CodexSDKBackend | None = None,
+        backend_factory: Callable[[str, int, int], CodexBackend] | None = None,
     ) -> None:
         self.socket_path = socket_path.resolve()
         self.token = token
@@ -236,12 +238,14 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
         self.model = model
         self.ledger = ledger
         self.backend = backend or CodexSDKBackend()
+        self.backend_factory = backend_factory
         self.config = load_config(self.control_root)
         self.repo = self.config.repo(self.repo_id)
         self.common_dir = git_common_dir(self.main_checkout)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._socket: socket.socket | None = None
+        self._role_calls = {"writer": 0, "evaluator": 0}
 
     def _validate_request(self, request: Mapping[str, Any]) -> tuple[str, str, Path]:
         unknown = set(request) - self._REQUEST_KEYS
@@ -293,7 +297,13 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
         if request.model != self.model:
             raise SWERuntimeError("trusted Codex request model differs from frozen protocol")
         started_at = utc_now()
-        result = self.backend.run(request)
+        self._role_calls[role] += 1
+        backend = (
+            self.backend_factory(role, self._role_calls[role], sequence)
+            if self.backend_factory is not None
+            else self.backend
+        )
+        result = backend.run(request)
         receipt = record_with_digest(
             {
                 "schema": "autobugfix-swe-codex-call-v1",

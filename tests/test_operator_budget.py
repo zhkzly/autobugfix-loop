@@ -92,6 +92,101 @@ def initialized_study(tmp_path: Path):
     return root, service
 
 
+def test_study_rejects_arbitrary_memory_snapshot_root(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    manifest = root / "manifest.yaml"
+    manifest.write_text("cases: [case-1]\n", encoding="utf-8")
+    forged_memory = tmp_path / "oracle-as-memory"
+    forged_memory.mkdir()
+
+    with pytest.raises(OperatorGovernanceError, match="canonical approved active"):
+        service.create_study(
+            study_id="forged-memory-study",
+            purpose="Reject non-Memory evidence",
+            manifest_path=manifest,
+            success_contract={"visible_net_gain": ">0"},
+            base_ref="main",
+            memory_root=forged_memory,
+        )
+
+
+def test_study_rejects_symlinked_canonical_active_memory(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    manifest = root / "manifest.yaml"
+    manifest.write_text("cases: [case-1]\n", encoding="utf-8")
+    external = tmp_path / "external-memory"
+    external.mkdir()
+    active = root / ".autobugfix-memory/active"
+    active.parent.mkdir(parents=True)
+    active.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(OperatorGovernanceError, match="must not be a symlink"):
+        service.create_study(
+            study_id="redirected-memory-study",
+            purpose="Reject redirected Memory authority",
+            manifest_path=manifest,
+            success_contract={"visible_net_gain": ">0"},
+            base_ref="main",
+        )
+
+
+def test_study_freezes_canonical_manifest_memory_shape_and_separate_harness(
+    tmp_path: Path,
+):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    h0_sha = run(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
+    (root / "harness-marker.txt").write_text("trusted harness\n", encoding="utf-8")
+    run(["git", "add", "harness-marker.txt"], cwd=root)
+    run(["git", "commit", "-m", "advance trusted harness"], cwd=root)
+    harness_sha = run(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
+
+    memory_root = root / ".autobugfix-memory"
+    active = memory_root / "active/user-preferences.md"
+    skill = memory_root / "skills/approved/retry/SKILL.md"
+    pending = memory_root / "proposals/pending/patch.md"
+    for path, content in (
+        (active, "approved preference\n"),
+        (skill, "# Approved retry skill\n"),
+        (pending, "unreviewed\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    manifest_payload = {
+        "schema": "autobugfix-swe-sealed-manifest-v1",
+        "h0_subject": h0_sha,
+        "h0_tree": run(["git", "rev-parse", f"{h0_sha}^{{tree}}"], cwd=root).stdout.strip(),
+    }
+    manifest = root / "sealed.yaml"
+    manifest.write_text(
+        yaml.safe_dump(
+            {**manifest_payload, "record_digest": digest_payload(manifest_payload)},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    study = service.create_study(
+        study_id="frozen-shape-study",
+        purpose="Freeze exact H0 treatment inputs",
+        manifest_path=manifest,
+        success_contract={"visible_net_gain": ">0"},
+        base_ref=h0_sha,
+        harness_ref=harness_sha,
+    )
+    snapshot = Path(study.memory_snapshot_path)
+
+    assert study.base_subject_sha == h0_sha
+    assert study.harness_sha == harness_sha
+    assert study.manifest_digest == digest_payload(manifest_payload)
+    assert (snapshot / "active/user-preferences.md").read_text() == "approved preference\n"
+    assert (snapshot / "skills/approved/retry/SKILL.md").is_file()
+    assert not (snapshot / "proposals").exists()
+
+
 def test_signed_guard_metric_is_bound_to_study_harness_and_initializes_h0(
     tmp_path: Path,
 ):
@@ -243,6 +338,32 @@ def test_budget_requires_digest_bound_human_grant_and_ordered_expansion(tmp_path
     )
     assert wave_eight.previous_grant_id == grant.grant_id
     assert set(grant.case_ids).issubset(wave_eight.case_ids)
+
+
+def test_optimization_binding_admits_only_current_grant_cases_and_wave(
+    tmp_path: Path,
+) -> None:
+    _, service = initialized_study(tmp_path)
+    _, grant = grant_wave_three(service)
+    binding = service.guard_study_binding("budget-study", kind="OPTIMIZATION")
+
+    assert service.validate_optimization_case_binding(
+        binding,
+        case_id="case-1",
+        first_wave=3,
+    ) == grant
+    with pytest.raises(OperatorGovernanceError, match="trusted budget wave"):
+        service.validate_optimization_case_binding(
+            binding,
+            case_id="case-not-granted",
+            first_wave=3,
+        )
+    with pytest.raises(OperatorGovernanceError, match="trusted budget wave"):
+        service.validate_optimization_case_binding(
+            binding,
+            case_id="case-1",
+            first_wave=8,
+        )
 
 
 def test_budget_approval_cli_rejects_noninteractive_operator(

@@ -35,6 +35,13 @@ data, and case-level failures are external Guard-only state and must not enter
 Operator storage. The Supervisor may request a transition but cannot approve a
 grant, integrate, register metrics, create a checkpoint, or activate a release.
 
+For a visible SWE Optimization case, the granted `case_ids` are official
+benchmark instance IDs and `first_wave` must not exceed the current grant.
+Use only a registered evidence reference whose case token maps to the frozen
+Study manifest and whose pinned official scorer command, stdout/stderr, report,
+and noninterference digests were admitted by the trusted service. A YAML claim
+or copied score is not diagnosis evidence.
+
 The project Operator hook belongs to the external `operator_host`; this SDK
 Supervisor does not load it and is constrained by its read-only role. Hooks are
 accident prevention, not authority. Promotion requires a clean

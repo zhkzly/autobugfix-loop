@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypeVar
 
@@ -28,6 +29,7 @@ from autobugfix.operator.models import (
     OperatorRequest,
     OperatorTriage,
     ScopeRevision,
+    StudyEvidenceRecord,
     StudyMetricRecord,
     StudyRecord,
     UsageEntryRecord,
@@ -42,7 +44,7 @@ class OperatorStoreError(RuntimeError):
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 T = TypeVar("T")
 
 
@@ -195,6 +197,14 @@ class OperatorStore:
         );
         CREATE INDEX IF NOT EXISTS study_metrics_study_idx
           ON study_metrics(study_id, kind, created_at);
+        CREATE TABLE IF NOT EXISTS study_evidence (
+          evidence_id TEXT PRIMARY KEY, study_id TEXT NOT NULL,
+          cohort_id TEXT NOT NULL, treatment TEXT NOT NULL,
+          source_kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL,
+          FOREIGN KEY(study_id) REFERENCES studies(study_id)
+        );
+        CREATE INDEX IF NOT EXISTS study_evidence_study_idx
+          ON study_evidence(study_id, treatment, source_kind, created_at);
         CREATE TABLE IF NOT EXISTS experiment_lines (
           line_id TEXT PRIMARY KEY, study_id TEXT UNIQUE NOT NULL, branch TEXT UNIQUE NOT NULL,
           head_sha TEXT NOT NULL, generation INTEGER NOT NULL, status TEXT NOT NULL,
@@ -731,6 +741,97 @@ class OperatorStore:
             rows = connection.execute("SELECT data FROM studies ORDER BY created_at,study_id").fetchall()
         return [StudyRecord.from_dict(json.loads(str(row["data"]))) for row in rows]
 
+    def write_study_evidence_artifact(
+        self,
+        content: bytes,
+        *,
+        study_id: str,
+        filename: str,
+    ) -> tuple[Path, str]:
+        identifier = safe_id(study_id)
+        filename = Path(filename).name
+        sha = hashlib.sha256(content).hexdigest()
+        path = (
+            self.artifact_root
+            / "study-evidence"
+            / identifier
+            / sha[:2]
+            / sha
+            / filename
+        )
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if path.exists():
+            if path.is_symlink() or path.read_bytes() != content:
+                raise OperatorStoreError(
+                    f"content-addressed study evidence collision: {sha}"
+                )
+        else:
+            temporary = path.with_name(f".{filename}.{uuid.uuid4().hex}.tmp")
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(path)
+        return path.resolve(), sha
+
+    def write_study_evidence(self, evidence: StudyEvidenceRecord) -> None:
+        artifact = Path(evidence.artifact_path).resolve()
+        expected_root = (self.artifact_root / "study-evidence").resolve()
+        if not artifact.is_relative_to(expected_root):
+            raise OperatorStoreError(
+                "study evidence artifact escaped configured authority root"
+            )
+        if not artifact.is_file() or artifact.is_symlink():
+            raise OperatorStoreError("study evidence artifact is missing or redirected")
+        if hashlib.sha256(artifact.read_bytes()).hexdigest() != evidence.artifact_sha256:
+            raise OperatorStoreError("study evidence artifact digest mismatch")
+        self._insert(
+            "study_evidence",
+            "evidence_id",
+            evidence.evidence_id,
+            evidence.to_dict(),
+            study_id=evidence.study_id,
+            cohort_id=evidence.cohort_id,
+            treatment=evidence.treatment,
+            source_kind=evidence.source_kind,
+        )
+
+    def read_study_evidence(self, evidence_id: str) -> StudyEvidenceRecord:
+        evidence = StudyEvidenceRecord.from_dict(
+            self._read("study_evidence", "evidence_id", safe_id(evidence_id))
+        )
+        artifact = Path(evidence.artifact_path).resolve()
+        expected_root = (self.artifact_root / "study-evidence").resolve()
+        if (
+            not artifact.is_relative_to(expected_root)
+            or not artifact.is_file()
+            or artifact.is_symlink()
+        ):
+            raise OperatorStoreError("study evidence authority artifact is invalid")
+        if hashlib.sha256(artifact.read_bytes()).hexdigest() != evidence.artifact_sha256:
+            raise OperatorStoreError("study evidence artifact digest mismatch")
+        return evidence
+
+    def read_study_evidence_for_study(
+        self,
+        study_id: str,
+    ) -> list[StudyEvidenceRecord]:
+        self.init()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT evidence_id FROM study_evidence WHERE study_id = ? "
+                "ORDER BY created_at,evidence_id",
+                (safe_id(study_id),),
+            ).fetchall()
+        return [
+            self.read_study_evidence(str(row["evidence_id"])) for row in rows
+        ]
+
     def write_study_metric_artifact(
         self,
         content: bytes,
@@ -771,6 +872,50 @@ class OperatorStore:
             line_id=metric.line_id,
             kind=metric.kind,
         )
+
+    def close_experiment_line(
+        self,
+        line_id: str,
+        *,
+        expected_head_sha: str,
+        expected_generation: int,
+    ) -> ExperimentLineRecord:
+        """Terminalize a Study line before any Holdout score becomes observable."""
+
+        self.init()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current, _ = self._read_experiment_line_row(connection, safe_id(line_id))
+            if current.status != "OPEN":
+                raise OperatorStoreError("only an open experiment line can be closed")
+            if (
+                current.head_sha != expected_head_sha
+                or current.generation != expected_generation
+            ):
+                raise OperatorStoreError("stale experiment line compare-and-swap")
+            closed = replace(
+                current,
+                generation=current.generation + 1,
+                status="CLOSED",
+            )
+            result = connection.execute(
+                "UPDATE experiment_lines SET head_sha = ?, generation = ?, status = ?, data = ? "
+                "WHERE line_id = ? AND head_sha = ? AND generation = ? AND status = 'OPEN'",
+                (
+                    closed.head_sha,
+                    closed.generation,
+                    closed.status,
+                    _dump(closed.to_dict()),
+                    closed.line_id,
+                    expected_head_sha,
+                    expected_generation,
+                ),
+            )
+            if result.rowcount != 1:
+                connection.rollback()
+                raise OperatorStoreError("stale experiment line compare-and-swap")
+            connection.commit()
+        return closed
 
     def read_study_metric(self, metric_id: str) -> StudyMetricRecord:
         metric = StudyMetricRecord.from_dict(

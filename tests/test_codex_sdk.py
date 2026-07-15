@@ -10,13 +10,48 @@ from pathlib import Path
 import pytest
 
 from autobugfix.codex_sdk import CodexSDKBackend, CodexSDKError
-from autobugfix.git_utils import git_common_dir, git_dir
+from autobugfix.credential_guard import credential_markers, redact_credential_leaks
+from autobugfix.git_utils import git_common_dir
 from autobugfix.models import CodexRequest, CodexResult
 
 
 def write_project_config(root: Path) -> None:
     (root / ".autobugfix").mkdir(exist_ok=True)
     (root / ".autobugfix/config.yaml").write_text("{}\n", encoding="utf-8")
+
+
+def test_credential_guard_distinguishes_secrets_from_auth_metadata(tmp_path: Path) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "id_token": "identity-token-must-not-escape",
+                    "access_token": "access-token-must-not-escape",
+                    "refresh_token": "refresh-token-must-not-escape",
+                    "account_id": "account-id-is-sdk-event-metadata",
+                },
+                "last_refresh": "2026-07-15T00:00:00Z",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    markers = credential_markers(auth_path, {})
+    assert auth_path.read_bytes() in markers
+
+    metadata = tmp_path / "metadata.log"
+    metadata.write_text(
+        "account-id-is-sdk-event-metadata 2026-07-15T00:00:00Z\n",
+        encoding="utf-8",
+    )
+    assert redact_credential_leaks((metadata,), markers) == ()
+
+    leaked = tmp_path / "leaked.log"
+    leaked.write_text("access-token-must-not-escape\n", encoding="utf-8")
+    assert redact_credential_leaks((leaked,), markers) == (leaked.resolve(),)
+    assert "access-token-must-not-escape" not in leaked.read_text(encoding="utf-8")
 
 
 def test_codex_sdk_preview_api_parameter_passing(tmp_path, monkeypatch):
@@ -85,6 +120,7 @@ def test_production_sdk_backend_runs_in_bounded_worker_process(tmp_path, monkeyp
 import os
 import time
 import types
+from pathlib import Path
 
 class Sandbox(str):
     pass
@@ -105,6 +141,10 @@ class Thread:
             return types.SimpleNamespace(
                 final_response=os.environ.get("UNRELATED_TOKEN", "absent")
             )
+        if prompt == "leak-auth":
+            secret = (Path(os.environ["CODEX_HOME"]) / "auth.json").read_text()
+            (Path(kwargs["cwd"]) / "leaked-auth.txt").write_text(secret)
+            return types.SimpleNamespace(final_response=secret)
         return types.SimpleNamespace(final_response="worker-done")
 
 class Codex:
@@ -155,6 +195,18 @@ class Codex:
     ):
         assert artifact.stat().st_mode & 0o077 == 0
     assert backend.run(request("environment", "environment", 5)).text == "absent"
+
+    source_home = tmp_path / "source-home/.codex"
+    source_home.mkdir(parents=True)
+    (source_home / "auth.json").write_text(
+        '{"token":"credential-must-not-escape"}', encoding="utf-8"
+    )
+    monkeypatch.setenv("HOME", str(source_home.parent))
+    with pytest.raises(CodexSDKError, match="credential material"):
+        backend.run(request("leak-auth", "leak-auth", 5))
+    assert "credential-must-not-escape" not in (
+        worktree / "leaked-auth.txt"
+    ).read_text(encoding="utf-8")
 
     with pytest.raises(CodexSDKError, match="timed out after 1 seconds"):
         backend.run(request("sleep", "timeout", 1))
@@ -244,6 +296,13 @@ def test_runtime_bridge_sanitizes_user_config_and_legacy_effort(tmp_path, monkey
     assert 'model_reasoning_effort = "medium"' in text
     assert "hooks = false" in text
     assert "multi_agent = false" in text
+    assert 'approval_policy = "never"' in text
+    assert 'sandbox_mode = "workspace-write"' in text
+    assert "allow_login_shell = false" in text
+    assert 'web_search = "disabled"' in text
+    assert "network_access = false" in text
+    assert 'inherit = "none"' in text
+    assert 'HOME = ' + json.dumps(str(project.resolve())) in text
     assert "mcp_servers" not in text
     assert "service_tier" not in text
     assert "secret-value" not in text
@@ -300,7 +359,87 @@ def test_worker_scrubs_bridged_auth_after_success_or_failure(
         backend.run(request)
 
     assert observed_home is not None
-    assert not (observed_home / "auth.json").exists()
+    assert not observed_home.exists()
+
+
+def test_worker_scrubs_bridged_auth_when_process_start_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    source_home = home / ".codex"
+    source_home.mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"token":"secret"}', encoding="utf-8")
+    project = tmp_path / "project"
+    worktree = project / "worktree"
+    worktree.mkdir(parents=True)
+    write_project_config(project)
+    monkeypatch.setenv("HOME", str(home))
+    request = CodexRequest(
+        role="writer",
+        prompt="prompt",
+        cwd=worktree,
+        control_root=project,
+        sandbox="workspace-write",
+        model="m",
+        timeout_seconds=30,
+        developer_instructions="instructions",
+        raw_log_path=project / "logs/raw.jsonl",
+        stderr_log_path=project / "logs/stderr.log",
+        approval_mode="auto_review",
+    )
+    monkeypatch.setattr(
+        "autobugfix.codex_sdk.subprocess.Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("cannot start")),
+    )
+
+    with pytest.raises(OSError, match="cannot start"):
+        CodexSDKBackend().run(request)
+
+    calls = project / ".autobugfix/runtime/codex-sdk/calls"
+    assert not calls.exists() or not list(calls.iterdir())
+
+
+def test_runtime_home_is_removed_when_preparation_fails_after_auth_bridge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    source_home = home / ".codex"
+    source_home.mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"token":"secret"}', encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    write_project_config(project)
+    monkeypatch.setenv("HOME", str(home))
+    request = CodexRequest(
+        role="writer",
+        prompt="prompt",
+        cwd=project,
+        control_root=project,
+        sandbox="read-only",
+        model="m",
+        timeout_seconds=30,
+        developer_instructions="instructions",
+        raw_log_path=project / "raw.jsonl",
+        stderr_log_path=project / "stderr.log",
+        approval_mode="deny_all",
+    )
+    real_write = __import__("autobugfix.codex_sdk", fromlist=["write_private_text"]).write_private_text
+
+    def fail_config(path, *args, **kwargs):
+        if Path(path).name == "config.tmp":
+            raise OSError("cannot write config")
+        return real_write(path, *args, **kwargs)
+
+    monkeypatch.setattr("autobugfix.codex_sdk.write_private_text", fail_config)
+
+    with pytest.raises(OSError, match="cannot write config"):
+        CodexSDKBackend()._runtime_env(request)
+
+    calls = project / ".autobugfix/runtime/codex-sdk/calls"
+    assert calls.is_dir()
+    assert list(calls.iterdir()) == []
 
 
 def test_target_worktree_config_cannot_override_trusted_control_runtime(tmp_path, monkeypatch):
@@ -462,7 +601,7 @@ def test_worker_bubblewrap_enforces_read_only_cwd_and_hides_home(tmp_path):
     assert not (worktree / "forbidden.txt").exists()
 
 
-def test_worker_bubblewrap_reopens_only_current_log_dir_under_hidden_authority(
+def test_worker_bubblewrap_keeps_all_task_logs_outside_role_sandbox(
     tmp_path,
 ):
     if shutil.which("bwrap") is None:
@@ -497,7 +636,7 @@ def test_worker_bubblewrap_reopens_only_current_log_dir_under_hidden_authority(
             "from pathlib import Path; "
             f"log = Path({str(log_root / 'worker.txt')!r}); "
             f"secret = Path({str(sibling_secret)!r}); "
-            "log.write_text('visible'); print(log.exists()); print(secret.exists())"
+            "print(log.parent.exists()); print(secret.exists())"
         ),
     ]
     result = subprocess.run(
@@ -509,8 +648,60 @@ def test_worker_bubblewrap_reopens_only_current_log_dir_under_hidden_authority(
         check=True,
     )
 
+    assert result.stdout.splitlines() == ["False", "False"]
+    assert not (log_root / "worker.txt").exists()
+
+
+def test_worker_bubblewrap_mounts_only_current_codex_call_home(tmp_path):
+    if shutil.which("bwrap") is None:
+        pytest.skip("bubblewrap is unavailable")
+    control = tmp_path / "control"
+    worktree = control / "worktree"
+    worktree.mkdir(parents=True)
+    write_project_config(control)
+    runtime = control / ".autobugfix/runtime/codex-sdk"
+    current = runtime / "calls/current"
+    sibling = runtime / "calls/sibling"
+    current.mkdir(parents=True)
+    sibling.mkdir(parents=True)
+    (current / "auth.json").write_text("current\n", encoding="utf-8")
+    (sibling / "auth.json").write_text("sibling\n", encoding="utf-8")
+    request = CodexRequest(
+        role="writer",
+        prompt="inspect call isolation",
+        cwd=worktree,
+        control_root=control,
+        sandbox="workspace-write",
+        model="m",
+        timeout_seconds=10,
+        developer_instructions="dev",
+        raw_log_path=control / "logs/raw.jsonl",
+        stderr_log_path=control / "logs/stderr.log",
+        approval_mode="auto_review",
+    )
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            f"print(Path({str(current / 'auth.json')!r}).exists()); "
+            f"print(Path({str(sibling / 'auth.json')!r}).exists())"
+        ),
+    ]
+    result = subprocess.run(
+        CodexSDKBackend().worker_launch_argv(
+            request,
+            command,
+            call_home=current,
+        ),
+        cwd=control,
+        env=CodexSDKBackend.worker_environment(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
     assert result.stdout.splitlines() == ["True", "False"]
-    assert (log_root / "worker.txt").read_text(encoding="utf-8") == "visible"
 
 
 def test_worker_rejects_workspace_write_at_trusted_control_root(tmp_path):
@@ -603,13 +794,12 @@ def test_worker_bubblewrap_restores_only_linked_worktree_git_metadata(tmp_path):
         stderr_log_path=control / "logs/stderr.log",
         approval_mode="auto_review",
         hidden_paths=(cache_root,),
-        readable_paths=(git_common_dir(main),),
-        writable_paths=(git_dir(worktree),),
+        readable_paths=(git_common_dir(main), worktree / ".git"),
     )
     backend = CodexSDKBackend()
     payload = backend.worker_request_payload(request)
-    assert payload["readable_paths"] == [str(git_common_dir(main))]
-    assert payload["writable_paths"] == [str(git_dir(worktree))]
+    assert payload["readable_paths"] == [str(git_common_dir(main)), str(worktree / ".git")]
+    assert payload["writable_paths"] == []
     command = [
         sys.executable,
         "-c",
@@ -624,8 +814,10 @@ def test_worker_bubblewrap_restores_only_linked_worktree_git_metadata(tmp_path):
             "'--porcelain'], text=True, capture_output=True); "
             "diff = subprocess.run(['git', '-C', str(worktree), 'diff', "
             "'--name-only'], text=True, capture_output=True); "
+            "index = subprocess.run(['git', '-C', str(worktree), 'update-index', "
+            "'--skip-worktree', 'source.py'], text=True, capture_output=True); "
             "print(before.returncode); print(after.returncode); "
-            "print(diff.stdout.strip()); print(gold.exists())"
+            "print(diff.stdout.strip()); print(index.returncode); print(gold.exists())"
         ),
     ]
     result = subprocess.run(
@@ -637,7 +829,7 @@ def test_worker_bubblewrap_restores_only_linked_worktree_git_metadata(tmp_path):
         check=True,
     )
 
-    assert result.stdout.splitlines() == ["0", "0", "source.py", "False"]
+    assert result.stdout.splitlines() == ["0", "0", "source.py", "128", "False"]
     assert subprocess.run(
         ["git", "-C", str(main), "status", "--porcelain"],
         text=True,

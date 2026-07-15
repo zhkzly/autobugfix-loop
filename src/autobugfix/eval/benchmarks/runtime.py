@@ -12,6 +12,39 @@ from autobugfix.eval.benchmarks.models import CommandEvidence, canonical_json, d
 from autobugfix.models import utc_now
 
 
+_SENSITIVE_ENV_FRAGMENTS = (
+    "API_KEY",
+    "AUTH",
+    "CREDENTIAL",
+    "PASSWORD",
+    "PRIVATE_KEY",
+    "SECRET",
+    "TOKEN",
+)
+
+
+def _safe_environment(source: Mapping[str, str]) -> dict[str, str]:
+    """Remove host credentials from every benchmark subprocess environment."""
+
+    safe: dict[str, str] = {}
+    for key, value in source.items():
+        normalized = str(key).upper()
+        if normalized == "SSH_AUTH_SOCK" or any(
+            fragment in normalized for fragment in _SENSITIVE_ENV_FRAGMENTS
+        ):
+            continue
+        safe[str(key)] = str(value)
+    return safe
+
+
+def _write_private_text(path: Path, value: str) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(value)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def run_command(
     argv: Sequence[str],
     *,
@@ -26,14 +59,15 @@ def run_command(
         raise ValueError("benchmark command argv must not be empty")
     if timeout_seconds < 1:
         raise ValueError("benchmark command timeout must be positive")
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    artifact_dir.chmod(0o700)
     stdout_path = artifact_dir / "stdout.log"
     stderr_path = artifact_dir / "stderr.log"
     if stdout_path.exists() or stderr_path.exists():
         raise ValueError(f"benchmark command artifact directory is not fresh: {artifact_dir}")
-    command_env = dict(os.environ) if inherit_env else {}
+    command_env = _safe_environment(os.environ) if inherit_env else {}
     if env:
-        command_env.update({str(key): str(value) for key, value in env.items()})
+        command_env.update(_safe_environment(env))
     captured_env = {
         key: command_env[key]
         for key in sorted(command_env)
@@ -93,8 +127,8 @@ def run_command(
                 pass
             stdout, stderr = process.communicate()
         stderr += f"\ncommand timed out after {timeout_seconds} seconds\n"
-    stdout_path.write_text(stdout, encoding="utf-8")
-    stderr_path.write_text(stderr, encoding="utf-8")
+    _write_private_text(stdout_path, stdout)
+    _write_private_text(stderr_path, stderr)
     return CommandEvidence(
         name=name,
         argv=tuple(str(item) for item in argv),

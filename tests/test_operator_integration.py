@@ -15,6 +15,7 @@ from tests.test_operator_budget import (
 from tests.test_operator_policy import (
     OperatorBackend,
     make_operator_repo,
+    register_optimization_evidence,
     run,
     write_control_config,
     write_test_policy,
@@ -28,11 +29,16 @@ def verified_line_candidate(tmp_path: Path):
 
 def prepare_verified_line(root: Path, service: OperatorGovernanceService):
     _, grant = grant_wave_three(service)
+    evidence_reference = register_optimization_evidence(
+        service,
+        root,
+        "budget-study",
+    )
     triage = service.create_triage(
         triage_id="integration-triage",
         summary="Eval orchestration fails on visible benchmark evidence",
         suspected_layers=("eval",),
-        evidence=("evidence/report.yaml",),
+        evidence=(evidence_reference,),
         creator="operator",
         confidence="high",
     )
@@ -97,11 +103,16 @@ def verified_candidate_with_integration_guard(tmp_path: Path):
         metric_receipt_id=metric.metric_id,
     )
     _, grant = grant_wave_three(service)
+    evidence_reference = register_optimization_evidence(
+        service,
+        root,
+        "budget-study",
+    )
     triage = service.create_triage(
         triage_id="integration-triage",
         summary="Eval orchestration fails on visible benchmark evidence",
         suspected_layers=("eval",),
-        evidence=("evidence/report.yaml",),
+        evidence=(evidence_reference,),
         creator="operator",
         confidence="high",
     )

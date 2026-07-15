@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import stat
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,11 +11,19 @@ import yaml
 from autobugfix.operator.models import digest_payload
 from autobugfix.operator.service import OperatorGovernanceError, OperatorGovernanceService
 from autobugfix.operator.store import OperatorStoreError
-from tests.test_operator_budget import register_h0_metric
-from tests.test_operator_integration import prepare_verified_line, verified_line_candidate
+from tests.test_operator_budget import (
+    grant_wave_three,
+    initialized_study,
+    register_h0_metric,
+)
+from tests.test_operator_integration import (
+    prepare_verified_line,
+    verified_line_candidate,
+)
 from tests.test_operator_policy import (
     OperatorBackend,
     make_operator_repo,
+    register_optimization_evidence,
     run,
     write_control_config,
     write_test_policy,
@@ -55,8 +64,13 @@ def write_metric_receipt_source(
 
 
 def register_metric_receipt(service, line_id: str, path: Path):
-    write_metric_receipt_source(service, line_id, path)
     study_id = service.store.read_experiment_line(line_id).study_id
+    service.guard_study_binding(
+        study_id,
+        kind="CANDIDATE",
+        terminalize=True,
+    )
+    write_metric_receipt_source(service, line_id, path)
     return service.register_guard_metric_receipt(
         study_id,
         receipt_path=path,
@@ -68,6 +82,106 @@ def integrated_study(tmp_path: Path):
     root, service, request, grant = verified_line_candidate(tmp_path)
     service.integrate_candidate(request.request_id, grant_id=grant.grant_id)
     return root, service, request, grant
+
+
+def test_candidate_guard_binding_closes_line_before_any_score_is_available(
+    tmp_path: Path,
+) -> None:
+    _, service, request, _ = integrated_study(tmp_path)
+    before = service.store.read_experiment_line("budget-study")
+    assert before.status == "OPEN"
+
+    binding = service.guard_study_binding(
+        "budget-study",
+        kind="CANDIDATE",
+        terminalize=True,
+    )
+
+    closed = service.store.read_experiment_line("budget-study")
+    assert binding["line_status"] == "CLOSED"
+    assert binding["line_generation"] == before.generation + 1
+    assert closed.status == "CLOSED"
+    assert closed.generation == binding["line_generation"]
+    assert not [
+        metric
+        for metric in service.store.read_study_metrics("budget-study")
+        if metric.kind == "CANDIDATE"
+    ]
+    triage = service.create_triage(
+        summary="Attempt to continue after Holdout terminalization",
+        suspected_layers=("eval",),
+        evidence=request.evidence,
+        creator="operator",
+    )
+    with pytest.raises(OperatorGovernanceError, match="line is not open"):
+        service.create_request(
+            triage_id=triage.triage_id,
+            summary="Forbidden post-Holdout tuning",
+            primary_layer="eval",
+            planned_paths=("src/autobugfix/eval/runner.py",),
+            validation_profiles=("eval",),
+            experiment_line_id="budget-study",
+            budget_grant_id=request.budget_grant_id,
+        )
+
+
+def test_line_bound_request_rejects_cross_treatment_study_evidence(
+    tmp_path: Path,
+) -> None:
+    root, service = initialized_study(tmp_path)
+    _, grant = grant_wave_three(service)
+    reference = register_optimization_evidence(service, root, "budget-study")
+    original = service.store.read_study_evidence(reference.split(":", 1)[1])
+    foreign = replace(
+        original,
+        evidence_id="study-evidence-foreign-treatment",
+        treatment="H_general",
+    )
+    service.store.write_study_evidence(foreign)
+    triage = service.create_triage(
+        summary="Cross-treatment evidence must not flow into Writer",
+        suspected_layers=("eval",),
+        evidence=(service.study_evidence_reference(foreign),),
+        creator="operator",
+    )
+
+    with pytest.raises(OperatorGovernanceError, match="another Study, treatment"):
+        service.create_request(
+            triage_id=triage.triage_id,
+            summary="Reject contaminated treatment evidence",
+            primary_layer="eval",
+            planned_paths=("src/autobugfix/eval/runner.py",),
+            validation_profiles=("eval",),
+            experiment_line_id="budget-study",
+            budget_grant_id=grant.grant_id,
+        )
+
+
+def test_line_bound_request_revalidates_registered_evidence_artifact(
+    tmp_path: Path,
+) -> None:
+    root, service = initialized_study(tmp_path)
+    _, grant = grant_wave_three(service)
+    reference = register_optimization_evidence(service, root, "budget-study")
+    record = service.store.read_study_evidence(reference.split(":", 1)[1])
+    Path(record.artifact_path).write_text("forged: true\n", encoding="utf-8")
+    triage = service.create_triage(
+        summary="Tampered evidence must fail closed",
+        suspected_layers=("eval",),
+        evidence=(reference,),
+        creator="operator",
+    )
+
+    with pytest.raises(OperatorStoreError, match="artifact digest mismatch"):
+        service.create_request(
+            triage_id=triage.triage_id,
+            summary="Reject tampered evidence",
+            primary_layer="eval",
+            planned_paths=("src/autobugfix/eval/runner.py",),
+            validation_profiles=("eval",),
+            experiment_line_id="budget-study",
+            budget_grant_id=grant.grant_id,
+        )
 
 
 def test_checkpoint_freezes_release_digests_and_h0_lineage(tmp_path: Path):
@@ -103,7 +217,8 @@ def test_checkpoint_freezes_release_digests_and_h0_lineage(tmp_path: Path):
         service.project_root,
     ).stdout.strip()
     assert line.active_checkpoint_id == checkpoint.checkpoint_id
-    assert line.generation == 2
+    assert line.generation == 3
+    assert line.status == "CLOSED"
     assert release.is_dir()
     assert not (release / ".git").exists()
     assert not (release.stat().st_mode & stat.S_IWUSR)
@@ -113,6 +228,11 @@ def test_checkpoint_freezes_release_digests_and_h0_lineage(tmp_path: Path):
 
 def test_checkpoint_rejects_forged_or_failed_metric_receipt(tmp_path: Path):
     _, service, _, _ = integrated_study(tmp_path)
+    service.guard_study_binding(
+        "budget-study",
+        kind="CANDIDATE",
+        terminalize=True,
+    )
     metric = write_metric_receipt_source(
         service,
         "budget-study",
@@ -132,12 +252,21 @@ def test_checkpoint_rejects_forged_or_failed_metric_receipt(tmp_path: Path):
     payload = {key: value for key, value in data.items() if key != "receipt_digest"}
     data["receipt_digest"] = digest_payload(payload)
     metric.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-    with pytest.raises(OperatorGovernanceError, match="did not pass"):
-        service.register_guard_metric_receipt(
+    failed_metric = service.register_guard_metric_receipt(
+        "budget-study",
+        receipt_path=metric,
+        kind="CANDIDATE",
+    )
+    line = service.store.read_experiment_line("budget-study")
+    assert failed_metric.success_contract_passed is False
+    assert line.status == "CLOSED"
+    with pytest.raises(OperatorGovernanceError, match="did not satisfy"):
+        service.create_checkpoint(
             "budget-study",
-            receipt_path=metric,
-            kind="CANDIDATE",
+            metric_receipt_id=failed_metric.metric_id,
         )
+    with pytest.raises(OperatorGovernanceError, match="already registered"):
+        service.guard_study_binding("budget-study", kind="CANDIDATE")
 
 
 def test_checkpoint_rejects_tampered_registered_metric_artifact(tmp_path: Path):
@@ -155,6 +284,11 @@ def test_checkpoint_rejects_tampered_registered_metric_artifact(tmp_path: Path):
 
 def test_guard_metric_registration_rejects_case_level_payload(tmp_path: Path):
     _, service, _, _ = integrated_study(tmp_path)
+    service.guard_study_binding(
+        "budget-study",
+        kind="CANDIDATE",
+        terminalize=True,
+    )
     path = write_metric_receipt_source(
         service,
         "budget-study",

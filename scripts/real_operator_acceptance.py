@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -66,6 +67,27 @@ def acceptance_commands() -> list[dict[str, object]]:
     ]
 
 
+def baseline_commands() -> list[dict[str, object]]:
+    """Checks that must pass on both H0 and every candidate revision."""
+    return [
+        {
+            "name": "operator-acceptance-compile",
+            "argv": [sys.executable, "-m", "compileall", "-q", "src", "tests"],
+        },
+        {
+            "name": "case-id-stable-input-contract",
+            "argv": [
+                sys.executable,
+                "-c",
+                (
+                    "from autobugfix.eval.runner import normalize_case_id; "
+                    "assert normalize_case_id('Already') == 'already'"
+                ),
+            ],
+        },
+    ]
+
+
 def register_guard_metric(
     service: OperatorGovernanceService,
     study_id: str,
@@ -115,6 +137,54 @@ def register_guard_metric(
         receipt_path=source,
         kind=kind,
     )
+
+
+def register_optimization_evidence(
+    service: OperatorGovernanceService,
+    root: Path,
+    study_id: str,
+    failing: subprocess.CompletedProcess[str],
+) -> str:
+    binding = service.guard_study_binding(study_id, kind="OPTIMIZATION")
+    binding_path = root / ".autobugfix/operator-inputs/optimization-binding.yaml"
+    write(binding_path, yaml.safe_dump(binding, sort_keys=False))
+    visible_failure = (root / "evidence/operator.yaml").read_bytes()
+    verification_argv = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
+    report_payload = {
+        "schema": "autobugfix-formal-optimization-case-v1",
+        "case_token": "operator-acceptance-visible-failure",
+        "experiment_role": "optimization",
+        "study_id": binding["study_id"],
+        "cohort_id": binding["cohort_id"],
+        "treatment": binding["target_checkpoint_name"],
+        "study_binding_digest": binding["record_digest"],
+        "executed_subject_sha": binding["subject_sha"],
+        "executed_subject_tree": binding["subject_tree"],
+        "submission_digest": digest_payload({"visible_failure": visible_failure.hex()}),
+        "verification": {
+            "argv": verification_argv,
+            "returncode": failing.returncode,
+            "passed": failing.returncode == 0,
+            "stdout_sha256": hashlib.sha256(failing.stdout.encode("utf-8")).hexdigest(),
+            "stderr_sha256": hashlib.sha256(failing.stderr.encode("utf-8")).hexdigest(),
+        },
+        "noninterference": {"passed": True},
+    }
+    report = {
+        **report_payload,
+        "record_digest": digest_payload(report_payload),
+    }
+    report_path = (
+        service.config.eval.benchmarks.trusted_case_root
+        / "swe/formal-optimization/operator-acceptance-visible-failure.yaml"
+    )
+    write(report_path, yaml.safe_dump(report, sort_keys=False))
+    evidence = service.register_study_evidence(
+        study_id,
+        binding_path=binding_path,
+        artifact_path=report_path,
+    )
+    return service.study_evidence_reference(evidence)
 
 
 def build_repo(source_root: Path, root: Path) -> Path:
@@ -215,8 +285,12 @@ def write_config(source_root: Path, root: Path, model: str) -> None:
                     "experiments": {
                         "enabled": True,
                         "trusted_ref": "main",
-                        "default_profile": "operator-acceptance",
+                        "default_profile": "operator-baseline",
                         "profiles": {
+                            "operator-baseline": {
+                                "timeout_seconds": 120,
+                                "commands": baseline_commands(),
+                            },
                             "operator-acceptance": {
                                 "timeout_seconds": 120,
                                 "commands": acceptance_commands(),
@@ -255,11 +329,11 @@ def main() -> int:
     service = OperatorGovernanceService(root, trusted_ref=None, trusted_file=policy_path)
     baseline = service.capture_baseline(
         "operator-acceptance-base",
-        profile="operator-acceptance",
-        notes="Expected failing repository state before the Operator repair.",
+        profile="operator-baseline",
+        notes="Stable compile and import contract shared by H0 and candidate revisions.",
     )
-    if baseline["baseline"]["metrics"]["pass_rate"] != 0.0:
-        raise RuntimeError("Operator baseline did not preserve the expected failing state")
+    if baseline["baseline"]["metrics"]["pass_rate"] != 1.0:
+        raise RuntimeError("Operator performance baseline did not pass")
     run(["git", "add", ".autobugfix-baselines/operator-acceptance-base.yaml"], root)
     run(["git", "commit", "-m", "Record trusted Operator acceptance baseline"], root)
     h0_sha = run(["git", "rev-parse", "main"], root).stdout.strip()
@@ -308,11 +382,17 @@ def main() -> int:
         approver="acceptance-human",
         confirm_request_digest=budget_request.budget_request_digest,
     )
+    evidence_reference = register_optimization_evidence(
+        service,
+        root,
+        study.study_id,
+        failing,
+    )
     triage = service.create_triage(
         triage_id="operator-real-triage",
         summary="Eval case IDs violate the dataset path contract",
         suspected_layers=("eval",),
-        evidence=("evidence/operator.yaml",),
+        evidence=(evidence_reference,),
         confidence="high",
         creator="acceptance-operator",
     )
@@ -344,7 +424,7 @@ def main() -> int:
                 f"Operator fast check still failed after feedback retry: {fast['check_run']['failures']}"
             )
     service.commit_candidate(request.request_id, message="Fix Eval case-id normalization")
-    experiment = service.run_experiment(request.request_id, profile="operator-acceptance")
+    experiment = service.run_experiment(request.request_id, profile="operator-baseline")
     if experiment["status"] != "COMPLETED" or not experiment["passed"]:
         raise RuntimeError(f"Operator candidate experiment did not pass: {experiment}")
     full = service.verify(request.request_id, mode="full")
@@ -375,6 +455,11 @@ def main() -> int:
         request.request_id,
         grant_id=grant.grant_id,
         actor="acceptance-guard",
+    )
+    service.guard_study_binding(
+        study.study_id,
+        kind="CANDIDATE",
+        terminalize=True,
     )
     metric = register_guard_metric(
         service,

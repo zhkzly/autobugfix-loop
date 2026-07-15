@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,8 +12,14 @@ from autobugfix.eval.swe_holdout_guard import (
     SWEHoldoutCandidate,
     SWEHoldoutCohortError,
     advance_holdout_cohort,
+    discover_git_exposed_values,
     discover_operator_visible_live_ids,
+    discover_operator_visible_live_repositories,
 )
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
 
 
 def _candidate(index: int, language: str) -> SWEHoldoutCandidate:
@@ -150,6 +158,143 @@ def test_visible_identity_audit_catches_paths_and_nested_records(
     )
 
     assert observed == {path_identity, record_identity}
+
+
+def test_visible_identity_audit_catches_unstructured_logs(tmp_path: Path) -> None:
+    root = tmp_path / "visible"
+    root.mkdir()
+    identity = "owner__repository-1234"
+    (root / "writer.stderr.log").write_text(
+        f"previously attempted {identity} before interruption\n",
+        encoding="utf-8",
+    )
+
+    assert discover_operator_visible_live_ids(root, {identity}) == {identity}
+
+
+def test_visible_repository_audit_excludes_unseen_instance_from_seen_repo(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "visible"
+    root.mkdir()
+    repository = "owner/shared-repository"
+    (root / "operator.log").write_text(
+        f"previous case came from {repository}\n",
+        encoding="utf-8",
+    )
+
+    assert discover_operator_visible_live_repositories(
+        root,
+        {repository, "owner/unseen-repository"},
+    ) == {repository}
+
+
+def test_git_exposure_audit_includes_deleted_reachable_history(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "guard@example.invalid")
+    _git(root, "config", "user.name", "Guard Test")
+    exposed = "owner__repository-9876"
+    evidence = root / "operator-note.txt"
+    evidence.write_text(f"attempted {exposed}\n", encoding="utf-8")
+    _git(root, "add", "operator-note.txt")
+    _git(root, "commit", "-m", "record visible evidence")
+    evidence.unlink()
+    _git(root, "add", "-u")
+    _git(root, "commit", "-m", "remove visible projection")
+
+    assert discover_git_exposed_values(root, {exposed, "never-seen"}) == {exposed}
+
+
+def test_git_exposure_audit_includes_untracked_operator_source(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "guard@example.invalid")
+    _git(root, "config", "user.name", "Guard Test")
+    (root / "README.md").write_text("control\n", encoding="utf-8")
+    _git(root, "add", "README.md")
+    _git(root, "commit", "-m", "initialize control repository")
+    exposed = "owner__untracked-repository-1234"
+    (root / "new-adapter.py").write_text(
+        f'CASE = "{exposed}"\n',
+        encoding="utf-8",
+    )
+
+    assert discover_git_exposed_values(root, {exposed, "never-seen"}) == {exposed}
+
+
+def test_git_exposure_audit_scans_symlink_target_without_following_it(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "guard@example.invalid")
+    _git(root, "config", "user.name", "Guard Test")
+    exposed = "owner__linked-repository-1234"
+    (root / "case-link").symlink_to(exposed)
+
+    assert discover_git_exposed_values(root, {exposed, "never-seen"}) == {exposed}
+
+
+def test_holdout_cohort_skips_every_instance_from_visible_repository() -> None:
+    candidates = [
+        SWEHoldoutCandidate(
+            instance_id=f"case-{index}",
+            repository=("owner/seen" if index < 2 else f"owner/repo-{index}"),
+            language=language,
+        )
+        for index, language in enumerate(
+            ("go", "java", "rust", "js", "cpp", "c", "python", "ruby")
+        )
+    ]
+    attempted: list[SWEHoldoutCandidate] = []
+
+    result = advance_holdout_cohort(
+        candidates,
+        (),
+        protocol_digest="f" * 64,
+        guard_secret="guard-secret-for-tests",
+        optimization_repositories=set(),
+        excluded_ids=set(),
+        excluded_repositories={"owner/seen"},
+        max_candidates=8,
+        qualify=lambda candidate: attempted.append(candidate) is None,
+    )
+
+    assert result.eligible_count == 6
+    assert all(candidate.repository != "owner/seen" for candidate in attempted)
+
+
+def test_visible_identity_audit_catches_sqlite_and_binary_state(tmp_path: Path) -> None:
+    root = tmp_path / "visible"
+    root.mkdir()
+    sqlite_identity = "owner__repository-4321"
+    database = sqlite3.connect(root / "operator.sqlite3")
+    database.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+    database.execute("INSERT INTO evidence VALUES (?)", (sqlite_identity,))
+    database.commit()
+    database.close()
+    binary_identity = "owner__repository-9876"
+    (root / "opaque.bin").write_bytes(b"\x00record:" + binary_identity.encode() + b"\xff")
+
+    assert discover_operator_visible_live_ids(
+        root,
+        {sqlite_identity, binary_identity, "never-visible"},
+    ) == {sqlite_identity, binary_identity}
+
+
+def test_visible_identity_audit_rejects_symlinked_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "visible"
+    root.mkdir()
+    outside = tmp_path / "outside.log"
+    outside.write_text("private-case\n", encoding="utf-8")
+    (root / "linked.log").symlink_to(outside)
+
+    with pytest.raises(SWEHoldoutCohortError, match="symbolic link"):
+        discover_operator_visible_live_ids(root, {"private-case"})
 
 
 def test_holdout_public_progress_contains_no_case_identity() -> None:

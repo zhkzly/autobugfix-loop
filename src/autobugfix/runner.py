@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from autobugfix.codex_backend import CodexBackend
 from autobugfix.codex_runtime import build_codex_request
 from autobugfix.evaluator import parse_evaluator_decision
 from autobugfix.git_utils import current_branch, git_common_dir, rev_parse, run_git
+from autobugfix.memory.context import render_memory_context
+from autobugfix.memory.fs import MemoryFileError
 from autobugfix.models import AutobugfixConfig, RepoProfile, TaskRecord, utc_now
 from autobugfix.prompts import evaluator_prompt, writer_prompt
 from autobugfix.role_config import resolve_role
@@ -125,11 +128,27 @@ class TaskRunner:
         self._save_state(task, "writing", "")
         context = self.store.read_text_tree(task_id, "context")
         feedback = self.store.read_text_tree(task_id, "feedback")
+        try:
+            memory_context = render_memory_context(
+                self.config.project_root / ".autobugfix-memory",
+                "writer",
+            )
+        except (MemoryFileError, UnicodeError) as exc:
+            self._block_and_raise(
+                task,
+                "harness_error",
+                f"approved Memory context is invalid: {exc}",
+            )
 
         writer_request = build_codex_request(
             self.config.project_root,
             "writer",
-            writer_prompt(task.body or task.title, context, feedback),
+            writer_prompt(
+                task.body or task.title,
+                context,
+                feedback,
+                memory_context,
+            ),
             worktree,
             None,
             None,
@@ -163,7 +182,18 @@ class TaskRunner:
                 "ignored_writer_outputs_removed",
                 {"iteration": task.iterations, "paths": list(removed_ignored)},
             )
+        try:
+            worktree = validate_task_worktree(repo, worktree, task.branch)
+        except Exception as exc:
+            self._block_and_raise(
+                task,
+                "policy_violation",
+                f"Writer changed task worktree Git authority: {exc}",
+            )
         diff_text = self._capture_diff(task, repo, worktree, attempt_dir, task_dir)
+        task.metadata["candidate_patch_sha256"] = hashlib.sha256(
+            diff_text.encode("utf-8")
+        ).hexdigest()
         self.store.append_event(task_id, "writer_completed", {"iteration": task.iterations})
 
         self._save_state(task, "verifying", "")

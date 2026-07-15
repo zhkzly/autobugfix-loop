@@ -415,6 +415,7 @@ class SWERawSubmission:
             "sdk_events",
             "sdk_stderr",
             "sdk_result",
+            "timeout_receipt",
         }
         if set(self.process_artifact_digests) != expected_artifacts:
             raise BenchmarkContractError(
@@ -423,12 +424,17 @@ class SWERawSubmission:
         for name, value in self.process_artifact_digests.items():
             if value != "missing":
                 sha256_value(value, f"process_artifact_digests.{name}")
-        if not self.timed_out and (
-            self.process_result_digest is None
-            or "missing" in self.process_artifact_digests.values()
-        ):
+        if self.process_result_digest is None:
+            raise BenchmarkContractError("Raw process lacks terminal evidence")
+        missing = {
+            name
+            for name, value in self.process_artifact_digests.items()
+            if value == "missing"
+        }
+        expected_missing = {"sdk_result"} if self.timed_out else {"timeout_receipt"}
+        if missing != expected_missing:
             raise BenchmarkContractError(
-                "completed Raw process has incomplete evidence"
+                "Raw process terminal evidence differs from its status"
             )
         if hashlib.sha256(self.patch.encode("utf-8")).hexdigest() != self.patch_sha256:
             raise BenchmarkContractError("SWE Raw patch digest mismatch")

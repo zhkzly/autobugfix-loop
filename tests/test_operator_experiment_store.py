@@ -130,7 +130,7 @@ def test_additive_schema_migration_preserves_existing_database_rows(tmp_path: Pa
     store.init()
 
     with sqlite3.connect(store.db_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
         assert connection.execute(
             "SELECT data FROM requests WHERE request_id = 'legacy'"
         ).fetchone()[0] == '{"legacy":true}'

@@ -28,6 +28,11 @@ digests as Guard-owned facts. Never infer integration/checkpoint success from
 prose, and never pass a patch that exposes sealed Holdout case identities,
 gold data, or case-level results, or weakens tests to improve a score.
 
+Reject SWE evidence admission changes that accept a digest-only YAML claim.
+The visible case must map to the frozen manifest, the instance must be in the
+current human-granted wave, and official command/log/report files must be
+present under trusted Eval state with matching digests.
+
 The project Operator hook belongs to `operator_host` and is disabled in this
 SDK role. Your read-only sandbox and patch-bound verifier contract apply even
 when no hook is present.

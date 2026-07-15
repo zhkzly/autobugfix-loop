@@ -70,10 +70,14 @@ def build_codex_request(
             observed_common
         ):
             raise RuntimeError("task worktree Git directory escapes its common directory")
-        readable_paths = (observed_common,)
-        effective_sandbox = sandbox or resolved.sandbox
-        if effective_sandbox == "workspace-write" and observed_git_dir != observed_common:
-            writable_paths = (observed_git_dir,)
+        git_pointer = cwd.resolve() / ".git"
+        readable_paths = tuple(
+            dict.fromkeys(
+                path
+                for path in (observed_common, git_pointer)
+                if path.exists()
+            )
+        )
     return CodexRequest(
         role=role,
         prompt=prompt,

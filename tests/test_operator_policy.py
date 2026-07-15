@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -14,6 +15,7 @@ import pytest
 import yaml
 
 from autobugfix.cli import main
+from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.models import CodexRequest, CodexResult
 from autobugfix.operator.bundle import OperatorBundleError, validate_bundle
 from autobugfix.operator.guard import compute_scope_risk
@@ -67,6 +69,173 @@ def register_baseline_metric(
         receipt_path=path,
         kind="BASELINE",
     )
+
+
+def register_optimization_evidence(
+    service: OperatorGovernanceService,
+    root: Path,
+    study_id: str,
+    *,
+    corrupt_command_log: bool = False,
+) -> str:
+    study = service.store.read_study(study_id)
+    manifest = yaml.safe_load(
+        Path(study.manifest_snapshot_path).read_text(encoding="utf-8")
+    ) or {}
+    if manifest.get("schema") != "autobugfix-swe-sealed-manifest-v1":
+        if corrupt_command_log:
+            raise AssertionError("command-log corruption applies only to SWE evidence")
+        return register_generic_optimization_evidence(service, root, study_id)
+    binding = service.guard_study_binding(study_id, kind="OPTIMIZATION")
+    binding_path = root / f"{study_id}-optimization-binding.yaml"
+    binding_path.write_text(
+        yaml.safe_dump(binding, sort_keys=False),
+        encoding="utf-8",
+    )
+    official_root = (
+        service.config.eval.benchmarks.trusted_case_root
+        / f"swe/formal-optimization/{study_id}-official"
+    ).resolve()
+    command_root = official_root / "command"
+    output_root = official_root / "output"
+    command_root.mkdir(parents=True, exist_ok=True)
+    output_root.mkdir(parents=True, exist_ok=True)
+    stdout = command_root / "stdout.log"
+    stderr = command_root / "stderr.log"
+    scorer_report = output_root / "report.json"
+    stdout.write_text("official scorer completed\n", encoding="utf-8")
+    stderr.write_text("", encoding="utf-8")
+    scorer_report.write_text('{"resolved": false}\n', encoding="utf-8")
+    command_payload = {
+        "name": "official-swe-score",
+        "argv": ["python", "-m", "swebench.harness.run_evaluation"],
+        "cwd": str(output_root),
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+        "duration_seconds": 1.0,
+        "exit_code": 0,
+        "timed_out": False,
+        "passed": True,
+        "stdout_path": str(stdout),
+        "stderr_path": str(stderr),
+        "stdout_sha256": hashlib.sha256(stdout.read_bytes()).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr.read_bytes()).hexdigest(),
+        "environment_digest": "f" * 64,
+    }
+    command = {
+        **command_payload,
+        "record_digest": digest_payload(command_payload),
+    }
+    if corrupt_command_log:
+        stdout.write_text("forged after command freeze\n", encoding="utf-8")
+    official_payload = {
+        "schema": "autobugfix-swe-official-result-v1",
+        "adapter": "swebench_verified",
+        "instance_id": "visible-case-1",
+        "run_id": "test-run",
+        "resolved": False,
+        "passed": False,
+        "harness_error": "",
+        "image": "test-image",
+        "image_id": "sha256:" + "d" * 64,
+        "command": command,
+        "report_path": str(scorer_report),
+        "report_sha256": hashlib.sha256(scorer_report.read_bytes()).hexdigest(),
+        "output_root": str(output_root),
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+    }
+    official = {
+        **official_payload,
+        "record_digest": digest_payload(official_payload),
+    }
+    noninterference_payload = {
+        "schema": "autobugfix-swe-noninterference-v1",
+        "case_token": "visible-case-1",
+        "submission_digest": "a" * 64,
+        "official_result_digest": official["record_digest"],
+        "unchanged": True,
+        "before": {"patch": "b" * 64},
+        "after": {"patch": "b" * 64},
+        "checked_at": "2026-01-01T00:00:02Z",
+    }
+    report_payload = {
+        "schema": "autobugfix-swe-formal-case-v1",
+        "case_token": "visible-case-1",
+        "experiment_role": "optimization",
+        "study_id": binding["study_id"],
+        "cohort_id": binding["cohort_id"],
+        "treatment": binding["target_checkpoint_name"],
+        "study_binding_digest": binding["record_digest"],
+        "executed_subject_sha": binding["subject_sha"],
+        "executed_subject_tree": binding["subject_tree"],
+        "submission_digest": "a" * 64,
+        "official_result": official,
+        "noninterference": {
+            **noninterference_payload,
+            "record_digest": digest_payload(noninterference_payload),
+        },
+        "resolved": False,
+        "harness_error": "",
+    }
+    report = {**report_payload, "record_digest": digest_payload(report_payload)}
+    report_path = (
+        service.config.eval.benchmarks.trusted_case_root
+        / f"swe/formal-optimization/{study_id}-test-report.yaml"
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        yaml.safe_dump(report, sort_keys=False),
+        encoding="utf-8",
+    )
+    evidence = service.register_study_evidence(
+        study_id,
+        binding_path=binding_path,
+        artifact_path=report_path,
+    )
+    return service.study_evidence_reference(evidence)
+
+
+def register_generic_optimization_evidence(
+    service: OperatorGovernanceService,
+    root: Path,
+    study_id: str,
+) -> str:
+    binding = service.guard_study_binding(study_id, kind="OPTIMIZATION")
+    binding_path = root / f"{study_id}-generic-optimization-binding.yaml"
+    binding_path.write_text(yaml.safe_dump(binding, sort_keys=False), encoding="utf-8")
+    report_payload = {
+        "schema": "autobugfix-formal-optimization-case-v1",
+        "case_token": "visible-generic-case-1",
+        "experiment_role": "optimization",
+        "study_id": binding["study_id"],
+        "cohort_id": binding["cohort_id"],
+        "treatment": binding["target_checkpoint_name"],
+        "study_binding_digest": binding["record_digest"],
+        "executed_subject_sha": binding["subject_sha"],
+        "executed_subject_tree": binding["subject_tree"],
+        "verification": {
+            "argv": ["python", "-m", "pytest", "-q"],
+            "returncode": 1,
+            "passed": False,
+            "stdout_sha256": "a" * 64,
+            "stderr_sha256": "b" * 64,
+        },
+        "noninterference": {"passed": True},
+    }
+    report = {**report_payload, "record_digest": digest_payload(report_payload)}
+    report_path = (
+        service.config.eval.benchmarks.trusted_case_root
+        / f"generic/formal-optimization/{study_id}-test-report.yaml"
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(yaml.safe_dump(report, sort_keys=False), encoding="utf-8")
+    evidence = service.register_study_evidence(
+        study_id,
+        binding_path=binding_path,
+        artifact_path=report_path,
+    )
+    return service.study_evidence_reference(evidence)
 
 
 class OperatorBackend:
@@ -427,6 +596,78 @@ def test_writer_failure_feedback_and_retry_are_distinct_runs(tmp_path: Path):
     assert second["attempt"] == 2
 
 
+def test_operator_sdk_writer_rejects_published_auth_material(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if shutil.which("bwrap") is None:
+        pytest.skip("bubblewrap is unavailable")
+    root = make_operator_repo(tmp_path)
+    (root / "fake_operator_codex.py").write_text(
+        """
+import types
+from pathlib import Path
+
+class Sandbox(str):
+    pass
+
+class ApprovalMode:
+    auto_review = "auto_review"
+    deny_all = "deny_all"
+
+class CodexConfig:
+    def __init__(self, cwd=None, env=None, codex_bin=None):
+        self.cwd = cwd
+        self.env = env
+
+class Thread:
+    def __init__(self, config):
+        self.config = config
+
+    def run(self, prompt, **kwargs):
+        secret = (Path(self.config.env["CODEX_HOME"]) / "auth.json").read_text()
+        (Path(kwargs["cwd"]) / "leaked-auth.txt").write_text(secret)
+        return types.SimpleNamespace(final_response=secret)
+
+class Codex:
+    def __init__(self, config):
+        self.config = config
+
+    def thread_start(self, **kwargs):
+        return Thread(self.config)
+
+    def close(self):
+        pass
+""".lstrip(),
+        encoding="utf-8",
+    )
+    source_home = tmp_path / "home/.codex"
+    source_home.mkdir(parents=True)
+    secret = "operator-writer-credential-must-not-escape"
+    (source_home / "auth.json").write_text(
+        json.dumps({"tokens": {"access_token": secret}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(source_home.parent))
+    service = service_for(
+        root,
+        tmp_path,
+        backend=CodexSDKBackend("fake_operator_codex"),
+    )
+    create_request(service, request_id="credential-leak")
+    workspace = Path(service.start("credential-leak")["workspace"]["path"])
+
+    with pytest.raises(OperatorGovernanceError, match="credential material"):
+        service.start_writer("credential-leak")
+
+    leaked = workspace / "leaked-auth.txt"
+    assert leaked.is_file()
+    assert secret not in leaked.read_text(encoding="utf-8")
+    runs = service.store.read_writer_runs("credential-leak")
+    assert [item.status for item in runs] == ["FAILED"]
+    assert "credential material" in service.writer_view("credential-leak")["feedback"][-1]["failures"][0]
+
+
 def test_writer_cancel_can_transition_while_backend_is_running(tmp_path: Path):
     root = make_operator_repo(tmp_path)
     backend = BlockingOperatorBackend()
@@ -489,7 +730,28 @@ def test_independent_experiment_lines_share_h0_and_bind_requests(tmp_path: Path)
     root = make_operator_repo(tmp_path)
     service = service_for(root, tmp_path)
     manifest = root / "experiment-manifest.yaml"
-    manifest.write_text("cases: [case-1, case-2, case-3]\n", encoding="utf-8")
+    visible_case = {"case_token": "visible-case-1"}
+    optimization_case_payload = {
+        "schema": "autobugfix-swe-optimization-case-v1",
+        "benchmark_instance_id": "visible-case-1",
+        "visible_case": visible_case,
+    }
+    manifest_payload = {
+        "schema": "autobugfix-swe-sealed-manifest-v1",
+        "optimization_cases": [
+            {
+                **optimization_case_payload,
+                "record_digest": digest_payload(optimization_case_payload),
+            }
+        ],
+    }
+    manifest.write_text(
+        yaml.safe_dump(
+            {**manifest_payload, "record_digest": digest_payload(manifest_payload)},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     h0 = run(["git", "rev-parse", "HEAD"], root).stdout.strip()
 
     bug_study = service.create_study(
@@ -547,12 +809,25 @@ def test_independent_experiment_lines_share_h0_and_bind_requests(tmp_path: Path)
         approver="human",
         confirm_request_digest=budget_request.budget_request_digest,
     )
+    evidence_reference = register_optimization_evidence(service, root, "bugfix")
+    with pytest.raises(OperatorGovernanceError, match="stdout digest mismatch"):
+        register_optimization_evidence(
+            service,
+            root,
+            "bugfix",
+            corrupt_command_log=True,
+        )
+    generic_evidence_reference = register_generic_optimization_evidence(
+        service,
+        root,
+        "bugfix",
+    )
 
     triage = service.create_triage(
         triage_id="triage-line-bound",
         summary="Visible benchmark evidence points to Eval orchestration",
         suspected_layers=("eval",),
-        evidence=("evidence/report.yaml",),
+        evidence=(evidence_reference, generic_evidence_reference),
         creator="operator",
         confidence="high",
     )

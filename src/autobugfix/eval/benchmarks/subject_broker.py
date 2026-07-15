@@ -10,10 +10,12 @@ import sys
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import yaml
 
+from autobugfix.codex_backend import CodexBackend
+from autobugfix.codex_sdk import write_private_text
 from autobugfix.config import load_config
 from autobugfix.eval.benchmarks.models import (
     digest_file,
@@ -45,6 +47,8 @@ from autobugfix.eval.benchmarks.swe_verifier import (
 )
 from autobugfix.git_utils import git_common_dir, rev_parse, run_git
 from autobugfix.models import RepoProfile
+from autobugfix.service import AutobugfixService
+from autobugfix.study_binding import StudyBindingError, validate_study_binding_shape
 from autobugfix.worktree import diff_for_task
 
 
@@ -283,6 +287,30 @@ class SWESubjectBroker:
             shutil.copytree(origin, destination / relative, symlinks=False)
 
     @staticmethod
+    def _copy_study_memory(snapshot: Path | None, control: Path) -> Path:
+        destination = control / ".autobugfix-memory"
+        destination.mkdir(mode=0o700)
+        if snapshot is None:
+            return destination
+        source = snapshot.resolve(strict=True)
+        if not source.is_dir() or snapshot.is_symlink():
+            raise SWESubjectBrokerError("Study Memory snapshot is redirected")
+        for candidate in (source, *source.rglob("*")):
+            if candidate.is_symlink():
+                raise SWESubjectBrokerError("Study Memory snapshot contains a symlink")
+        for relative in (Path("active"), Path("skills/approved")):
+            origin = source / relative
+            if origin.exists():
+                if not origin.is_dir():
+                    raise SWESubjectBrokerError(
+                        f"Study Memory input is not a directory: {relative}"
+                    )
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(origin, target, symlinks=False)
+        return destination
+
+    @staticmethod
     def _tree_digest(root: Path) -> str:
         files = [path for path in sorted(root.rglob("*")) if path.is_file()]
         return digest_payload(
@@ -482,7 +510,14 @@ class SWESubjectBroker:
         remote = target / "remote.git"
         docker_authority_masks = [
             path
-            for path in (Path("/mnt/wsl"), Path("/var/lib/docker"))
+            for path in (
+                Path("/home"),
+                Path("/root"),
+                Path("/mnt"),
+                Path("/media"),
+                Path("/srv"),
+                Path("/var/lib/docker"),
+            )
             if path.is_dir()
         ]
         docker_mask_argv = [
@@ -490,6 +525,22 @@ class SWESubjectBroker:
             for path in docker_authority_masks
             for item in ("--tmpfs", str(path))
         ]
+        existing_masks = (
+            Path("/tmp"),
+            Path("/run"),
+            host_home,
+            self.project_root,
+            *docker_authority_masks,
+        )
+        authority_mask_argv = (
+            []
+            if any(self.trusted_root.is_relative_to(path) for path in existing_masks)
+            else [
+                "--tmpfs",
+                str(self.trusted_root),
+                *self._sandbox_dirs(self.trusted_root, allowed),
+            ]
+        )
         return [
             bubblewrap,
             "--die-with-parent",
@@ -507,8 +558,7 @@ class SWESubjectBroker:
             str(capability_root),
             "--proc",
             "/proc",
-            "--dev-bind",
-            "/dev",
+            "--dev",
             "/dev",
             "--tmpfs",
             "/run",
@@ -519,6 +569,7 @@ class SWESubjectBroker:
             "--tmpfs",
             str(self.project_root),
             *self._sandbox_dirs(self.project_root, allowed),
+            *authority_mask_argv,
             *runtime_binds,
             "--ro-bind",
             str(subject),
@@ -534,9 +585,6 @@ class SWESubjectBroker:
             "--ro-bind",
             str(main),
             str(main),
-            "--bind",
-            str(main / ".git"),
-            str(main / ".git"),
             "--ro-bind",
             str(remote),
             str(remote),
@@ -546,6 +594,9 @@ class SWESubjectBroker:
             "--ro-bind",
             str(control / ".agents"),
             str(control / ".agents"),
+            "--ro-bind",
+            str(control / ".autobugfix-memory"),
+            str(control / ".autobugfix-memory"),
             "--ro-bind",
             str(worker),
             str(worker),
@@ -694,6 +745,8 @@ class SWESubjectBroker:
         timeout_seconds: int = 900,
         experiment_role: str = "optimization",
         study_binding: Mapping[str, Any] | None = None,
+        memory_snapshot: Path | None = None,
+        codex_backend_factory: Callable[[str, int, int], CodexBackend] | None = None,
     ) -> FrozenSWESubmission:
         try:
             return self._run_impl(
@@ -710,6 +763,8 @@ class SWESubjectBroker:
                 timeout_seconds=timeout_seconds,
                 experiment_role=experiment_role,
                 study_binding=study_binding,
+                memory_snapshot=memory_snapshot,
+                codex_backend_factory=codex_backend_factory,
             )
         except BaseException as exc:
             root = artifact_root.resolve()
@@ -765,43 +820,28 @@ class SWESubjectBroker:
         timeout_seconds: int = 900,
         experiment_role: str = "optimization",
         study_binding: Mapping[str, Any] | None = None,
+        memory_snapshot: Path | None = None,
+        codex_backend_factory: Callable[[str, int, int], CodexBackend] | None = None,
     ) -> FrozenSWESubmission:
         if model != "gpt-5.4-mini" or max_attempts != 2:
             raise SWESubjectBrokerError("SWE subject budget must use Mini and two attempts")
         if experiment_role not in {"optimization", "sealed_holdout"}:
             raise SWESubjectBrokerError("unsupported SWE experiment role")
         if study_binding is not None:
+            if memory_snapshot is None:
+                raise SWESubjectBrokerError(
+                    "formal SWE subject requires the frozen Study Memory snapshot"
+                )
             try:
                 verify_record(study_binding)
             except Exception as exc:
                 raise SWESubjectBrokerError("SWE Study binding is invalid") from exc
-            required = {
-                "schema",
-                "kind",
-                "study_id",
-                "line_id",
-                "subject_sha",
-                "subject_tree",
-                "line_generation",
-                "manifest_digest",
-                "success_contract_digest",
-                "harness_sha",
-                "policy_digest",
-                "role_config_digest",
-                "memory_digest",
-                "primary_model",
-                "target_checkpoint_name",
-                "budget_grant_id",
-                "budget_digest",
-                "wave",
-                "record_digest",
-            }
-            if set(study_binding) != required:
-                raise SWESubjectBrokerError("SWE Study binding fields are incomplete")
+            try:
+                validate_study_binding_shape(study_binding)
+            except StudyBindingError as exc:
+                raise SWESubjectBrokerError(str(exc)) from exc
             if (
-                study_binding.get("schema")
-                != "autobugfix-guard-study-binding-v1"
-                or study_binding.get("subject_sha") != subject_sha
+                study_binding.get("subject_sha") != subject_sha
                 or study_binding.get("subject_tree") != expected_subject_tree
                 or study_binding.get("primary_model") != model
                 or study_binding.get("target_checkpoint_name") != "H_general"
@@ -828,6 +868,7 @@ class SWESubjectBroker:
         worktree_root = target / "worktrees"
         repo_id = "swe_target"
         self._copy_subject_skills(subject, control)
+        memory_root = self._copy_study_memory(memory_snapshot, control)
         subject_config_path = self._subject_config_path(subject)
         config_path = self._write_control_config(
             subject,
@@ -844,13 +885,39 @@ class SWESubjectBroker:
         shutil.copy2(worker_source, worker)
         broker_home = control / "broker-home"
         broker_home.mkdir(mode=0o700)
+        isolated_config = load_config(control)
+        trusted_service = AutobugfixService(control, backend=object())  # type: ignore[arg-type]
+        prepared_task = trusted_service.create_task(
+            repo_id,
+            f"SWE eval {visible_case.case_token}",
+            visible_case.problem_statement,
+            metadata={
+                "origin": "eval",
+                "memory_eligible": False,
+                "eval_case_token": visible_case.case_token,
+                "eval_adapter": visible_case.benchmark,
+                "experiment_role": experiment_role,
+            },
+        )
+        for hint in visible_case.public_hints:
+            trusted_service.add_context(
+                prepared_task.task_id,
+                "public-hint",
+                hint,
+            )
+        if not prepared_task.branch or not prepared_task.worktree_path:
+            raise SWESubjectBrokerError("trusted broker failed to prepare the Execution task")
         protected_before = {
             "config": digest_file(config_path),
             "skills": self._tree_digest(control / ".agents"),
+            "memory": self._tree_digest(memory_root),
             "worker": digest_file(worker),
         }
         main_before = self._main_identity(main)
-        git_control_before = self._git_control_identity(main)
+        git_control_before = self._git_control_identity(
+            main,
+            allowed_task_branch=prepared_task.branch,
+        )
         ledger = SWEExecutionLedger(max_attempts)
         capability_root = Path(
             tempfile.mkdtemp(prefix="autobugfix-swe-cap-", dir="/tmp")
@@ -868,6 +935,7 @@ class SWESubjectBroker:
             "subject_sha": subject_sha,
             "subject_tree": subject_tree,
             "repo_id": repo_id,
+            "task_id": prepared_task.task_id,
             "case_token": visible_case.case_token,
             "adapter": visible_case.benchmark,
             "experiment_role": experiment_role,
@@ -888,6 +956,12 @@ class SWESubjectBroker:
             "subject_config_sha256": digest_file(subject_config_path),
             "config_sha256": protected_before["config"],
             "skills_digest": protected_before["skills"],
+            "memory_digest": (
+                str(study_binding["memory_digest"])
+                if study_binding is not None
+                else protected_before["memory"]
+            ),
+            "memory_input_digest": protected_before["memory"],
             "worker_sha256": protected_before["worker"],
         })
         binding_path = root / "subject-binding.yaml"
@@ -904,14 +978,11 @@ class SWESubjectBroker:
             "binding_digest": subject_binding["record_digest"],
             "control_root": str(control),
             "repo_id": repo_id,
+            "task_id": prepared_task.task_id,
             "case_token": visible_case.case_token,
             "adapter": visible_case.benchmark,
             "experiment_role": experiment_role,
             "problem_statement": visible_case.problem_statement,
-            "context": [
-                {"kind": "public-hint", "content": hint}
-                for hint in visible_case.public_hints
-            ],
             "model": model,
             "max_attempts": max_attempts,
             "codex_socket": str(codex_socket),
@@ -923,7 +994,6 @@ class SWESubjectBroker:
         }
         request_path.write_text(json.dumps(request, sort_keys=True) + "\n", encoding="utf-8")
         request_path.chmod(0o600)
-        isolated_config = load_config(control)
         repo = isolated_config.repo(repo_id)
         verifier = SWEDockerVisibleVerifier(
             self.runtime,
@@ -964,6 +1034,7 @@ class SWESubjectBroker:
                         hidden_paths=hidden_paths,
                         model=model,
                         ledger=ledger,
+                        backend_factory=codex_backend_factory,
                     )
                 )
                 stack.enter_context(
@@ -994,12 +1065,15 @@ class SWESubjectBroker:
         except BaseException as exc:
             process_error = exc
         finally:
-            ledger_record = ledger.snapshot()
-            (root / "execution-ledger.json").write_text(
-                json.dumps(ledger_record, sort_keys=True) + "\n", encoding="utf-8"
-            )
-            shutil.rmtree(capability_root, ignore_errors=True)
-            request_path.unlink(missing_ok=True)
+            try:
+                ledger_record = ledger.snapshot()
+                write_private_text(
+                    root / "execution-ledger.json",
+                    json.dumps(ledger_record, sort_keys=True) + "\n",
+                )
+            finally:
+                shutil.rmtree(capability_root, ignore_errors=True)
+                request_path.unlink(missing_ok=True)
         if process_error is not None or command is None or not command.passed or not result_path.is_file():
             failure_evidence = root / "failed-execution-evidence"
             failure_manifest = self._build_evidence_tree(
@@ -1034,6 +1108,7 @@ class SWESubjectBroker:
         protected_after = {
             "config": digest_file(config_path),
             "skills": self._tree_digest(control / ".agents"),
+            "memory": self._tree_digest(memory_root),
             "worker": digest_file(worker),
         }
         if protected_after != protected_before:

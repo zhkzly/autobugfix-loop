@@ -10,12 +10,17 @@ import subprocess
 import sys
 import traceback
 import uuid
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
 from typing import Any, IO
 
 from autobugfix.codex_backend import CodexBackend
 from autobugfix.config import load_config
+from autobugfix.credential_guard import (
+    credential_markers,
+    redact_credential_leaks,
+    snapshot_regular_files,
+)
 from autobugfix.models import CodexRequest, CodexResult, utc_now
 
 
@@ -292,6 +297,8 @@ class CodexSDKBackend(CodexBackend):
         self,
         request: CodexRequest,
         worker_argv: list[str],
+        *,
+        call_home: Path | None = None,
     ) -> list[str]:
         if os.name == "nt":
             if request.require_process_isolation:
@@ -316,8 +323,14 @@ class CodexSDKBackend(CodexBackend):
             )
         runtime_root = self._runtime_root(request)
         runtime_root.mkdir(parents=True, mode=0o700, exist_ok=True)
-        log_root = request.raw_log_path.parent.resolve()
-        log_root.mkdir(parents=True, exist_ok=True)
+        isolated_home = (
+            call_home.resolve()
+            if call_home is not None
+            else (runtime_root / "direct-sandbox").resolve()
+        )
+        if not isolated_home.is_relative_to(runtime_root):
+            raise CodexSDKError("Codex call home is outside the role runtime")
+        isolated_home.mkdir(parents=True, mode=0o700, exist_ok=True)
         readable = [
             path.resolve() for path in request.readable_paths if path.exists()
         ]
@@ -342,7 +355,7 @@ class CodexSDKBackend(CodexBackend):
         role_writable = (
             [request.cwd.resolve()] if request.sandbox == "workspace-write" else []
         )
-        writable = [*role_writable, runtime_root, log_root]
+        writable = [*role_writable, isolated_home]
         mount_roots = [
             *trusted_runtime,
             *role_readable,
@@ -350,13 +363,18 @@ class CodexSDKBackend(CodexBackend):
             *writable,
             *extra_writable,
         ]
-        default_hidden = [Path("/run")]
+        default_hidden = [Path("/run"), runtime_root]
         home = Path.home().resolve()
-        if home.exists():
-            default_hidden.append(home)
         for candidate in (
-            Path("/mnt/c/Program Files/Docker"),
-            Path("/mnt/wsl"),
+            Path("/home"),
+            Path("/root"),
+            Path("/media"),
+            Path("/mnt"),
+            Path("/srv"),
+        ):
+            if candidate.exists():
+                default_hidden.append(candidate)
+        for candidate in (
             Path("/var/lib/docker"),
         ):
             if candidate.exists():
@@ -428,11 +446,13 @@ class CodexSDKBackend(CodexBackend):
             bwrap,
             "--die-with-parent",
             "--new-session",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
             "--ro-bind",
             "/",
             "/",
-            "--dev-bind",
-            "/dev",
+            "--dev",
             "/dev",
             "--proc",
             "/proc",
@@ -454,6 +474,18 @@ class CodexSDKBackend(CodexBackend):
                 path
                 for path in (*trusted_runtime, *role_readable, *readable)
                 if path in early_mount_roots
+            ),
+            key=lambda item: (len(item.parts), str(item)),
+        ):
+            argv.extend(("--ro-bind", str(path), str(path)))
+        for path in sorted(
+            dict.fromkeys(
+                path
+                for path in readable
+                if any(
+                    path != writable_root and path.is_relative_to(writable_root)
+                    for writable_root in writable
+                )
             ),
             key=lambda item: (len(item.parts), str(item)),
         ):
@@ -518,6 +550,14 @@ class CodexSDKBackend(CodexBackend):
             argv.extend(("--ro-bind", str(path), str(path)))
         for path in sorted(dict.fromkeys(final_hidden), key=str):
             argv.extend(("--tmpfs", str(path)))
+        if runtime_root in final_hidden:
+            argv.extend(
+                self._bwrap_destination_dirs(
+                    [isolated_home],
+                    (runtime_root,),
+                )
+            )
+            argv.extend(("--bind", str(isolated_home), str(isolated_home)))
         argv.extend(("--chdir", str(control_root), "--", *worker_argv))
         return argv
 
@@ -555,49 +595,82 @@ class CodexSDKBackend(CodexBackend):
         codex_home = runtime_root / "calls" / call_id
         codex_home.mkdir(parents=True, mode=0o700, exist_ok=False)
         codex_home.chmod(0o700)
-        source_home = Path.home() / ".codex"
-        for name in ("auth.json", "version.json", "installation_id", ".personality_migration"):
-            if name == "auth.json" and not runtime.bridge_auth:
-                continue
-            source = source_home / name
-            dest = codex_home / name
-            if source.exists():
-                write_private_bytes(dest, source.read_bytes(), exclusive=True)
-        values: dict[str, Any] = {
-            "model_reasoning_effort": cfg.codex.reasoning_effort,
-            "disable_response_storage": cfg.codex.disable_response_storage,
-        }
-        if cfg.codex.service_tier is not None:
-            values["service_tier"] = cfg.codex.service_tier
+        try:
+            source_home = Path.home() / ".codex"
+            for name in (
+                "auth.json",
+                "version.json",
+                "installation_id",
+                ".personality_migration",
+            ):
+                if name == "auth.json" and not runtime.bridge_auth:
+                    continue
+                source = source_home / name
+                dest = codex_home / name
+                if source.exists():
+                    write_private_bytes(dest, source.read_bytes(), exclusive=True)
+            values: dict[str, Any] = {
+                "model_reasoning_effort": cfg.codex.reasoning_effort,
+                "disable_response_storage": cfg.codex.disable_response_storage,
+                "approval_policy": "never",
+                "sandbox_mode": request.sandbox,
+                "allow_login_shell": False,
+                "web_search": "disabled",
+            }
+            if cfg.codex.service_tier is not None:
+                values["service_tier"] = cfg.codex.service_tier
 
-        def scalar(value: Any) -> str:
-            if isinstance(value, bool):
-                return "true" if value else "false"
-            if isinstance(value, str):
-                return json.dumps(value, ensure_ascii=True)
-            return str(value)
+            def scalar(value: Any) -> str:
+                if isinstance(value, bool):
+                    return "true" if value else "false"
+                if isinstance(value, str):
+                    return json.dumps(value, ensure_ascii=True)
+                return str(value)
 
-        config_lines = [f"{key} = {scalar(value)}" for key, value in values.items()]
-        config_lines.extend(
-            [
-                "",
-                "[features]",
-                "hooks = false",
-                "multi_agent = false",
-                "",
-                f"[projects.{json.dumps(str(request.cwd.resolve()))}]",
-                'trust_level = "trusted"',
-                "",
+            config_lines = [
+                f"{key} = {scalar(value)}" for key, value in values.items()
             ]
-        )
-        config_path = codex_home / "config.toml"
-        temporary = config_path.with_suffix(".tmp")
-        write_private_text(temporary, "\n".join(config_lines), exclusive=True)
-        os.replace(temporary, config_path)
-        env = self.worker_environment()
-        env["CODEX_HOME"] = str(codex_home)
-        env["PYTHONPATH"] = str(self._trusted_worker_source(request))
-        return env
+            config_lines.extend(
+                [
+                    "",
+                    "[features]",
+                    "hooks = false",
+                    "multi_agent = false",
+                    "apps = false",
+                    "browser_use = false",
+                    "browser_use_external = false",
+                    "computer_use = false",
+                    "",
+                    "[sandbox_workspace_write]",
+                    "network_access = false",
+                    "exclude_tmpdir_env_var = false",
+                    "exclude_slash_tmp = false",
+                    "",
+                    "[shell_environment_policy]",
+                    'inherit = "none"',
+                    "ignore_default_excludes = false",
+                    'include_only = ["PATH", "HOME", "LANG", "LC_*"]',
+                    "set = { "
+                    + f'PATH = {json.dumps(self.worker_environment()["PATH"])}, '
+                    + f'HOME = {json.dumps(str(request.cwd.resolve()))}'
+                    + " }",
+                    "",
+                    f"[projects.{json.dumps(str(request.cwd.resolve()))}]",
+                    'trust_level = "trusted"',
+                    "",
+                ]
+            )
+            config_path = codex_home / "config.toml"
+            temporary = config_path.with_suffix(".tmp")
+            write_private_text(temporary, "\n".join(config_lines), exclusive=True)
+            os.replace(temporary, config_path)
+            env = self.worker_environment()
+            env["CODEX_HOME"] = str(codex_home)
+            env["PYTHONPATH"] = str(self._trusted_worker_source(request))
+            return env
+        except BaseException:
+            shutil.rmtree(codex_home, ignore_errors=True)
+            raise
 
     def prepare_worker_environment(self, request: CodexRequest) -> dict[str, str]:
         environment = self._runtime_env(request, allow_prepared=False)
@@ -737,15 +810,17 @@ class CodexSDKBackend(CodexBackend):
 
     @staticmethod
     def _scrub_worker_credentials(codex_home: Path) -> None:
-        """Remove bridged credentials as soon as the isolated SDK call exits."""
+        """Destroy the entire one-call home after allowlisted evidence is published."""
 
-        for name in ("auth.json",):
-            credential = codex_home / name
-            if credential.is_symlink():
-                credential.unlink(missing_ok=True)
-                continue
-            if credential.is_file():
-                credential.unlink()
+        if codex_home.is_symlink():
+            codex_home.unlink(missing_ok=True)
+        elif codex_home.exists():
+            for credential in codex_home.rglob("auth.json"):
+                if credential.is_symlink() or credential.is_file():
+                    credential.unlink(missing_ok=True)
+            shutil.rmtree(codex_home)
+        if codex_home.exists() or codex_home.is_symlink():
+            raise CodexSDKError("isolated Codex call home could not be destroyed")
 
     def _run_prepared_worker(
         self,
@@ -770,7 +845,11 @@ class CodexSDKBackend(CodexBackend):
         if self.module_name:
             argv.extend(("--module-name", self.module_name))
         process = subprocess.Popen(
-            self.worker_launch_argv(request, argv),
+            self.worker_launch_argv(
+                request,
+                argv,
+                call_home=Path(worker_environment["CODEX_HOME"]),
+            ),
             cwd=project_root,
             env=worker_environment,
             text=True,
@@ -826,30 +905,95 @@ class CodexSDKBackend(CodexBackend):
     def _run_worker(self, request: CodexRequest) -> CodexResult:
         request.raw_log_path.parent.mkdir(parents=True, exist_ok=True)
         request.stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
+        request.raw_log_path.parent.chmod(0o700)
+        request.stderr_log_path.parent.chmod(0o700)
         stem = request.raw_log_path.name
-        request_path = request.raw_log_path.with_name(f"{stem}.sdk-request.json")
-        result_path = request.raw_log_path.with_name(f"{stem}.sdk-result.json")
-        worker_stdout = request.raw_log_path.with_name(f"{stem}.worker.stdout.log")
-        worker_stderr = request.raw_log_path.with_name(f"{stem}.worker.stderr.log")
-        if result_path.exists():
-            result_path.unlink()
-        write_private_text(
-            request_path,
-            json.dumps(self.worker_request_payload(request), sort_keys=True),
-        )
         worker_environment = self.prepare_worker_environment(request)
         codex_home = Path(worker_environment["CODEX_HOME"]).resolve()
+        markers = credential_markers(codex_home / "auth.json", worker_environment)
+        workspace_before = snapshot_regular_files(request.cwd.resolve())
+        published: dict[Path, Path] = {}
+        leak_paths: tuple[Path, ...] = ()
         try:
-            return self._run_prepared_worker(
+            private_root = codex_home / "broker-io"
+            private_root.mkdir(mode=0o700, exist_ok=False)
+            isolated_request = replace(
                 request,
+                raw_log_path=private_root / "raw.jsonl",
+                stderr_log_path=private_root / "stderr.log",
+            )
+            request_path = private_root / "sdk-request.json"
+            result_path = private_root / "sdk-result.json"
+            worker_stdout = private_root / "worker.stdout.log"
+            worker_stderr = private_root / "worker.stderr.log"
+            write_private_text(
+                request_path,
+                json.dumps(
+                    self.worker_request_payload(isolated_request), sort_keys=True
+                ),
+            )
+            published = {
+                isolated_request.raw_log_path: request.raw_log_path,
+                isolated_request.stderr_log_path: request.stderr_log_path,
+                request_path: request.raw_log_path.with_name(
+                    f"{stem}.sdk-request.json"
+                ),
+                result_path: request.raw_log_path.with_name(
+                    f"{stem}.sdk-result.json"
+                ),
+                worker_stdout: request.raw_log_path.with_name(
+                    f"{stem}.worker.stdout.log"
+                ),
+                worker_stderr: request.raw_log_path.with_name(
+                    f"{stem}.worker.stderr.log"
+                ),
+            }
+            result = self._run_prepared_worker(
+                isolated_request,
                 worker_environment=worker_environment,
                 request_path=request_path,
                 result_path=result_path,
                 worker_stdout=worker_stdout,
                 worker_stderr=worker_stderr,
             )
+            leak_paths = redact_credential_leaks(
+                (request.cwd.resolve(), private_root),
+                markers,
+                baseline=workspace_before,
+            )
+            if leak_paths:
+                raise CodexSDKError(
+                    "Codex role attempted to publish bridged credential material; "
+                    "affected files were redacted"
+                )
+            return result
         finally:
-            self._scrub_worker_credentials(codex_home)
+            try:
+                if published and not leak_paths:
+                    leak_paths = redact_credential_leaks(
+                        (request.cwd.resolve(), *published.keys()),
+                        markers,
+                        baseline=workspace_before,
+                    )
+                for source, destination in published.items():
+                    if source.is_file() and not source.is_symlink():
+                        write_private_bytes(destination, source.read_bytes())
+                if not request.raw_log_path.exists():
+                    write_private_text(request.raw_log_path, "")
+                if not request.stderr_log_path.exists():
+                    write_private_text(request.stderr_log_path, "")
+                if leak_paths:
+                    with private_text_writer(request.stderr_log_path, "a") as error_log:
+                        error_log.write(
+                            "credential leakage guard redacted role-controlled output\n"
+                        )
+            finally:
+                self._scrub_worker_credentials(codex_home)
+            if leak_paths:
+                raise CodexSDKError(
+                    "Codex role attempted to publish bridged credential material; "
+                    "affected files were redacted"
+                )
 
     def _run_in_process(self, request: CodexRequest) -> CodexResult:
         request.raw_log_path.parent.mkdir(parents=True, exist_ok=True)

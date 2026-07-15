@@ -338,6 +338,7 @@ class SWERawCodexBaselineService:
             "sdk_events": process.sdk_artifact_root / "events.jsonl",
             "sdk_stderr": process.sdk_artifact_root / "stderr.log",
             "sdk_result": process.process_result_path,
+            "timeout_receipt": process.stdout_path.parent / "timeout-receipt.yaml",
         }
         return {
             name: digest_file(path) if path.is_file() else "missing"
@@ -358,6 +359,13 @@ class SWERawCodexBaselineService:
                 1024 * 1024,
             ),
         }
+        timeout_receipt = process.stdout_path.parent / "timeout-receipt.yaml"
+        if process.timed_out:
+            artifacts["timeout-receipt.yaml"] = (timeout_receipt, 1024 * 1024)
+        elif timeout_receipt.exists():
+            raise SWERawCodexHarnessError(
+                "completed Raw SDK process contains an unexpected timeout receipt"
+            )
         for name, (source, size_limit) in artifacts.items():
             if (
                 source.is_symlink()
@@ -386,9 +394,8 @@ class SWERawCodexBaselineService:
             else set()
         )
         expected = set(sdk_files)
-        invalid_set = not observed.issubset(expected) or (
-            not process.timed_out and observed != expected
-        )
+        required = expected - ({"process-result.json"} if process.timed_out else set())
+        invalid_set = observed != required
         if invalid_set:
             raise SWERawCodexHarnessError(
                 "Raw SDK artifact file set differs from the frozen evidence contract"
@@ -623,8 +630,35 @@ class SWERawCodexBaselineService:
             timeout_seconds=treatment.timeout_seconds,
         )
         observation: RawProcessObservation | None = None
+        terminal_digest: str
         if process.timed_out:
             process_status = "timed_out"
+            request = process.sdk_artifact_root / "request.json"
+            events = process.sdk_artifact_root / "events.jsonl"
+            sdk_stderr = process.sdk_artifact_root / "stderr.log"
+            if not all(path.is_file() and not path.is_symlink() for path in (request, events, sdk_stderr)):
+                raise SWERawCodexHarnessError(
+                    "timed-out Raw SDK process did not produce the required "
+                    "request and event evidence"
+                )
+            timeout_receipt = record_with_digest(
+                {
+                    "schema": "autobugfix-swe-raw-timeout-v1",
+                    "case_digest": str(bundle["record_digest"]),
+                    "manifest_digest": manifest_digest,
+                    "treatment_digest": digest_payload(treatment.to_dict()),
+                    "return_code": process.return_code,
+                    "duration_seconds": process.duration_seconds,
+                    "request_sha256": digest_file(request),
+                    "events_sha256": digest_file(events),
+                    "stderr_sha256": digest_file(sdk_stderr),
+                    "recorded_at": utc_now(),
+                }
+            )
+            timeout_path = process.stdout_path.parent / "timeout-receipt.yaml"
+            _write_yaml_once(timeout_path, timeout_receipt)
+            timeout_path.chmod(0o600)
+            terminal_digest = str(timeout_receipt["record_digest"])
         else:
             observation = self._validate_observation(
                 process,
@@ -633,6 +667,7 @@ class SWERawCodexBaselineService:
                 treatment=treatment,
             )
             process_status = observation.status
+            terminal_digest = observation.record_digest
         if self._worktree_authority(worktree) != worktree_authority:
             raise SWERawCodexHarnessError(
                 "Raw SDK worker changed protected Git authority"
@@ -655,9 +690,7 @@ class SWERawCodexBaselineService:
             case_bundle_digest=str(bundle["record_digest"]),
             process_status=process_status,
             timed_out=process.timed_out,
-            process_result_digest=(
-                observation.record_digest if observation is not None else None
-            ),
+            process_result_digest=terminal_digest,
             process_artifact_digests=process_digests,
             evidence_manifest_digest=str(evidence_manifest["record_digest"]),
             changed_paths=modified_paths,

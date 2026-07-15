@@ -114,6 +114,8 @@ class SWEOfficialRunner:
             artifact_dir=artifact_root / "docker-inspect-local",
             name="docker-inspect-local-instance",
             timeout_seconds=60,
+            env=self.runtime.command_env(),
+            inherit_env=False,
         )
         if local.passed:
             image_id = Path(local.stdout_path).read_text(encoding="utf-8").strip()
@@ -136,6 +138,8 @@ class SWEOfficialRunner:
             artifact_dir=artifact_root / "docker-pull",
             name="docker-pull-instance",
             timeout_seconds=self.runtime.benchmark_config.command_timeout_seconds,
+            env=self.runtime.command_env(),
+            inherit_env=False,
         )
         if not pull.passed:
             raise SWERuntimeError(f"failed to pull official image: {instance.docker_image}")
@@ -145,6 +149,8 @@ class SWEOfficialRunner:
             artifact_dir=artifact_root / "docker-inspect",
             name="docker-inspect-instance",
             timeout_seconds=60,
+            env=self.runtime.command_env(),
+            inherit_env=False,
         )
         image_id = Path(inspect.stdout_path).read_text(encoding="utf-8").strip()
         if not inspect.passed or not image_id.startswith("sha256:"):
@@ -242,6 +248,7 @@ class SWEOfficialRunner:
         official_root = artifact_root / "official"
         official_root.mkdir()
         prediction: str
+        prediction_path: Path | None = None
         model_name = "gold"
         if gold:
             prediction = "gold"
@@ -295,15 +302,23 @@ class SWEOfficialRunner:
         ):
             image_id = self.image_id(instance, artifact_root / "image")
         started_at = utc_now()
+        client_state = artifact_root / "scorer-client-state"
+        client_state.mkdir(mode=0o700)
         if self.adapter == "swebench_verified":
             argv = self._verified_command(instance, prediction, run_id, official_root)
             cwd = official_root
-            command_env = self.runtime.command_env()
+            command_env = self.runtime.command_env(client_state)
         else:
             self.runtime.verify_live_checkout()
             argv = self._live_command(instance, prediction, official_root)
             cwd = official_root
-            command_env = self.runtime.live_command_env()
+            command_env = self.runtime.live_command_env(client_state)
+        argv = self.runtime.isolated_official_argv(
+            argv,
+            cwd=cwd,
+            writable_roots=(official_root, client_state),
+            readable_roots=(prediction_path,) if prediction_path is not None else (),
+        )
         command = run_command(
             argv,
             cwd=cwd,

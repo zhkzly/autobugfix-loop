@@ -33,6 +33,8 @@ optimization:
 holdout:
   dataset: SWE-bench-Live/MultiLang
   count: 6
+  excluded_instances:
+    - formbricks__formbricks-6413
 waves:
   "3": 3
   "8": 8

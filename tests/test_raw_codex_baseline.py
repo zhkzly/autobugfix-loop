@@ -325,9 +325,8 @@ def test_codex_home_disables_hooks_skills_and_multi_agent(
     runtime = project / ".autobugfix/raw-codex-baseline"
     worktree = runtime / "case/worktree"
     worktree.mkdir(parents=True)
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("OPENAI_API_KEY", "test-only")
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex/auth.json").write_text("{}\n", encoding="utf-8")
     sandbox = RawCodexProcessSandbox(
         project,
         RawCodexBaselineConfig(
@@ -350,6 +349,81 @@ def test_codex_home_disables_hooks_skills_and_multi_agent(
     assert "network_access = false" in config
     assert "skills" not in config
     assert str(worktree) in config
+    assert (codex_home / "auth.json").read_text(encoding="utf-8") == "{}\n"
+
+
+def test_raw_worker_scrubs_auth_before_recursive_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "control"
+    runtime = project / ".autobugfix/raw"
+    runner_environment = runtime / "runner"
+    (runner_environment / "bin").mkdir(parents=True)
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex/auth.json").write_text(
+        '{"token":"test-only"}\n',
+        encoding="utf-8",
+    )
+    worktree = runtime / "case/worktree"
+    input_root = runtime / "case/input"
+    artifact_root = runtime / "case/process"
+    worktree.mkdir(parents=True)
+    input_root.mkdir(parents=True)
+    case_bundle = input_root / "case.json"
+    case_bundle.write_text("{}\n", encoding="utf-8")
+    sandbox = RawCodexProcessSandbox(
+        project,
+        RawCodexBaselineConfig(
+            runner_project=project / "baselines/raw_codex_sdk",
+            runtime_root=runtime,
+        ),
+        host_home=home,
+    )
+    monkeypatch.setattr(
+        sandbox,
+        "_sandbox_argv",
+        lambda **kwargs: [
+            "/bin/sh",
+            "-c",
+            "mkdir -p \"$CODEX_HOME/nested\"; "
+            "cp \"$CODEX_HOME/auth.json\" \"$CODEX_HOME/nested/auth.json\"",
+        ],
+    )
+    real_rmtree = shutil.rmtree
+    codex_home = artifact_root / "codex-home"
+
+    def fail_codex_home_cleanup(path, *args, **kwargs):
+        if Path(path) == codex_home:
+            raise OSError("simulated recursive cleanup failure")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "autobugfix.eval.baselines.isolation.shutil.rmtree",
+        fail_codex_home_cleanup,
+    )
+    with pytest.raises(OSError, match="recursive cleanup failure"):
+        sandbox.run(
+            runner_metadata=RunnerMetadata(
+                sdk_version="0.1.0b3",
+                prompt_template_digest="b" * 64,
+                source_digest="c" * 64,
+                package_digest="d" * 64,
+                environment=runner_environment,
+            ),
+            worktree=worktree,
+            input_root=input_root,
+            case_bundle=case_bundle,
+            artifact_root=artifact_root,
+            model="gpt-5.4-mini",
+            reasoning_effort="medium",
+            service_tier=None,
+            timeout_seconds=30,
+        )
+
+    assert codex_home.is_dir()
+    assert not list(codex_home.rglob("auth.json"))
 
 
 def test_bubblewrap_hides_control_and_sibling_state_but_allows_worktree(
@@ -389,6 +463,7 @@ def test_bubblewrap_hides_control_and_sibling_state_but_allows_worktree(
             f"if touch {shlex.quote(str(input_root / 'forbidden'))} 2>/dev/null; then exit 41; fi",
             f"touch {shlex.quote(str(worktree / 'written'))}",
             "test -r \"$CODEX_HOME/config.toml\"",
+            "test -r \"$CODEX_HOME/auth.json\"",
             "test -z \"${OPENAI_API_KEY:-}\"",
             "test -z \"${CODEX_API_KEY:-}\"",
             "echo isolated",
@@ -470,6 +545,8 @@ def test_bubblewrap_mounts_external_uv_python_prefix(
     input_root.mkdir(parents=True)
     case_bundle = input_root / "case.json"
     case_bundle.write_text("{}", encoding="utf-8")
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex/auth.json").write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("OPENAI_API_KEY", "test-only")
     mounts = _python_runtime_mounts(environment, home)
     assert mounts == ((versioned.resolve(), alias),)
@@ -516,6 +593,9 @@ def test_raw_worker_cannot_forge_retained_codex_config(
     runner_environment.mkdir(parents=True)
     case_bundle = input_root / "case.json"
     case_bundle.write_text("{}\n", encoding="utf-8")
+    raw_home = tmp_path / "home"
+    (raw_home / ".codex").mkdir(parents=True)
+    (raw_home / ".codex/auth.json").write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("OPENAI_API_KEY", "test-only")
     sandbox = RawCodexProcessSandbox(
         project,
@@ -523,7 +603,7 @@ def test_raw_worker_cannot_forge_retained_codex_config(
             runner_project=project / "baselines/raw_codex_sdk",
             runtime_root=runtime,
         ),
-        host_home=tmp_path / "home",
+        host_home=raw_home,
     )
     monkeypatch.setattr(
         sandbox,

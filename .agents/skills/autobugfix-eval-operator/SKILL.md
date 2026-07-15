@@ -134,7 +134,13 @@ harness digest. Never run either action from an Operator candidate.
 For a governed Study, use this aggregate flow:
 
 ```text
-autobugfix operator study guard-binding --study-id <study> --kind BASELINE|CANDIDATE
+autobugfix operator study guard-binding --study-id <study> --kind BASELINE
+# Public Optimization feedback only:
+autobugfix operator study guard-binding --study-id <study> --kind OPTIMIZATION
+autobugfix operator study evidence-register --study-id <study> \
+  --binding <optimization-binding.yaml> --artifact <formal-case-report.yaml>
+# Final Holdout only; this closes the line before scoring:
+autobugfix operator study guard-binding --study-id <study> --kind CANDIDATE
 autobugfix eval benchmark guard-run ... --study-binding <binding.yaml>
 autobugfix operator study import-guard-metric --study-id <study>
   --kind BASELINE|CANDIDATE --metric <signed-metric.yaml>
@@ -161,6 +167,10 @@ autobugfix eval benchmark qualify-swe --protocol benchmarks/swe-experiment-2.yam
 
 # Formal Holdout qualification is one human Guard action. The external root
 # must be outside project, Eval, Memory, Operator, and agent-readable roots.
+# Configure eval.benchmarks.guard.docker_host to a dedicated mode-0600 unix
+# socket inside the external Guard root. Its independently administered VM
+# daemon must publish autobugfix.guard.isolation=dedicated-vm-v1. Guard pins
+# socket, daemon profile/ID, and authority digest and rejects later drift.
 # Secret-keyed ordering selects cases without exposing IDs to Operator.
 autobugfix eval benchmark qualify-swe-holdout-cohort \
   --protocol benchmarks/swe-experiment-2.yaml \
@@ -188,6 +198,13 @@ official scorer is Eval evidence after freeze and cannot trigger another
 Writer attempt. Only the declared visible verifier can drive bounded Execution
 feedback.
 
+Optimization budget grants list official Verified instance IDs, not opaque
+case tokens. `run-swe-optimization` verifies the selected instance and its
+`first_wave` against the current human grant before launching the subject, then
+meters every real inner Writer/Evaluator SDK call. Evidence registration also
+reopens the frozen visible manifest and verifies the official command/log/report
+files and their digests; do not substitute a generated result YAML.
+
 The supervising Operator must not run the Holdout cohort command, inspect its
 processes, capture its terminal, or read its external root. A human runs it in
 a separate terminal and reports only the aggregate summary digest. The command
@@ -197,10 +214,25 @@ and stops only at six repository-unique cases spanning at least four language
 families. Never replace it with six visible `--instance` invocations for a
 formal experiment.
 
-Do not keep an Operator process active while the human Guard uses a shared
-Docker daemon. If the Operator can inspect that daemon, use a dedicated Guard
-Docker context/host or stop the Operator until qualification and Guard scoring
-finish; image tags and process arguments are Guard-local case evidence.
+Human Guard qualification and scoring require a dedicated Docker daemon whose
+server ID differs from the regular Eval daemon. A Docker context or alternate
+socket name that resolves to the same server is rejected. Configure an absolute
+`unix://` endpoint under the external Guard root as
+`eval.benchmarks.guard.docker_host`; the socket must be owner-only mode 0600.
+The independently administered VM daemon must publish
+`autobugfix.guard.isolation=dedicated-vm-v1`. Guard pins its socket inode,
+daemon ID, stable profile, and authority digest on first use, then rejects any
+change across qualification, preparation, sealing, or formal scoring. The
+official scorer receives the benchmark cache read-only and a fresh per-run
+writable client state. Never expose that daemon to Operator, Writer,
+Execution, or Raw baseline processes. Image tags and process arguments are
+Guard-local case evidence.
+
+Creating the candidate Guard binding is terminal for that Study line and
+happens before Holdout scoring. Metric import records pass/fail on the already
+closed line. A passing metric may create the frozen H_bug/H_general checkpoint;
+a failing or abandoned metric cannot drive another Writer attempt on the same
+Study.
 
 Private Defects4J qualification may compare buggy and fixed revisions to reject
 an unstable benchmark case. Never move its fixed baseline, gold data, or
@@ -226,8 +258,11 @@ case generation and official scoring.
 1. Read real artifacts and diagnose the owning layer. Do not jump directly to
    prompt or skill changes. SWE-bench inputs do not replace screenshots, logs,
    browser/API evidence, or human feedback in general on-call tasks.
-2. Create immutable triage with at least one existing evidence path, digest, or
-   URI.
+2. For a line-bound Study, register a frozen public Optimization report and use
+   only its `study-evidence:<id>` in triage. Ordinary non-Study work may still
+   use an existing evidence path, digest, or URI. For non-SWE work, emit the
+   repo-agnostic formal Optimization schema with the real verifier command,
+   exit status, stdout/stderr digests, and noninterference result.
 3. Capture a trusted baseline from the configured experiment profile before
    changing a behavior layer. Never type metric values into an authority path.
 4. Create request before patching. Request freezes base SHA, branch, layers,

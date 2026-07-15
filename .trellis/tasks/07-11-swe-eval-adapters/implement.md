@@ -99,10 +99,21 @@ uv run --cache-dir /tmp/uv-cache pytest -q tests/test_subject_broker.py tests/te
 - [x] Encrypt/authenticate Holdout state and emit public 3/8/16 projections
       without case-identity leakage.
 
-Public status: all ten protocol-pinned Verified Optimization cases are eligible
-under runtime `sha256:3eb9ba95dbf997c098c1bb893a6123e66e2ebf5f90b7d7be4d0d52ffe4fb5083`.
-The six Live cases remain a human-Guard action, so the two cohort items above
-must stay open until their encrypted receipts exist.
+Historical status: all ten protocol-pinned Verified Optimization cases were
+eligible under runtime
+`sha256:3eb9ba95dbf997c098c1bb893a6123e66e2ebf5f90b7d7be4d0d52ffe4fb5083`.
+That evidence does not authorize the rebuilt final candidate. On the current
+candidate, `astropy__astropy-12907` passed two isolated official gold scorer
+runs under
+protocol
+`a2f8e4d30a1b9d542b802367fd7c25cd6ecd0f5d2fbf7d3dc00855d36b66bd40`
+and runtime
+`sha256:3f6445541a9490719b70b37dba9b47d21333c0b61923c713462156ac603cc8f7`.
+The immutable qualification receipt digest is
+`4abcab1192e3f76e3fb10065008960a46cdaffe8baf824d761993f81f1ff8bc9`.
+The other nine Verified qualifications and all six human-Guard Live cases
+remain pending, so the cohort items above must stay open until current,
+immutable receipts exist.
 
 Real commands:
 
@@ -113,6 +124,22 @@ uv run --cache-dir /tmp/uv-cache autobugfix eval benchmark prepare-swe --protoco
 uv run --cache-dir /tmp/uv-cache autobugfix eval benchmark seal-swe --prepared <prepared> --guard-root <external-root>
 ```
 
+Human Live qualification additionally requires a configured
+`eval.benchmarks.guard.docker_host`: an owner-only mode-0600 Unix socket inside
+the external Guard root whose independently administered VM daemon differs
+from regular Eval and publishes
+`autobugfix.guard.isolation=dedicated-vm-v1`. The first Guard action persists
+the socket fingerprint, daemon ID/profile, and authority digest. Every later
+qualification, preparation, seal, and formal run must match that record.
+Official scorer code receives the pinned benchmark cache read-only and one
+fresh writable client-state directory per run.
+
+For Operator treatment feedback, generate an `OPTIMIZATION` Study binding,
+freeze the public formal case report, then register it through
+`operator study evidence-register`. Line-bound triage accepts only the returned
+`study-evidence:<id>`. Before final Holdout scoring, an interactive
+`CANDIDATE` binding closes the line with CAS; metric import cannot reopen it.
+
 ## 7. Real Production Acceptance
 
 - [x] Run one eligible development case through real `gpt-5.4-mini`
@@ -120,6 +147,12 @@ uv run --cache-dir /tmp/uv-cache autobugfix eval benchmark seal-swe --prepared <
 - [x] Fix only generic harness defects; never use official result to retry or
       optimize the candidate.
 - [x] Re-run gold qualification after the final harness change.
+- [x] Run the pinned real-repository Execution/Memory/Eval acceptance with
+      production `gpt-5.4-mini`; preserve the target main checkout and pending
+      Memory approval boundary.
+- [x] Run the governed Operator Supervisor/Writer acceptance through registered
+      Optimization evidence, matched performance baseline, terminal candidate
+      binding, Guard metric, and immutable checkpoint.
 - [ ] Freeze adapter/runtime/protocol digests for Experiment 2.
 
 ## 7a. Raw Codex SDK Comparator
@@ -134,36 +167,15 @@ uv run --cache-dir /tmp/uv-cache autobugfix eval benchmark seal-swe --prepared <
 - [x] Record Raw/H0/H_general as distinct treatments. Raw is contextual; the
       primary evolution comparison remains budget-matched H_general versus H0.
 
-Development acceptance `raw-swe-dev-20260713-002` used
-`gpt-5.4-mini` through `openai-codex==0.1.0b3`, produced a one-file patch,
-froze SDK request/events/result and process logs before scoring, passed the
-official SWE-bench 4.1.0 Docker scorer, and passed noninterference. The trusted
-runtime for that historical development acceptance was
-`sha256:e83ab8521188fd47492b443a504116ff8d3bcfe77fba4c2990c8e1b8e87533cc`;
-current qualification authority is the later runtime recorded above.
-The final evidence whitelist reduced one case from an invalid roughly 1 GiB
-Codex-home copy to 212 KiB and retained no auth bridge or mutable Codex home.
-This development result is harness acceptance only and is excluded from the
-ten-case formal baseline. A subsequent authority review found that this pilot
-used SDK `auto_review`; the formal protocol now pins `deny_all`,
-`workspace-write`, and disabled tool network access. Run a fresh development
-case under the new treatment digest before formal preparation. The earlier
-pilot remains diagnostic evidence but is not acceptance for the revised
-protocol.
-
-Revised development acceptance `raw-swe-dev-20260713-003-deny-all` then ran a
-fresh SDK thread and turn under the locked authority policy. It completed in
-155.38 seconds, produced a patch touching
-`astropy/modeling/separable.py` and its focused test, passed the official
-SWE-bench 4.1.0 scorer, and passed noninterference. Frozen `request.json`,
-`process-result.json`, and `codex-config.toml` independently record
-`deny_all`, `workspace-write`, and `network_access: false`. The evidence
-whitelist is about 270 KiB and contains neither `auth.json` nor a retained
-Codex home. Submission, official-result, and noninterference digests are
-`4ee41a44253612f53d693d699ad892f84fe538910518132c586e4fe32e8f511c`,
-`553f1b57b3298363b3f49da9ec30bafef20159545c4e4fa5acc613b5f069fed6`,
-and `6b56c43ea4d0771eed6c26e934daeb9115558c480e034bc0b43abe4e5d019849`.
-This pilot remains excluded from the formal ten-case score.
+Historical Raw pilots used superseded isolation/backend wiring and are not
+authority for the current comparator. The current implementation launches the
+standalone `baselines/raw_codex_sdk` package directly with
+`openai-codex==0.1.0b3`, a one-call private `CODEX_HOME`, `deny_all`,
+`workspace-write`, disabled tool network, and no Autobugfix Execution, Memory,
+Evaluator, or production backend. Its root and nested tests pass, but no fresh
+model run has yet been executed under this final direct-SDK architecture.
+Therefore the Raw formal baseline and current Raw development acceptance
+remain pending.
 
 Validation:
 
@@ -176,11 +188,13 @@ uv run --cache-dir /tmp/uv-cache autobugfix eval baseline run-swe-raw-developmen
 
 - [x] Run root and nested harness tests and compile checks.
 - [x] Run diff hygiene, role-skill validation, and task validation.
-- [x] Sequentially review Execution, Memory, Eval, Operator governance, Codex
-      runtime, portability/privacy, and official acceptance boundaries.
+- [ ] Independently review Execution, Memory, Eval, Operator governance, Codex
+      runtime, portability/privacy, and official acceptance boundaries on the
+      final integration candidate.
 - [x] Confirm H0, Raw baseline, target snapshots, and main checkout are
       unchanged.
-- [ ] Commit and push the adapter branch before creating
+- [x] Commit and push the integrated adapter candidate as draft PR 10.
+- [ ] Obtain trusted-base bootstrap approval and merge PR 10 before creating
       `experiment/general-main`.
 
 Required gates:

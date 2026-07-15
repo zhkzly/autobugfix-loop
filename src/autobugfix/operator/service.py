@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import wraps
@@ -23,12 +24,19 @@ from autobugfix.codex_runtime import build_codex_request
 from autobugfix.codex_sdk import (
     CodexSDKBackend,
     private_text_writer,
+    write_private_bytes,
     write_private_text,
 )
 from autobugfix.config import load_config
+from autobugfix.credential_guard import (
+    credential_markers,
+    redact_credential_leaks,
+    snapshot_regular_files,
+)
 from autobugfix.evaluator import parse_evaluator_decision
 from autobugfix.git_utils import GitError, git_common_dir, rev_parse, run_git
 from autobugfix.models import utc_now
+from autobugfix.memory.config import load_memory_config
 from autobugfix.models import CodexRequest, CodexResult
 from autobugfix.operator.approvals import (
     approval_signing_payload,
@@ -71,6 +79,7 @@ from autobugfix.operator.models import (
     OperatorTriage,
     PromotionRecord,
     ScopeRevision,
+    StudyEvidenceRecord,
     StudyMetricRecord,
     StudyRecord,
     UsageEntryRecord,
@@ -91,6 +100,7 @@ from autobugfix.operator.trusted import TrustedPolicy, load_trusted_policy
 from autobugfix.operator.validator import run_command_specs, run_validation_profiles
 from autobugfix.operator.workspace import create_operator_workspace, recover_operator_workspace
 from autobugfix.role_config import resolve_role
+from autobugfix.study_binding import validate_study_binding_shape
 
 
 class OperatorGovernanceError(RuntimeError):
@@ -153,6 +163,19 @@ def _path_digest(path: Path) -> str:
         elif item.is_dir():
             digest.update(f"directory\0{relative}\0".encode("utf-8"))
     return digest.hexdigest()
+
+
+def _manifest_digest(path: Path) -> str:
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return _path_digest(path)
+    if isinstance(raw, Mapping):
+        stored = raw.get("record_digest")
+        payload = {key: value for key, value in raw.items() if key != "record_digest"}
+        if isinstance(stored, str) and stored == digest_payload(payload):
+            return stored
+    return _path_digest(path)
 
 
 def _worktree_content_digest(path: Path) -> str:
@@ -419,14 +442,35 @@ class OperatorGovernanceService:
                 f"study memory snapshot already exists: {snapshot}"
             )
         snapshot.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.mkdir()
+        (snapshot / "active").mkdir()
+        (snapshot / "skills/approved").mkdir(parents=True)
         if source.exists():
-            if not source.is_dir():
+            if not source.is_dir() or source.is_symlink():
                 raise OperatorGovernanceError(
-                    f"study memory root must be a directory: {source}"
+                    f"study memory root must be an unredirected directory: {source}"
                 )
-            shutil.copytree(source, snapshot)
-        else:
-            snapshot.mkdir()
+            approved_sources = (
+                (source / "active", snapshot / "active"),
+                (source / "skills/approved", snapshot / "skills/approved"),
+            )
+            for approved_source, destination in approved_sources:
+                if not approved_source.exists():
+                    continue
+                if (
+                    approved_source.is_symlink()
+                    or not approved_source.is_dir()
+                    or any(item.is_symlink() for item in approved_source.rglob("*"))
+                ):
+                    raise OperatorGovernanceError(
+                        "approved Study Memory must not be a symlink or contain symlinks"
+                    )
+                shutil.copytree(
+                    approved_source,
+                    destination,
+                    dirs_exist_ok=True,
+                    symlinks=False,
+                )
         for item in sorted(
             snapshot.rglob("*"),
             key=lambda value: len(value.parts),
@@ -515,9 +559,21 @@ class OperatorGovernanceService:
             ) from exc
         if not snapshot.is_file():
             raise OperatorGovernanceError("study manifest snapshot is missing")
-        if _path_digest(snapshot) != study.manifest_digest:
+        if _manifest_digest(snapshot) != study.manifest_digest:
             raise OperatorGovernanceError("study manifest snapshot digest mismatch")
         return snapshot
+
+    def study_baseline_identity(self, study_id: str) -> dict[str, str]:
+        study = self.store.read_study(study_id)
+        self._validated_study_manifest_snapshot(study)
+        return {
+            "subject_sha": study.base_subject_sha,
+            "subject_tree": rev_parse(
+                self.project_root,
+                f"{study.base_subject_sha}^{{tree}}",
+            ),
+            "harness_sha": study.harness_sha,
+        }
 
     @staticmethod
     def _study_projection(study: StudyRecord) -> dict[str, Any]:
@@ -607,6 +663,7 @@ class OperatorGovernanceService:
         study: StudyRecord,
         line: ExperimentLineRecord,
         grant: BudgetGrantRecord,
+        require_success: bool = True,
     ) -> dict[str, Any]:
         allowed = {
             "schema",
@@ -645,7 +702,12 @@ class OperatorGovernanceService:
                 raise OperatorGovernanceError(
                     f"study metric receipt {key} does not match trusted state"
                 )
-        if data.get("success_contract_passed") is not True:
+        verdict = data.get("success_contract_passed")
+        if not isinstance(verdict, bool):
+            raise OperatorGovernanceError(
+                "study metric receipt is missing a success-contract verdict"
+            )
+        if require_success and verdict is not True:
             raise OperatorGovernanceError("study metric receipt did not pass the success contract")
         return dict(data)
 
@@ -683,6 +745,17 @@ class OperatorGovernanceService:
             self._baseline_metric_receipt(data, study=study)
         else:
             line = self.store.read_experiment_line(study.line_id)
+            if line.status != "CLOSED":
+                raise OperatorGovernanceError(
+                    "candidate metric requires a terminal experiment line"
+                )
+            if any(
+                item.kind == "CANDIDATE"
+                for item in self.store.read_study_metrics(study.study_id)
+            ):
+                raise OperatorGovernanceError(
+                    "candidate metric is already registered for this Study"
+                )
             integrations = self.store.read_integrations(line.line_id)
             if (
                 not integrations
@@ -696,13 +769,19 @@ class OperatorGovernanceService:
             if not grants:
                 raise OperatorGovernanceError("candidate metric requires a study budget grant")
             grant = grants[-1]
-            self._study_metric_receipt(data, study=study, line=line, grant=grant)
+            self._study_metric_receipt(
+                data,
+                study=study,
+                line=line,
+                grant=grant,
+                require_success=False,
+            )
             line_id = line.line_id
             subject_sha = line.head_sha
             grant_id = grant.grant_id
             budget_digest = grant.grant_digest
             wave = grant.wave
-            success_contract_passed = True
+            success_contract_passed = bool(data["success_contract_passed"])
         artifact_path, artifact_sha = self.store.write_study_metric_artifact(
             content,
             filename=source.name,
@@ -732,12 +811,17 @@ class OperatorGovernanceService:
         study_id: str,
         *,
         kind: str,
+        terminalize: bool = False,
     ) -> dict[str, Any]:
         """Derive the non-authoritative binding that an external Guard signs."""
 
-        if kind not in {"BASELINE", "CANDIDATE"}:
+        if kind not in {"BASELINE", "OPTIMIZATION", "CANDIDATE"}:
             raise OperatorGovernanceError(
-                "Guard study binding kind must be BASELINE or CANDIDATE"
+                "Guard study binding kind must be BASELINE, OPTIMIZATION, or CANDIDATE"
+            )
+        if terminalize and kind != "CANDIDATE":
+            raise OperatorGovernanceError(
+                "only a candidate Guard binding may terminalize a Study line"
             )
         study = self.store.read_study(study_id)
         self._validated_study_memory_snapshot(study)
@@ -746,12 +830,14 @@ class OperatorGovernanceService:
             "schema": "autobugfix-guard-study-binding-v1",
             "kind": kind,
             "study_id": study.study_id,
+            "cohort_id": study.cohort_id,
             "line_id": study.line_id,
             "subject_sha": study.base_subject_sha,
             "subject_tree": rev_parse(
                 self.project_root, f"{study.base_subject_sha}^{{tree}}"
             ),
             "line_generation": 0,
+            "line_status": "NOT_INITIALIZED",
             "manifest_digest": study.manifest_digest,
             "success_contract_digest": digest_payload(study.success_contract),
             "harness_sha": study.harness_sha,
@@ -771,15 +857,49 @@ class OperatorGovernanceService:
                 )
         else:
             line = self.store.read_experiment_line(study.line_id)
-            integrations = self.store.read_integrations(line.line_id)
-            if (
-                not integrations
-                or integrations[-1].kind != "CANDIDATE"
-                or integrations[-1].result_head_sha != line.head_sha
-            ):
+            if kind == "OPTIMIZATION" and line.status != "OPEN":
                 raise OperatorGovernanceError(
-                    "candidate Guard binding requires the current candidate integration"
+                    "Optimization binding requires an open experiment line"
                 )
+            integrations = self.store.read_integrations(line.line_id)
+            if kind == "CANDIDATE":
+                if line.status == "OPEN":
+                    if not terminalize:
+                        raise OperatorGovernanceError(
+                            "candidate binding must terminalize the experiment line before scoring"
+                        )
+                    if (
+                        not integrations
+                        or integrations[-1].kind != "CANDIDATE"
+                        or integrations[-1].result_head_sha != line.head_sha
+                    ):
+                        raise OperatorGovernanceError(
+                            "candidate Guard binding requires the current candidate integration"
+                        )
+                    line = self.store.close_experiment_line(
+                        line.line_id,
+                        expected_head_sha=line.head_sha,
+                        expected_generation=line.generation,
+                    )
+                elif line.status != "CLOSED":
+                    raise OperatorGovernanceError(
+                        "candidate Guard binding requires a terminal experiment line"
+                    )
+                if any(
+                    item.kind == "CANDIDATE"
+                    for item in self.store.read_study_metrics(study.study_id)
+                ):
+                    raise OperatorGovernanceError(
+                        "candidate Guard metric is already registered for this Study"
+                    )
+                if (
+                    not integrations
+                    or integrations[-1].kind != "CANDIDATE"
+                    or integrations[-1].result_head_sha != line.head_sha
+                ):
+                    raise OperatorGovernanceError(
+                        "terminal candidate binding lacks the current candidate integration"
+                    )
             grants = self.store.read_budget_grants(study.study_id)
             if not grants:
                 raise OperatorGovernanceError(
@@ -793,12 +913,413 @@ class OperatorGovernanceService:
                         self.project_root, f"{line.head_sha}^{{tree}}"
                     ),
                     "line_generation": line.generation,
+                    "line_status": line.status,
                     "budget_grant_id": grant.grant_id,
                     "budget_digest": grant.grant_digest,
                     "wave": grant.wave,
                 }
             )
-        return {**payload, "record_digest": digest_payload(payload)}
+        record = {**payload, "record_digest": digest_payload(payload)}
+        validate_study_binding_shape(record)
+        return record
+
+    def verify_guard_study_binding(
+        self,
+        binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Re-derive a binding from trusted Operator state without mutating it."""
+
+        validate_study_binding_shape(binding)
+        supplied = self._verified_operator_record(binding, label="Study binding")
+        expected = self.guard_study_binding(
+            str(supplied["study_id"]),
+            kind=str(supplied["kind"]),
+            terminalize=False,
+        )
+        if supplied != expected:
+            raise OperatorGovernanceError(
+                "Study binding differs from current trusted Operator state"
+            )
+        return expected
+
+    def study_memory_snapshot(self, study_id: str, *, expected_digest: str) -> Path:
+        study = self.store.read_study(study_id)
+        snapshot = self._validated_study_memory_snapshot(study)
+        if study.memory_digest != expected_digest:
+            raise OperatorGovernanceError(
+                "Study Memory digest differs from trusted Operator state"
+            )
+        return snapshot
+
+    def validate_optimization_case_binding(
+        self,
+        binding: Mapping[str, Any],
+        *,
+        case_id: str,
+        first_wave: int,
+    ) -> BudgetGrantRecord:
+        authoritative = self.verify_guard_study_binding(binding)
+        if authoritative["kind"] != "OPTIMIZATION":
+            raise OperatorGovernanceError(
+                "visible case budget requires an Optimization Study binding"
+            )
+        grant_id = authoritative.get("budget_grant_id")
+        if not isinstance(grant_id, str) or not grant_id:
+            raise OperatorGovernanceError("Optimization binding has no budget grant")
+        grant = self.store.read_budget_grant(grant_id)
+        grants = self.store.read_budget_grants(str(authoritative["study_id"]))
+        if (
+            not grants
+            or grants[-1].grant_id != grant.grant_id
+            or grant.grant_digest != authoritative.get("budget_digest")
+            or grant.wave != authoritative.get("wave")
+            or case_id not in grant.case_ids
+            or first_wave not in {3, 8, 16}
+            or first_wave > grant.wave
+        ):
+            raise OperatorGovernanceError(
+                "Optimization case is outside the current trusted budget wave"
+            )
+        return grant
+
+    @staticmethod
+    def _verified_operator_record(
+        raw: Mapping[str, Any],
+        *,
+        label: str,
+    ) -> dict[str, Any]:
+        record = dict(raw)
+        stored = record.pop("record_digest", None)
+        if not isinstance(stored, str) or len(stored) != 64:
+            raise OperatorGovernanceError(f"{label} lacks a valid record digest")
+        if digest_payload(record) != stored:
+            raise OperatorGovernanceError(f"{label} record digest mismatch")
+        return {**record, "record_digest": stored}
+
+    @staticmethod
+    def _load_operator_yaml(path: Path, *, label: str) -> dict[str, Any]:
+        if not path.is_file() or path.is_symlink():
+            raise OperatorGovernanceError(f"{label} is missing or redirected: {path}")
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise OperatorGovernanceError(f"{label} is not valid YAML") from exc
+        if not isinstance(raw, Mapping):
+            raise OperatorGovernanceError(f"{label} must be a mapping")
+        return OperatorGovernanceService._verified_operator_record(raw, label=label)
+
+    @staticmethod
+    def _verified_eval_file(
+        value: Any,
+        expected_sha256: Any,
+        *,
+        trusted_root: Path,
+        label: str,
+    ) -> Path:
+        path = Path(str(value or ""))
+        if not path.is_absolute() or path.is_symlink():
+            raise OperatorGovernanceError(
+                f"{label} is not an unredirected absolute artifact"
+            )
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise OperatorGovernanceError(f"{label} is missing") from exc
+        if path != resolved or not resolved.is_file() or not resolved.is_relative_to(
+            trusted_root
+        ):
+            raise OperatorGovernanceError(
+                f"{label} is outside trusted Eval state or redirected"
+            )
+        observed = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        if expected_sha256 != observed:
+            raise OperatorGovernanceError(f"{label} digest mismatch")
+        return resolved
+
+    def _validate_swe_optimization_evidence(
+        self,
+        *,
+        study: StudyRecord,
+        report: Mapping[str, Any],
+        official: Mapping[str, Any],
+        trusted_root: Path,
+    ) -> None:
+        manifest = self._load_operator_yaml(
+            self._validated_study_manifest_snapshot(study),
+            label="frozen SWE Study manifest",
+        )
+        cases = manifest.get("optimization_cases")
+        matches = []
+        if isinstance(cases, list):
+            for raw_case in cases:
+                if not isinstance(raw_case, Mapping):
+                    continue
+                case = self._verified_operator_record(
+                    raw_case,
+                    label="frozen SWE Optimization case",
+                )
+                visible = case.get("visible_case")
+                if (
+                    isinstance(visible, Mapping)
+                    and visible.get("case_token") == report.get("case_token")
+                    and case.get("benchmark_instance_id")
+                    == official.get("instance_id")
+                ):
+                    matches.append(case)
+        if len(matches) != 1:
+            raise OperatorGovernanceError(
+                "SWE Optimization evidence is not a unique frozen manifest case"
+            )
+        if official.get("adapter") != "swebench_verified":
+            raise OperatorGovernanceError(
+                "SWE Optimization evidence did not use the Verified adapter"
+            )
+        command_raw = official.get("command")
+        command = self._verified_operator_record(
+            command_raw,
+            label="SWE official scorer command",
+        ) if isinstance(command_raw, Mapping) else {}
+        argv = command.get("argv")
+        exit_code = command.get("exit_code")
+        timed_out = command.get("timed_out")
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or "swebench.harness.run_evaluation" not in argv
+            or not isinstance(timed_out, bool)
+            or (exit_code is not None and not isinstance(exit_code, int))
+            or command.get("passed") != (not timed_out and exit_code == 0)
+        ):
+            raise OperatorGovernanceError(
+                "SWE official scorer command evidence is invalid"
+            )
+        for stream in ("stdout", "stderr"):
+            self._verified_eval_file(
+                command.get(f"{stream}_path"),
+                command.get(f"{stream}_sha256"),
+                trusted_root=trusted_root,
+                label=f"SWE official scorer {stream}",
+            )
+        output_root = Path(str(official.get("output_root") or ""))
+        if (
+            not output_root.is_absolute()
+            or output_root.is_symlink()
+            or output_root.resolve() != output_root
+            or not output_root.is_dir()
+            or not output_root.is_relative_to(trusted_root)
+        ):
+            raise OperatorGovernanceError(
+                "SWE official scorer output root is outside trusted Eval state"
+            )
+        report_path = official.get("report_path")
+        if report_path == "missing":
+            if official.get("report_sha256") != "missing" or not official.get(
+                "harness_error"
+            ):
+                raise OperatorGovernanceError(
+                    "SWE official scorer missing report is not a harness error"
+                )
+        else:
+            self._verified_eval_file(
+                report_path,
+                official.get("report_sha256"),
+                trusted_root=trusted_root,
+                label="SWE official scorer report",
+            )
+        if official.get("passed") != (
+            not bool(official.get("harness_error"))
+            and official.get("resolved") is True
+        ):
+            raise OperatorGovernanceError(
+                "SWE official scorer pass projection is inconsistent"
+            )
+
+    def register_study_evidence(
+        self,
+        study_id: str,
+        *,
+        binding_path: Path | str,
+        artifact_path: Path | str,
+    ) -> StudyEvidenceRecord:
+        """Import one public Optimization result into trusted Operator evidence."""
+
+        study = self.store.read_study(study_id)
+        if not study.cohort_id:
+            raise OperatorGovernanceError("Study lacks a frozen cohort identity")
+        binding_source = Path(binding_path)
+        if not binding_source.is_absolute():
+            binding_source = self.project_root / binding_source
+        binding = self._load_operator_yaml(
+            binding_source,
+            label="Optimization Study binding",
+        )
+        expected_binding = self.guard_study_binding(
+            study.study_id,
+            kind="OPTIMIZATION",
+        )
+        if binding != expected_binding:
+            raise OperatorGovernanceError(
+                "Optimization evidence binding does not match current Study authority"
+            )
+
+        source = Path(artifact_path)
+        if not source.is_absolute():
+            source = self.project_root / source
+        if source.is_symlink():
+            raise OperatorGovernanceError(
+                "Optimization evidence artifact must not be a symbolic link"
+            )
+        source = source.resolve()
+        trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
+        if not source.is_relative_to(trusted_root):
+            raise OperatorGovernanceError(
+                "Optimization evidence must originate in trusted Eval state"
+            )
+        report = self._load_operator_yaml(
+            source,
+            label="Optimization case report",
+        )
+        report_schema = report.get("schema")
+        if (
+            report_schema
+            not in {
+                "autobugfix-formal-optimization-case-v1",
+                "autobugfix-swe-formal-case-v1",
+            }
+            or report.get("experiment_role") != "optimization"
+            or report.get("study_binding_digest") != binding["record_digest"]
+            or report.get("executed_subject_sha") != binding["subject_sha"]
+            or report.get("executed_subject_tree") != binding["subject_tree"]
+            or not isinstance(report.get("noninterference"), Mapping)
+        ):
+            raise OperatorGovernanceError(
+                "Optimization case report does not prove the bound public execution"
+            )
+        if report_schema == "autobugfix-formal-optimization-case-v1":
+            verification = report.get("verification")
+            if (
+                not isinstance(verification, Mapping)
+                or not isinstance(verification.get("argv"), list)
+                or not verification.get("argv")
+                or not isinstance(verification.get("returncode"), int)
+                or not isinstance(verification.get("passed"), bool)
+                or any(
+                    not isinstance(verification.get(key), str)
+                    or len(verification[key]) != 64
+                    for key in ("stdout_sha256", "stderr_sha256")
+                )
+                or report["noninterference"].get("passed") is not True
+            ):
+                raise OperatorGovernanceError(
+                    "generic Optimization evidence lacks a real verification record"
+                )
+        else:
+            official_raw = report.get("official_result")
+            try:
+                official = self._verified_operator_record(
+                    official_raw,
+                    label="SWE official scorer result",
+                ) if isinstance(official_raw, Mapping) else {}
+                noninterference = self._verified_operator_record(
+                    report["noninterference"],
+                    label="SWE noninterference receipt",
+                )
+            except OperatorGovernanceError:
+                official = {}
+                noninterference = {}
+            if (
+                official.get("schema") != "autobugfix-swe-official-result-v1"
+                or official.get("instance_id") in {None, ""}
+                or not isinstance(official.get("resolved"), bool)
+                or not isinstance(official.get("harness_error"), str)
+                or report.get("resolved") != official.get("resolved")
+                or report.get("harness_error") != official.get("harness_error")
+                or noninterference.get("schema")
+                != "autobugfix-swe-noninterference-v1"
+                or noninterference.get("case_token") != report.get("case_token")
+                or noninterference.get("submission_digest")
+                != report.get("submission_digest")
+                or noninterference.get("official_result_digest")
+                != official.get("record_digest")
+                or noninterference.get("unchanged") is not True
+            ):
+                raise OperatorGovernanceError(
+                    "SWE Optimization evidence lacks a verified official scorer chain"
+                )
+            self._validate_swe_optimization_evidence(
+                study=study,
+                report=report,
+                official=official,
+                trusted_root=trusted_root,
+            )
+        content = source.read_bytes()
+        artifact, artifact_sha = self.store.write_study_evidence_artifact(
+            content,
+            study_id=study.study_id,
+            filename=source.name,
+        )
+        evidence = StudyEvidenceRecord(
+            evidence_id=self.store.next_id("study-evidence"),
+            study_id=study.study_id,
+            cohort_id=study.cohort_id,
+            treatment=study.target_checkpoint_name,
+            source_kind="optimization_case",
+            subject_sha=str(binding["subject_sha"]),
+            binding_digest=str(binding["record_digest"]),
+            source_record_digest=str(report["record_digest"]),
+            artifact_path=str(artifact),
+            artifact_sha256=artifact_sha,
+        )
+        self.store.write_study_evidence(evidence)
+        return evidence
+
+    @staticmethod
+    def study_evidence_reference(evidence: StudyEvidenceRecord) -> str:
+        return f"study-evidence:{evidence.evidence_id}"
+
+    def _validated_study_evidence(
+        self,
+        study: StudyRecord,
+        references: Iterable[str],
+        *,
+        expected_subject_sha: str,
+    ) -> list[tuple[StudyEvidenceRecord, dict[str, Any]]]:
+        if not study.cohort_id:
+            raise OperatorGovernanceError("Study lacks a frozen cohort identity")
+        values = tuple(references)
+        if not values or any(not value.startswith("study-evidence:") for value in values):
+            raise OperatorGovernanceError(
+                "line-bound requests require only registered study-evidence references"
+            )
+        validated: list[tuple[StudyEvidenceRecord, dict[str, Any]]] = []
+        for reference in values:
+            evidence_id = safe_id(reference.removeprefix("study-evidence:"))
+            record = self.store.read_study_evidence(evidence_id)
+            if (
+                record.study_id != study.study_id
+                or record.cohort_id != study.cohort_id
+                or record.treatment != study.target_checkpoint_name
+                or record.source_kind != "optimization_case"
+                or record.subject_sha != expected_subject_sha
+            ):
+                raise OperatorGovernanceError(
+                    "registered study evidence belongs to another Study, treatment, or subject"
+                )
+            report = self._load_operator_yaml(
+                Path(record.artifact_path),
+                label="registered Optimization evidence",
+            )
+            if (
+                report.get("record_digest") != record.source_record_digest
+                or report.get("study_binding_digest") != record.binding_digest
+                or report.get("executed_subject_sha") != record.subject_sha
+                or report.get("experiment_role") != "optimization"
+            ):
+                raise OperatorGovernanceError(
+                    "registered study evidence authority no longer matches its source record"
+                )
+            validated.append((record, report))
+        return validated
 
     def register_signed_guard_metric(
         self,
@@ -843,7 +1364,11 @@ class OperatorGovernanceService:
             raise OperatorGovernanceError(
                 "signed Guard metric is missing its Study binding"
             )
-        expected_binding = self.guard_study_binding(study_id, kind=kind)
+        expected_binding = self.guard_study_binding(
+            study_id,
+            kind=kind,
+            terminalize=False,
+        )
         if dict(binding) != expected_binding:
             raise OperatorGovernanceError(
                 "signed Guard metric does not match current Study/line/budget authority"
@@ -921,13 +1446,8 @@ class OperatorGovernanceService:
                     )
                 if not _metric_condition_passes(actual, expected):
                     failed_conditions.append(str(key))
-            if failed_conditions:
-                raise OperatorGovernanceError(
-                    "signed Guard metric does not satisfy the Study success contract: "
-                    + ", ".join(sorted(failed_conditions))
-                )
             metrics = derived
-            success = True
+            success = not failed_conditions
 
         normalized: dict[str, Any] = {
             "schema": (
@@ -1040,10 +1560,6 @@ class OperatorGovernanceService:
         resolved_base_ref = base_ref or self.trusted_ref or "HEAD"
         base_sha = rev_parse(self.project_root, resolved_base_ref)
         harness_sha = rev_parse(self.project_root, harness_ref or resolved_base_ref)
-        if harness_sha != base_sha:
-            raise OperatorGovernanceError(
-                "experiment line H0 and harness ref must resolve to the same commit"
-            )
         identifier = safe_id(str(study_id))
         designated_line = safe_id(str(line_id or identifier))
         cohort = safe_id(str(cohort_id or identifier))
@@ -1052,12 +1568,24 @@ class OperatorGovernanceService:
             subject_sha=base_sha,
             primary_model=primary_model,
         )
-        memory = Path(memory_root) if memory_root is not None else (
-            self.project_root / ".autobugfix-memory/active"
-        )
+        canonical_memory_path = load_memory_config(self.project_root).root
+        if canonical_memory_path.is_symlink():
+            raise OperatorGovernanceError(
+                "canonical approved active Memory root must not be a symlink"
+            )
+        canonical_memory = canonical_memory_path.resolve()
+        memory = Path(memory_root) if memory_root is not None else canonical_memory_path
         if not memory.is_absolute():
             memory = self.project_root / memory
+        if memory.is_symlink():
+            raise OperatorGovernanceError(
+                "study Memory root must not be a symlink"
+            )
         memory = memory.resolve()
+        if memory != canonical_memory:
+            raise OperatorGovernanceError(
+                "study Memory must use the canonical approved active Memory root"
+            )
         memory_snapshot: Path | None = None
         manifest_snapshot: Path | None = None
         try:
@@ -1104,7 +1632,7 @@ class OperatorGovernanceService:
                 line_id=designated_line,
                 primary_model=primary_model,
                 target_checkpoint_name=target_checkpoint_name,
-                manifest_digest=_path_digest(manifest_snapshot),
+                manifest_digest=_manifest_digest(manifest_snapshot),
                 role_config_digest=digests["role_config_digest"],
                 memory_digest=memory_digest,
                 success_contract=dict(success_contract),
@@ -1588,8 +2116,10 @@ class OperatorGovernanceService:
                 raise OperatorGovernanceError(
                     f"study target checkpoint is {study.target_checkpoint_name}, not {name}"
                 )
-            if line.status != "OPEN":
-                raise OperatorGovernanceError("checkpoint requires an open experiment line")
+            if line.status != "CLOSED":
+                raise OperatorGovernanceError(
+                    "checkpoint requires a terminally measured experiment line"
+                )
             if study.policy_digest != digest_payload(self.policy().data):
                 raise OperatorGovernanceError("study machine constitution is stale")
             checkpoints = self.store.read_checkpoints(study.study_id)
@@ -1623,6 +2153,10 @@ class OperatorGovernanceService:
             metric_record, metric_receipt = self._registered_metric_receipt(
                 metric_receipt_id
             )
+            if metric_record.success_contract_passed is not True:
+                raise OperatorGovernanceError(
+                    "checkpoint metric did not satisfy the Study success contract"
+                )
             if (
                 metric_record.kind != "CANDIDATE"
                 or metric_record.study_id != study.study_id
@@ -1634,7 +2168,6 @@ class OperatorGovernanceService:
                 or metric_record.budget_grant_id != grant.grant_id
                 or metric_record.budget_digest != grant.grant_digest
                 or metric_record.wave != grant.wave
-                or metric_record.success_contract_passed is not True
                 or metric_record.producer != "benchmark_guard"
             ):
                 raise OperatorGovernanceError(
@@ -1686,6 +2219,7 @@ class OperatorGovernanceService:
                     line,
                     generation=line.generation + 1,
                     active_checkpoint_id=checkpoint.checkpoint_id,
+                    status="CLOSED",
                 )
                 self._activate_experiment_release(study.study_id, release)
                 release_activated = True
@@ -1725,8 +2259,8 @@ class OperatorGovernanceService:
             checkpoint = self.store.read_checkpoint(checkpoint_id)
             if checkpoint.line_id != line.line_id or checkpoint.study_id != line.study_id:
                 raise OperatorGovernanceError("rollback checkpoint belongs to another line")
-            if line.status != "OPEN":
-                raise OperatorGovernanceError("rollback requires an open experiment line")
+            if line.status not in {"OPEN", "CLOSED"}:
+                raise OperatorGovernanceError("rollback requires a valid experiment line")
             current_tree = rev_parse(self.project_root, f"{line.head_sha}^{{tree}}")
             if current_tree == checkpoint.tree_sha:
                 raise OperatorGovernanceError("experiment line already has the checkpoint tree")
@@ -2361,7 +2895,7 @@ class OperatorGovernanceService:
         if not values:
             raise OperatorGovernanceError("at least one evidence reference is required")
         for value in values:
-            if value.startswith(("sha256:", "uri:", "note:")):
+            if value.startswith(("sha256:", "uri:", "note:", "study-evidence:")):
                 continue
             path = Path(value)
             if not path.is_absolute():
@@ -2450,6 +2984,11 @@ class OperatorGovernanceService:
                 if is_expired(grant.expires_at):
                     raise OperatorGovernanceError("budget grant has expired")
                 budget_grant_digest = grant.grant_digest
+            self._validated_study_evidence(
+                study,
+                triage.evidence,
+                expected_subject_sha=line.head_sha,
+            )
         elif budget_grant_id:
             raise OperatorGovernanceError("budget grant binding requires experiment_line_id")
         else:
@@ -2723,6 +3262,14 @@ class OperatorGovernanceService:
                         violations.append("operator request budget grant is superseded")
                     if is_expired(grant.expires_at):
                         violations.append("operator request budget grant has expired")
+                    try:
+                        self._validated_study_evidence(
+                            study,
+                            request.evidence,
+                            expected_subject_sha=request.base_sha,
+                        )
+                    except (OperatorStoreError, OperatorGovernanceError) as exc:
+                        violations.append(str(exc))
         minimums = policy.data.get("operator_runtime_minimums") or {}
         if bool(minimums.get("require_process_sandbox", True)) and not self.config.operator.verification.require_process_sandbox:
             violations.append("project config cannot disable the authoritative process sandbox")
@@ -3172,6 +3719,23 @@ class OperatorGovernanceService:
         )
 
     def _evidence_view(self, request: OperatorRequest) -> list[dict[str, Any]]:
+        if request.experiment_line_id:
+            line = self.store.read_experiment_line(request.experiment_line_id)
+            study = self.store.read_study(line.study_id)
+            records = self._validated_study_evidence(
+                study,
+                request.evidence,
+                expected_subject_sha=request.base_sha,
+            )
+            return [
+                {
+                    "reference": self.study_evidence_reference(record),
+                    "source_kind": record.source_kind,
+                    "source_record_digest": record.source_record_digest,
+                    "content": yaml.safe_dump(report, sort_keys=False),
+                }
+                for record, report in records
+            ]
         values: list[dict[str, Any]] = []
         for reference in request.evidence:
             item: dict[str, Any] = {"reference": reference}
@@ -3379,26 +3943,38 @@ class OperatorGovernanceService:
         root.mkdir(parents=True, exist_ok=False)
         return root / "raw.jsonl", root / "stderr.log"
 
-    def _run_writer_backend(
-        self, request_id: str, run_id: str, request: CodexRequest
-    ) -> CodexResult:
-        if not isinstance(self.backend, CodexSDKBackend):
-            return self.backend.run(request)
-        root = request.raw_log_path.parent
-        request_path = root / "sdk-request.json"
-        result_path = root / "sdk-result.json"
-        if result_path.exists():
-            result_path.unlink()
+    def _start_isolated_writer_worker(
+        self,
+        request: CodexRequest,
+        worker_environment: dict[str, str],
+        codex_home: Path,
+    ) -> tuple[
+        subprocess.Popen[str],
+        Any,
+        Any,
+        CodexRequest,
+        Path,
+        Path,
+        Path,
+        Path,
+    ]:
+        private_root = codex_home / "operator-io"
+        private_root.mkdir(mode=0o700, exist_ok=False)
+        isolated_request = replace(
+            request,
+            raw_log_path=private_root / "raw.jsonl",
+            stderr_log_path=private_root / "stderr.log",
+        )
+        request_path = private_root / "sdk-request.json"
+        result_path = private_root / "sdk-result.json"
         write_private_text(
             request_path,
-            json.dumps(self.backend.worker_request_payload(request), sort_keys=True),
+            json.dumps(
+                self.backend.worker_request_payload(isolated_request), sort_keys=True
+            ),
         )
-        worker_stdout = root / "sdk-worker.stdout.log"
-        worker_stderr = root / "sdk-worker.stderr.log"
-        with private_text_writer(request.raw_log_path, "a"):
-            pass
-        with private_text_writer(request.stderr_log_path, "a"):
-            pass
+        worker_stdout = private_root / "worker.stdout.log"
+        worker_stderr = private_root / "worker.stderr.log"
         stdout_handle = private_text_writer(worker_stdout)
         stderr_handle = private_text_writer(worker_stderr)
         worker_argv = [
@@ -3412,15 +3988,64 @@ class OperatorGovernanceService:
         ]
         if self.backend.module_name:
             worker_argv.extend(("--module-name", self.backend.module_name))
-        process = subprocess.Popen(
-            self.backend.worker_launch_argv(request, worker_argv),
-            cwd=self.project_root,
-            env=self.backend.prepare_worker_environment(request),
-            text=True,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            start_new_session=os.name != "nt",
+        try:
+            process = subprocess.Popen(
+                self.backend.worker_launch_argv(
+                    isolated_request,
+                    worker_argv,
+                    call_home=codex_home,
+                ),
+                cwd=self.project_root,
+                env=worker_environment,
+                text=True,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                start_new_session=os.name != "nt",
+            )
+        except BaseException:
+            stdout_handle.close()
+            stderr_handle.close()
+            raise
+        return (
+            process,
+            stdout_handle,
+            stderr_handle,
+            isolated_request,
+            request_path,
+            result_path,
+            worker_stdout,
+            worker_stderr,
         )
+
+    def _run_writer_backend(
+        self, request_id: str, run_id: str, request: CodexRequest
+    ) -> CodexResult:
+        if not isinstance(self.backend, CodexSDKBackend):
+            return self.backend.run(request)
+        root = request.raw_log_path.parent
+        worker_environment = self.backend.prepare_worker_environment(request)
+        codex_home = Path(worker_environment["CODEX_HOME"]).resolve()
+        markers = credential_markers(codex_home / "auth.json", worker_environment)
+        workspace_before = snapshot_regular_files(request.cwd.resolve())
+        leak_paths: tuple[Path, ...] = ()
+        try:
+            (
+                process,
+                stdout_handle,
+                stderr_handle,
+                isolated_request,
+                request_path,
+                result_path,
+                worker_stdout,
+                worker_stderr,
+            ) = self._start_isolated_writer_worker(
+                request,
+                worker_environment,
+                codex_home,
+            )
+        except BaseException:
+            self.backend._scrub_worker_credentials(codex_home)
+            raise
         started = time.monotonic()
 
         def terminate() -> None:
@@ -3447,6 +4072,7 @@ class OperatorGovernanceService:
 
         stdout = ""
         stderr = ""
+        published_result = root / "sdk-result.json"
         try:
             while process.poll() is None:
                 if self.store.read_writer_run(run_id).status == "CANCELLED":
@@ -3462,20 +4088,47 @@ class OperatorGovernanceService:
         finally:
             stdout_handle.close()
             stderr_handle.close()
-            stdout = worker_stdout.read_text(encoding="utf-8")
-            stderr = worker_stderr.read_text(encoding="utf-8")
-            if stdout:
-                with private_text_writer(request.raw_log_path, "a") as handle:
-                    handle.write(json.dumps({"kind": "sdk_worker_stdout", "text": stdout}) + "\n")
-            if stderr:
-                with private_text_writer(request.stderr_log_path, "a") as handle:
-                    handle.write(stderr)
-        if process.returncode != 0 or not result_path.is_file():
+            try:
+                stdout = worker_stdout.read_text(encoding="utf-8")
+                stderr = worker_stderr.read_text(encoding="utf-8")
+                published = {
+                    isolated_request.raw_log_path: request.raw_log_path,
+                    isolated_request.stderr_log_path: request.stderr_log_path,
+                    request_path: root / "sdk-request.json",
+                    result_path: published_result,
+                    worker_stdout: root / "sdk-worker.stdout.log",
+                    worker_stderr: root / "sdk-worker.stderr.log",
+                }
+                leak_paths = redact_credential_leaks(
+                    (request.cwd.resolve(), *published.keys()),
+                    markers,
+                    baseline=workspace_before,
+                )
+                for source, destination in published.items():
+                    if source.is_file() and not source.is_symlink():
+                        write_private_bytes(destination, source.read_bytes())
+                if not request.raw_log_path.exists():
+                    write_private_text(request.raw_log_path, "")
+                if not request.stderr_log_path.exists():
+                    write_private_text(request.stderr_log_path, "")
+                if leak_paths:
+                    with private_text_writer(request.stderr_log_path, "a") as error_log:
+                        error_log.write(
+                            "credential leakage guard redacted role-controlled output\n"
+                        )
+            finally:
+                self.backend._scrub_worker_credentials(codex_home)
+            if leak_paths:
+                raise OperatorGovernanceError(
+                    "Operator Writer attempted to publish bridged credential material; "
+                    "affected files were redacted"
+                )
+        if process.returncode != 0 or not published_result.is_file():
             raise OperatorGovernanceError(
                 f"Codex SDK worker failed with exit {process.returncode}: {stderr.strip()}"
             )
-        data = json.loads(result_path.read_text(encoding="utf-8"))
-        result_path.chmod(0o600)
+        data = json.loads(published_result.read_text(encoding="utf-8"))
+        published_result.chmod(0o600)
         return CodexResult(
             text=str(data["text"]),
             raw=dict(data.get("raw") or {}),

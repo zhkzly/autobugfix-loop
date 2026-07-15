@@ -115,7 +115,8 @@ def evaluator_prompt(task_text: str, diff_text: str, test_result: str) -> str:
     return "\n\n".join(
         [
             "You are the Autobugfix evaluator. Review only the provided worktree diff and verifier result.",
-            "Return YAML with keys: decision: pass|needs_changes|blocked, reason: string.",
+            "Return exactly two YAML fields. Quote reason when it contains a colon: "
+            "decision: pass|needs_changes|blocked, reason: string.",
             "Task:",
             task_text,
             "Diff:",

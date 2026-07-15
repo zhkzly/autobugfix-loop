@@ -268,6 +268,7 @@ class SWEImageMaterializer:
         docker = shutil.which("docker")
         if not docker:
             raise SWERuntimeError("docker executable is unavailable")
+        container_created = False
         try:
             create = run_command(
                 [
@@ -283,15 +284,20 @@ class SWEImageMaterializer:
                 artifact_dir=artifact_root / "docker-create",
                 name="docker-create-materializer",
                 timeout_seconds=120,
+                env=self.runtime.command_env(),
+                inherit_env=False,
             )
             if not create.passed:
                 raise SWERuntimeError("failed to create official materializer container")
+            container_created = True
             copied = run_command(
                 [docker, "cp", f"{container_name}:/testbed/.", str(copied_root)],
                 cwd=self.runtime.project_root,
                 artifact_dir=artifact_root / "docker-copy",
                 name="docker-copy-testbed",
                 timeout_seconds=self.runtime.benchmark_config.command_timeout_seconds,
+                env=self.runtime.command_env(),
+                inherit_env=False,
             )
             if not copied.passed:
                 raise SWERuntimeError("failed to copy /testbed from official image")
@@ -304,13 +310,23 @@ class SWEImageMaterializer:
             )
             os.replace(snapshot, destination)
         finally:
-            run_command(
-                [docker, "rm", "-f", container_name],
-                cwd=self.runtime.project_root,
-                artifact_dir=artifact_root / "docker-remove",
-                name="docker-remove-materializer",
-                timeout_seconds=120,
-            )
+            cleanup_error: SWERuntimeError | None = None
+            if container_created:
+                removed = run_command(
+                    [docker, "rm", "-f", container_name],
+                    cwd=self.runtime.project_root,
+                    artifact_dir=artifact_root / "docker-remove",
+                    name="docker-remove-materializer",
+                    timeout_seconds=120,
+                    env=self.runtime.command_env(),
+                    inherit_env=False,
+                )
+                if not removed.passed:
+                    cleanup_error = SWERuntimeError(
+                        "failed to remove official materializer container"
+                    )
             if staging_parent.exists():
                 shutil.rmtree(staging_parent, ignore_errors=True)
+            if cleanup_error is not None:
+                raise cleanup_error
         return self._verify_existing(instance, destination, image_id)

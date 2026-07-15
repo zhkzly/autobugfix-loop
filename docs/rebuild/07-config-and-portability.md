@@ -190,6 +190,13 @@ maintainer:
     timeout_seconds: null
 
 Changing memory maintainer model must not change execution writer/evaluator or eval judge behavior.
+
+Memory authority writes require POSIX descriptor-relative I/O with
+`O_NOFOLLOW`; production Memory activation is therefore supported on the same
+Linux/WSL host profile as the Bubblewrap Codex runtime. Unsupported hosts fail
+closed before writing approved wiki or skill state. A proposal becomes active
+only through `memory approve` or `memory approve-skill` with the exact digest
+returned by `memory review`.
 Eval Config
 Eval-owned YAML or CLI flags own experiment settings:
 dataset: .autobugfix-experiments/datasets/problem_prompts.jsonl

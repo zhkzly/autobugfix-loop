@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from autobugfix.codex_backend import CodexBackend
@@ -12,6 +13,7 @@ from autobugfix.runner import TaskRunner
 from autobugfix.task_store import TaskStore
 from autobugfix.verifier import ExecutionVerifierBackend
 from autobugfix.worktree import create_task_worktree, ignored_paths
+from autobugfix.worktree import diff_for_task, validate_task_worktree
 
 
 class ServiceError(RuntimeError):
@@ -75,8 +77,20 @@ class AutobugfixService:
         return self.store.add_context(task_id, kind, content)
 
     def add_feedback(self, task_id: str, decision: str, content: str, queue_only: bool = False) -> TaskRecord:
-        self.store.add_feedback(task_id, decision, content, queue_only)
         record = self.store.load(task_id)
+        allowed = {
+            "writer_rework_required",
+            "waiting_human_review",
+            "waiting_human_ppe_approval",
+            "ppe_approved",
+            "ppe_deployed",
+            "waiting_human_acceptance",
+            "blocked",
+            "paused",
+        }
+        if record.state not in allowed:
+            raise ServiceError(f"cannot add feedback from state {record.state}")
+        self.store.add_feedback(task_id, decision, content, queue_only)
         if not queue_only:
             record.state = "feedback_available"
             record.block_reason = ""
@@ -102,10 +116,12 @@ class AutobugfixService:
         if action == "approve-ppe":
             if record.state != "waiting_human_ppe_approval":
                 raise ServiceError(f"cannot approve PPE from {record.state}")
+            self._require_frozen_candidate(record)
             record.state = "ppe_approved"
         elif action == "accepted":
             if record.state not in {"waiting_human_ppe_approval", "ppe_approved", "ppe_deployed", "waiting_human_acceptance"}:
                 raise ServiceError(f"cannot accept from {record.state}")
+            self._require_frozen_candidate(record)
             record.state = "accepted"
         elif action == "abandoned":
             record.state = "abandoned"
@@ -129,6 +145,7 @@ class AutobugfixService:
         repo = self.config.repo(record.repo_id)
         if not record.worktree_path:
             raise ServiceError("task has no worktree")
+        self._require_frozen_candidate(record)
         result = run_ppe_deploy(repo, Path(record.worktree_path), task_id)
         task_dir = self.store.find_task_dir(task_id)
         (task_dir / "artifacts" / "ppe-deploy.log").write_text(
@@ -144,6 +161,35 @@ class AutobugfixService:
         self.store.save(record)
         self.store.append_event(task_id, "ppe_deployed", {"exit_code": result.returncode})
         return record
+
+    def _require_frozen_candidate(self, record: TaskRecord) -> None:
+        if not record.worktree_path:
+            raise ServiceError("task has no worktree")
+        repo = self.config.repo(record.repo_id)
+        try:
+            worktree = validate_task_worktree(
+                repo,
+                Path(record.worktree_path),
+                record.branch,
+            )
+            base_ref = str(
+                record.metadata.get("base_commit")
+                or f"{repo.remote}/{repo.main_branch}"
+            )
+            patch = diff_for_task(repo, worktree, base_ref)
+        except Exception as exc:
+            raise ServiceError(f"cannot validate frozen task candidate: {exc}") from exc
+        observed = hashlib.sha256(patch.encode("utf-8")).hexdigest()
+        expected = str(record.metadata.get("candidate_patch_sha256") or "")
+        task_dir = self.store.find_task_dir(record.task_id)
+        artifact = task_dir / "artifacts/diff.patch"
+        if (
+            len(expected) != 64
+            or observed != expected
+            or not artifact.is_file()
+            or hashlib.sha256(artifact.read_bytes()).hexdigest() != expected
+        ):
+            raise ServiceError("task candidate changed after verification/evaluation")
 
     def archive(self, task_id: str, result: str) -> Path:
         record = self.store.load(task_id)

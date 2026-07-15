@@ -160,6 +160,12 @@ This protocol wraps, rather than replaces, the four-phase Request aggregate:
    Supervisor, Writer, and semantic Verifier calls reserve usage atomically
    before invoking the Python Codex SDK and finalize it afterward. Exceptions
    count as consumed `INDETERMINATE` calls; there is no model fallback.
+   Every role uses a private per-call auth copy. Standard SDK calls and the
+   cancellable Operator Writer scan changed worktree files plus private worker
+   output before publication, redact complete or encoded credential values,
+   fail the role, and remove the call home. Complete auth documents and
+   secret-bearing token/key/password fields are credentials; account IDs and
+   refresh timestamps are ordinary SDK metadata.
 5. `integrate` accepts only a current clean VERIFIED candidate and current
    grant, reruns policy and trusted profiles in a separate worktree, compares
    the real patch, then advances Git and SQLite with compare-and-swap.
@@ -172,6 +178,33 @@ This protocol wraps, rather than replaces, the four-phase Request aggregate:
 7. `line rollback` creates a new commit whose tree equals a prior checkpoint,
    reruns the trusted full profile, and advances history normally. Reset and
    force-push are forbidden.
+
+Visible Optimization feedback enters a line-bound Request only through the
+trusted Study evidence registry. Eval first freezes a digest-protected public
+case report under trusted Eval state. `study evidence-register` then verifies
+its `OPTIMIZATION` binding and copies it into content-addressed Operator
+artifacts with Study, cohort, treatment, subject, binding, and source-record
+digests. Arbitrary path/URI/note evidence and cross-treatment evidence are
+invalid for line-bound Requests and WriterView revalidates the registered
+artifact before every read. The public report may be the official SWE formal
+case schema or the repo-agnostic formal Optimization schema. The latter must
+retain the real verifier argv, exit code, stdout/stderr SHA-256 values, and a
+passing noninterference record; it is not a hand-written diagnosis or metric.
+
+Final Holdout scoring is terminalized before it runs. Interactive
+`study guard-binding --kind CANDIDATE` verifies the current integration/grant
+and closes the line with compare-and-swap before returning its binding. The
+external Guard may then score and sign an aggregate, but no Writer, scope,
+integration, or retry transition can observe that result on an open line.
+Metric import records pass/fail against the already closed line; a failed or
+abandoned metric never reopens it.
+
+The SWE Guard Docker authority is a persistent external record, not a fresh
+socket lookup per command. Its owner-only socket fingerprint, daemon ID,
+stable profile, and `autobugfix.guard.isolation=dedicated-vm-v1` attestation are
+bound into the Guard runtime identity across qualification, preparation,
+sealing, and formal scoring. Official scorer code sees pinned benchmark cache
+content read-only and receives only per-run writable client state.
 
 Budget waves are exactly `3 -> 8 -> 16`, the model is `gpt-5.4-mini`, case
 concurrency is one, and grants never transfer between studies. Expired,
@@ -265,6 +298,11 @@ state, Git worktrees, deterministic verification, and external admission.
   not advance; raw logs are retained.
 - Checkpoint receipt is forged, stale, failed, or bound to another grant/head
   -> checkpoint and active release do not advance.
+- Candidate Holdout binding requested without terminal closure, or a line-bound
+  Request references arbitrary/cross-treatment evidence -> fail before scoring
+  or Writer launch.
+- Guard Docker socket, daemon/profile, isolation attestation, or pinned cache
+  authority changes after qualification -> formal scoring fails closed.
 - Rollback validation fails -> Git ref, SQLite line, and active release remain
   unchanged.
 

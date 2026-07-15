@@ -6,6 +6,7 @@ import importlib.metadata
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import tempfile
 import sys
@@ -48,6 +49,175 @@ class SWERuntimeError(RuntimeError):
     pass
 
 
+SWE_GUARD_DAEMON_ISOLATION_LABEL = "autobugfix.guard.isolation=dedicated-vm-v1"
+
+
+@dataclass(slots=True, frozen=True)
+class SWEDockerAuthority:
+    """Pinned local Docker socket and daemon identity owned by the Human Guard."""
+
+    endpoint: str
+    socket_path: Path
+    guard_root: Path
+    daemon_id: str
+    device: int
+    inode: int
+    owner_uid: int
+    owner_gid: int
+    mode: int
+    docker_executable: str
+    isolation_label: str
+    daemon_profile_digest: str
+
+    @classmethod
+    def capture(
+        cls,
+        *,
+        endpoint: str,
+        guard_root: Path,
+        daemon_id: str,
+        docker_executable: str,
+        isolation_label: str,
+        daemon_profile_digest: str,
+    ) -> "SWEDockerAuthority":
+        if not endpoint.startswith("unix://"):
+            raise SWERuntimeError(
+                "SWE Holdout Guard Docker authority must use a local unix socket"
+            )
+        raw_path = Path(endpoint.removeprefix("unix://"))
+        if not raw_path.is_absolute():
+            raise SWERuntimeError("Guard Docker unix socket path must be absolute")
+        root = guard_root.resolve(strict=True)
+        try:
+            resolved = raw_path.resolve(strict=True)
+        except OSError as exc:
+            raise SWERuntimeError("Guard Docker unix socket is unavailable") from exc
+        if resolved != raw_path or not resolved.is_relative_to(root):
+            raise SWERuntimeError(
+                "Guard Docker unix socket must be canonical and inside the external Guard root"
+            )
+        cls._validate_private_authority_path(root, resolved)
+        observed = resolved.lstat()
+        if not stat.S_ISSOCK(observed.st_mode):
+            raise SWERuntimeError("Guard Docker endpoint is not a unix socket")
+        if stat.S_IMODE(observed.st_mode) != 0o600:
+            raise SWERuntimeError("Guard Docker unix socket must have mode 0600")
+        expected_uid = getattr(os, "geteuid", lambda: observed.st_uid)()
+        if observed.st_uid != expected_uid:
+            raise SWERuntimeError("Guard Docker unix socket is not owned by this Guard user")
+        if not daemon_id or any(character.isspace() for character in daemon_id):
+            raise SWERuntimeError("Guard Docker daemon ID is invalid")
+        if isolation_label != SWE_GUARD_DAEMON_ISOLATION_LABEL:
+            raise SWERuntimeError(
+                "Guard Docker daemon lacks the required dedicated-VM isolation label"
+            )
+        if len(daemon_profile_digest) != 64:
+            raise SWERuntimeError("Guard Docker daemon profile digest is invalid")
+        return cls(
+            endpoint=endpoint,
+            socket_path=resolved,
+            guard_root=root,
+            daemon_id=daemon_id,
+            device=observed.st_dev,
+            inode=observed.st_ino,
+            owner_uid=observed.st_uid,
+            owner_gid=observed.st_gid,
+            mode=stat.S_IMODE(observed.st_mode),
+            docker_executable=docker_executable,
+            isolation_label=isolation_label,
+            daemon_profile_digest=daemon_profile_digest,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "endpoint": self.endpoint,
+            "socket_path": str(self.socket_path),
+            "guard_root": str(self.guard_root),
+            "daemon_id": self.daemon_id,
+            "device": self.device,
+            "inode": self.inode,
+            "owner_uid": self.owner_uid,
+            "owner_gid": self.owner_gid,
+            "mode": self.mode,
+            "docker_executable": self.docker_executable,
+            "isolation_label": self.isolation_label,
+            "daemon_profile_digest": self.daemon_profile_digest,
+            "authority_digest": self.authority_digest,
+        }
+
+    @staticmethod
+    def _validate_private_authority_path(root: Path, socket_path: Path) -> None:
+        candidates = [root]
+        relative_parent = socket_path.parent.relative_to(root)
+        current = root
+        for component in relative_parent.parts:
+            current = current / component
+            candidates.append(current)
+        expected_uid = getattr(os, "geteuid", lambda: root.stat().st_uid)()
+        for candidate in candidates:
+            observed = candidate.lstat()
+            if candidate.is_symlink() or not stat.S_ISDIR(observed.st_mode):
+                raise SWERuntimeError(
+                    "Guard Docker authority directory must not be redirected"
+                )
+            if observed.st_uid != expected_uid or stat.S_IMODE(observed.st_mode) & 0o077:
+                raise SWERuntimeError(
+                    "Guard Docker authority directories must be owner-only"
+                )
+
+    @property
+    def authority_digest(self) -> str:
+        return digest_payload(
+            {
+                "endpoint": self.endpoint,
+                "socket_path": str(self.socket_path),
+                "daemon_id": self.daemon_id,
+                "device": self.device,
+                "inode": self.inode,
+                "owner_uid": self.owner_uid,
+                "owner_gid": self.owner_gid,
+                "mode": self.mode,
+                "isolation_label": self.isolation_label,
+                "daemon_profile_digest": self.daemon_profile_digest,
+            }
+        )
+
+    def assert_current(self, environment: Mapping[str, str]) -> None:
+        self._validate_private_authority_path(self.guard_root, self.socket_path)
+        try:
+            observed = self.socket_path.lstat()
+        except OSError as exc:
+            raise SWERuntimeError("Guard Docker unix socket disappeared") from exc
+        fingerprint = (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_uid,
+            observed.st_gid,
+            stat.S_IMODE(observed.st_mode),
+        )
+        if not stat.S_ISSOCK(observed.st_mode) or fingerprint != (
+            self.device,
+            self.inode,
+            self.owner_uid,
+            self.owner_gid,
+            self.mode,
+        ):
+            raise SWERuntimeError("Guard Docker unix socket authority changed")
+        result = subprocess.run(
+            [self.docker_executable, "info", "--format", "{{.ID}}"],
+            cwd=self.guard_root,
+            env=dict(environment),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        if result.returncode != 0 or result.stdout.strip() != self.daemon_id:
+            raise SWERuntimeError("Guard Docker daemon identity changed")
+
+
 @dataclass(slots=True, frozen=True)
 class SWEDatasetSnapshot:
     adapter: str
@@ -80,11 +250,18 @@ class SWERuntime:
         self,
         project_root: Path,
         benchmark_config: EvalBenchmarkConfig,
+        *,
+        docker_environment: Mapping[str, str] | None = None,
+        docker_authority: SWEDockerAuthority | None = None,
     ):
         self.project_root = project_root.resolve()
         self.benchmark_config = benchmark_config
         self.config = benchmark_config.swe
         self.cache_root = benchmark_config.cache_root.resolve()
+        self._docker_environment = {
+            str(key): str(value) for key, value in (docker_environment or {}).items()
+        }
+        self._docker_authority = docker_authority
         self._validate_config(self.config)
 
     @staticmethod
@@ -197,15 +374,36 @@ class SWERuntime:
                 "live_launch_tree": self.config.live_launch_tree,
                 "platform": self.config.platform,
                 "verified_image_mode": "local-build",
+                "docker_authority_digest": (
+                    self._docker_authority.authority_digest
+                    if self._docker_authority is not None
+                    else None
+                ),
             }
         )
 
-    def command_env(self) -> dict[str, str]:
-        cache = self.cache_root / "uv"
-        hf_home = self.cache_root / "huggingface"
-        xdg_cache = self.cache_root / "xdg-cache"
-        for path in (cache, hf_home, xdg_cache):
+    @property
+    def docker_authority_digest(self) -> str | None:
+        return (
+            self._docker_authority.authority_digest
+            if self._docker_authority is not None
+            else None
+        )
+
+    def command_env(self, writable_state_root: Path | None = None) -> dict[str, str]:
+        state_root = (
+            writable_state_root.resolve()
+            if writable_state_root is not None
+            else self.cache_root
+        )
+        cache = state_root / "uv"
+        hf_home = state_root / "huggingface"
+        xdg_cache = state_root / "xdg-cache"
+        client_home = state_root / "client-home"
+        docker_config = client_home / ".docker"
+        for path in (cache, hf_home, xdg_cache, client_home, docker_config):
             path.mkdir(parents=True, exist_ok=True)
+            path.chmod(0o700)
         environment = {
             "UV_CACHE_DIR": str(cache),
             "UV_LINK_MODE": "copy",
@@ -217,9 +415,7 @@ class SWERuntime:
             "XDG_CACHE_HOME": str(xdg_cache),
         }
         allowed_host = {
-            "DOCKER_CONFIG",
             "DOCKER_HOST",
-            "HOME",
             "HTTPS_PROXY",
             "HTTP_PROXY",
             "LANG",
@@ -235,17 +431,182 @@ class SWERuntime:
                 if key in allowed_host or key.startswith("LC_")
             }
         )
+        environment.update(self._docker_environment)
+        environment["HOME"] = str(client_home)
+        environment["DOCKER_CONFIG"] = str(docker_config)
         environment.setdefault(
             "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
+        if self._docker_authority is not None:
+            self._docker_authority.assert_current(environment)
         return environment
 
-    def live_command_env(self) -> dict[str, str]:
-        environment = self.command_env()
+    def live_command_env(
+        self,
+        writable_state_root: Path | None = None,
+    ) -> dict[str, str]:
+        environment = self.command_env(writable_state_root)
         environment["PYTHONPATH"] = os.pathsep.join(
             (str(self.live_checkout), str(self.live_launch_checkout))
         )
         return environment
+
+    def isolated_official_argv(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path,
+        writable_roots: tuple[Path, ...],
+        readable_roots: tuple[Path, ...] = (),
+    ) -> list[str]:
+        """Run pinned external scorer code without host credential visibility."""
+
+        bwrap = shutil.which("bwrap")
+        if not bwrap:
+            raise SWERuntimeError(
+                "bubblewrap is required for the official SWE scorer"
+            )
+        resolved_cwd = cwd.resolve(strict=True)
+        writable = tuple(path.resolve(strict=True) for path in writable_roots)
+        readable = tuple(path.resolve(strict=True) for path in readable_roots)
+        if not any(
+            resolved_cwd == root or resolved_cwd.is_relative_to(root)
+            for root in writable
+        ):
+            raise SWERuntimeError(
+                "official SWE scorer cwd must be inside an explicit writable root"
+            )
+
+        host_home = Path.home().resolve()
+        hidden_candidates = [Path("/tmp"), host_home]
+        for candidate in (
+            Path("/home"),
+            Path("/root"),
+            Path("/mnt"),
+            Path("/media"),
+            Path("/srv"),
+            Path("/var/lib/docker"),
+        ):
+            if candidate.is_dir():
+                hidden_candidates.append(candidate.resolve())
+        if self._docker_authority is not None:
+            hidden_candidates.append(self._docker_authority.guard_root)
+        hidden: list[Path] = []
+        for candidate in sorted(set(hidden_candidates), key=lambda item: len(item.parts)):
+            if not any(
+                candidate == parent or candidate.is_relative_to(parent)
+                for parent in hidden
+            ):
+                hidden.append(candidate)
+
+        mounts: list[tuple[Path, Path, bool]] = [
+            (self.cache_root, self.cache_root, True),
+            *((root, root, True) for root in readable),
+            *((root, root, False) for root in writable),
+        ]
+        launcher = Path(argv[0])
+        if launcher.is_absolute() and launcher.is_file():
+            launcher = launcher.resolve(strict=True)
+            mounts.append((launcher, launcher, True))
+        harness_python = self.config.harness_project / ".venv/bin/python"
+        if harness_python.is_symlink():
+            raw_target = Path(os.readlink(harness_python))
+            if not raw_target.is_absolute():
+                raw_target = harness_python.parent / raw_target
+            destination_runtime = raw_target.parent.parent
+            source_runtime = harness_python.resolve(strict=True).parent.parent
+            mounts.append((source_runtime, destination_runtime, True))
+        if self._docker_authority is not None:
+            mounts.append(
+                (
+                    self._docker_authority.socket_path,
+                    self._docker_authority.socket_path,
+                    True,
+                )
+            )
+
+        command = [
+            bwrap,
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-net",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+        ]
+        for root in hidden:
+            command.extend(("--tmpfs", str(root)))
+
+        def destination_directories(destination: Path) -> list[Path]:
+            directories: list[Path] = []
+            for root in hidden:
+                if destination == root or not destination.is_relative_to(root):
+                    continue
+                current = root
+                parts = destination.relative_to(root).parts
+                if destination.is_file():
+                    parts = parts[:-1]
+                for component in parts:
+                    current = current / component
+                    directories.append(current)
+            return directories
+
+        created: set[Path] = set()
+
+        def create_destinations(destinations: tuple[Path, ...]) -> None:
+            for destination in destinations:
+                for directory in destination_directories(destination):
+                    if directory not in created:
+                        command.extend(("--dir", str(directory)))
+                        created.add(directory)
+
+        create_destinations((self.project_root,))
+        command.extend(("--ro-bind", str(self.project_root), str(self.project_root)))
+
+        sensitive_project_roots = (
+            self.project_root / ".autobugfix",
+            self.project_root / ".autobugfix-memory",
+            self.project_root / ".codex",
+            self.project_root / ".trellis",
+        )
+        masked_project_roots: list[Path] = []
+        for root in sensitive_project_roots:
+            if root.exists():
+                command.extend(("--tmpfs", str(root)))
+                masked_project_roots.append(root)
+
+        for _, destination, _ in mounts:
+            for directory in destination_directories(destination):
+                if directory not in created:
+                    command.extend(("--dir", str(directory)))
+                    created.add(directory)
+            for root in masked_project_roots:
+                if destination == root or destination.is_relative_to(root):
+                    current = root
+                    parts = destination.relative_to(root).parts
+                    if destination.is_file():
+                        parts = parts[:-1]
+                    for component in parts:
+                        current = current / component
+                        command.extend(("--dir", str(current)))
+        for source, destination, read_only in mounts:
+            command.extend(
+                (
+                    "--ro-bind" if read_only else "--bind",
+                    str(source),
+                    str(destination),
+                )
+            )
+
+        command.extend(("--chdir", str(resolved_cwd), "--", *argv))
+        return command
 
     @staticmethod
     def _git_value(checkout: Path, *args: str) -> str:
@@ -676,6 +1037,14 @@ class SWERuntime:
 
         uv = shutil.which("uv")
         self._check(checks, "uv", "available", uv or "unavailable", bool(uv))
+        bwrap = shutil.which("bwrap")
+        self._check(
+            checks,
+            "bubblewrap",
+            "available for isolated official scorer",
+            bwrap or "unavailable",
+            bool(bwrap),
+        )
         if uv and harness_ok:
             version = run_command(
                 [
@@ -766,6 +1135,8 @@ class SWERuntime:
                 artifact_dir=artifact_root / "docker-version",
                 name="docker-version",
                 timeout_seconds=60,
+                env=self.command_env(),
+                inherit_env=False,
             )
             observed = Path(evidence.stdout_path).read_text(encoding="utf-8").strip()
             docker_ok = False
@@ -806,6 +1177,8 @@ class SWERuntime:
                 artifact_dir=artifact_root / "docker-info",
                 name="docker-info",
                 timeout_seconds=60,
+                env=self.command_env(),
+                inherit_env=False,
             )
             docker_cpus = 0.0
             docker_memory = 0
@@ -840,6 +1213,8 @@ class SWERuntime:
                 artifact_dir=artifact_root / "docker-image-api",
                 name="docker-image-api",
                 timeout_seconds=60,
+                env=self.command_env(),
+                inherit_env=False,
             )
             image_count = len(
                 [

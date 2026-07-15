@@ -4,8 +4,10 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import subprocess
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -17,6 +19,7 @@ from autobugfix.eval.benchmarks.service import EvalBenchmarkService
 from autobugfix.eval.benchmarks.swe_guard import SWEGuardStore
 from autobugfix.eval.benchmarks.swe_live import SWELiveAdapter
 from autobugfix.eval.benchmarks.swe_models import SWEExperimentProtocol
+from autobugfix.eval.benchmarks.swe_constants import SWE_LIVE_DATASET_REVISION
 from autobugfix.eval.benchmarks.swe_runtime import SWERuntime
 from autobugfix.models import utc_now
 
@@ -107,6 +110,7 @@ def _validate_existing(
     records: Sequence[Mapping[str, Any]],
     *,
     excluded_ids: set[str],
+    excluded_repositories: set[str],
     optimization_repositories: set[str],
 ) -> tuple[list[SWEHoldoutCandidate], set[str]]:
     attempted: set[str] = set()
@@ -128,6 +132,10 @@ def _validate_existing(
                 raise SWEHoldoutCohortError(
                     "encrypted Holdout cohort overlaps an Optimization repository"
                 )
+            if candidate.repository in excluded_repositories:
+                raise SWEHoldoutCohortError(
+                    "encrypted Holdout cohort contains an Operator-visible repository"
+                )
             eligible.append(candidate)
     if len(eligible) > 6:
         raise SWEHoldoutCohortError(
@@ -140,43 +148,153 @@ def _validate_existing(
     return eligible, attempted
 
 
+def _discover_operator_visible_values(
+    root: Path,
+    candidates: set[str],
+) -> set[str]:
+    observed: set[str] = set()
+    if not root.is_dir():
+        return observed
+
+    encoded_ids = {
+        candidate.encode("utf-8"): candidate for candidate in candidates
+    }
+    if not encoded_ids:
+        return observed
+    matcher = re.compile(
+        b"|".join(
+            re.escape(value)
+            for value in sorted(encoded_ids, key=len, reverse=True)
+        )
+    )
+    overlap = max(len(value) for value in encoded_ids) - 1
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise SWEHoldoutCohortError(
+                "Operator-visible SWE evidence contains a symbolic link"
+            )
+        relative = path.relative_to(root)
+        relative_text = relative.as_posix()
+        observed.update(
+            candidate
+            for candidate in candidates
+            if candidate in relative_text
+        )
+        if not path.is_file():
+            continue
+        try:
+            tail = b""
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    value = tail + chunk
+                    observed.update(
+                        encoded_ids[match.group(0)] for match in matcher.finditer(value)
+                    )
+                    tail = value[-overlap:] if overlap else b""
+        except OSError:
+            raise SWEHoldoutCohortError(
+                "Operator-visible SWE evidence cannot be audited"
+            ) from None
+    return observed
+
+
 def discover_operator_visible_live_ids(
     root: Path,
     candidate_ids: set[str],
 ) -> set[str]:
-    """Find pinned Live identities that have ever entered an Operator-visible root."""
+    """Find pinned Live instance identities in every Operator-visible byte stream."""
 
-    identities: set[str] = set()
-    if not root.is_dir():
-        return identities
+    return _discover_operator_visible_values(root, candidate_ids)
 
-    def inspect(value: Any) -> None:
-        if isinstance(value, Mapping):
-            instance_id = value.get("instance_id")
-            if isinstance(instance_id, str) and instance_id in candidate_ids:
-                identities.add(instance_id)
-            for nested in value.values():
-                inspect(nested)
-        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            for nested in value:
-                inspect(nested)
 
-    for path in root.rglob("*"):
-        relative = path.relative_to(root)
-        identities.update(candidate_ids.intersection(relative.parts))
-        if not path.is_file() or path.suffix not in {".yaml", ".yml", ".json"}:
+def discover_operator_visible_live_repositories(
+    root: Path,
+    repositories: set[str],
+) -> set[str]:
+    """Find repository identities already exposed through Operator-visible evidence."""
+
+    return _discover_operator_visible_values(root, repositories)
+
+
+def discover_git_exposed_values(
+    project_root: Path,
+    candidates: set[str],
+) -> set[str]:
+    """Find identities in the tracked tree and every ref-reachable Git patch."""
+
+    if not candidates:
+        return set()
+    encoded = {value.encode("utf-8"): value for value in candidates}
+    matcher = re.compile(
+        b"|".join(re.escape(value) for value in sorted(encoded, key=len, reverse=True))
+    )
+    observed: set[str] = set()
+
+    def scan(value: bytes) -> None:
+        observed.update(encoded[match.group(0)] for match in matcher.finditer(value))
+
+    listed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project_root),
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if listed.returncode != 0:
+        raise SWEHoldoutCohortError("Operator-visible Git tree cannot be audited")
+    for raw_relative in listed.stdout.split(b"\0"):
+        if not raw_relative:
             continue
-        try:
-            if path.suffix == ".json":
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            else:
-                raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, yaml.YAMLError):
+        scan(raw_relative)
+        path = project_root / Path(os.fsdecode(raw_relative))
+        if path.is_symlink():
+            try:
+                scan(os.fsencode(os.readlink(path)))
+            except OSError as exc:
+                raise SWEHoldoutCohortError(
+                    "Operator-visible Git symlink cannot be audited"
+                ) from exc
+            continue
+        if not path.exists():
+            # A tracked deletion is already represented in reachable history.
+            continue
+        if not path.is_file():
             raise SWEHoldoutCohortError(
-                "Operator-visible SWE evidence cannot be audited"
-            ) from None
-        inspect(raw)
-    return identities
+                "Operator-visible Git entry is not a regular file"
+            )
+        try:
+            scan(path.read_bytes())
+        except OSError as exc:
+            raise SWEHoldoutCohortError(
+                "Operator-visible tracked source cannot be audited"
+            ) from exc
+
+    history = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project_root),
+            "log",
+            "--all",
+            "--format=",
+            "--patch",
+            "--no-ext-diff",
+            "--no-renames",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if history.returncode != 0:
+        raise SWEHoldoutCohortError("Operator-visible Git history cannot be audited")
+    scan(history.stdout)
+    return observed
 
 
 def advance_holdout_cohort(
@@ -187,6 +305,7 @@ def advance_holdout_cohort(
     guard_secret: str | bytes,
     optimization_repositories: set[str],
     excluded_ids: set[str],
+    excluded_repositories: set[str] | None = None,
     max_candidates: int,
     qualify: Callable[[SWEHoldoutCandidate], bool],
     progress: Callable[[SWEHoldoutCohortProgress], None] | None = None,
@@ -196,6 +315,7 @@ def advance_holdout_cohort(
     if max_candidates < 6 or max_candidates > 128:
         raise SWEHoldoutCohortError("max_candidates must be between 6 and 128")
     secret = _secret_bytes(guard_secret)
+    excluded_repository_values = set(excluded_repositories or ())
     by_id = {item.instance_id: item for item in candidates}
     if len(by_id) != len(candidates):
         raise SWEHoldoutCohortError("pinned Live dataset contains duplicate identities")
@@ -203,6 +323,7 @@ def advance_holdout_cohort(
         by_id,
         existing_records,
         excluded_ids=excluded_ids,
+        excluded_repositories=excluded_repository_values,
         optimization_repositories=optimization_repositories,
     )
     new_attempts = 0
@@ -216,6 +337,7 @@ def advance_holdout_cohort(
             if item.instance_id not in attempted
             and item.instance_id not in excluded_ids
             and item.repository not in optimization_repositories
+            and item.repository not in excluded_repository_values
             and item.repository not in repositories
         ]
         remaining_slots = 6 - len(eligible)
@@ -295,9 +417,55 @@ class SWEHoldoutGuardService:
                 rows.append(value)
         return rows
 
-    def _operator_visible_live_ids(self, candidate_ids: set[str]) -> set[str]:
-        root = self.benchmark.config.eval.benchmarks.trusted_case_root / "swe"
-        return discover_operator_visible_live_ids(root, candidate_ids)
+    def _operator_visible_live_identities(
+        self,
+        protocol: SWEExperimentProtocol,
+        candidates: Sequence[SWEHoldoutCandidate],
+    ) -> tuple[set[str], set[str]]:
+        config = self.benchmark.config
+        candidate_ids = {item.instance_id for item in candidates}
+        candidate_repositories = {item.repository for item in candidates}
+        roots = (
+            config.task_root,
+            self.project_root / ".autobugfix/archive",
+            self.project_root / ".autobugfix/controller",
+            self.project_root / ".autobugfix-memory",
+            config.eval.benchmarks.trusted_case_root / "swe",
+            config.eval.benchmarks.visible_manifest_root,
+            config.eval.benchmarks.raw_codex.runtime_root,
+            config.operator.state.root,
+            config.operator.artifacts.root,
+            config.operator.worktrees.root,
+            config.operator.experiment_lines.root,
+            config.operator.experiment_lines.checkpoint_root,
+            config.operator.experiment_lines.active_release_root,
+            config.operator.promotion.release_root,
+            config.operator.promotion.active_release_link,
+            self.project_root / ".trellis/tasks",
+            self.project_root / ".trellis/workspace",
+        )
+        identities = set(protocol.holdout_excluded_instances)
+        unknown = identities - candidate_ids
+        if unknown:
+            raise SWEHoldoutCohortError(
+                "SWE Holdout exclusion ledger contains identities outside the pinned dataset"
+            )
+        for root in roots:
+            identities.update(
+                discover_operator_visible_live_ids(root.resolve(), candidate_ids)
+            )
+        identities.update(discover_git_exposed_values(self.project_root, candidate_ids))
+        repositories: set[str] = set()
+        for root in roots:
+            repositories.update(
+                discover_operator_visible_live_repositories(
+                    root.resolve(), candidate_repositories
+                )
+            )
+        repositories.update(
+            discover_git_exposed_values(self.project_root, candidate_repositories)
+        )
+        return identities, repositories
 
     def _optimization_repositories(
         self, protocol: SWEExperimentProtocol
@@ -344,13 +512,7 @@ class SWEHoldoutGuardService:
         self,
         store: SWEGuardStore,
     ) -> tuple[SWELiveAdapter, str]:
-        private_config = replace(
-            self.benchmark.config.eval.benchmarks,
-            cache_root=store.root / "runtime-cache",
-            trusted_case_root=store.root / "runtime-state",
-            visible_manifest_root=store.root / "visible-projection",
-        )
-        runtime = SWERuntime(self.project_root, private_config)
+        runtime = self.benchmark._swe_guard_runtime(store)
         doctor = runtime.doctor(
             "swebench_live",
             store.root / "runtime-doctor" / uuid.uuid4().hex,
@@ -391,8 +553,21 @@ class SWEHoldoutGuardService:
             protocol_digest=protocol.protocol_digest,
             runtime_id=runner.runtime.runtime_id,
         )
-        excluded_ids = self._operator_visible_live_ids(
-            {item.instance_id for item in candidates}
+        excluded_ids, excluded_repositories = self._operator_visible_live_identities(
+            protocol,
+            candidates,
+        )
+        prior_ids, prior_repositories = store.load_exposure_ledger(
+            secret=guard_secret,
+            dataset_revision=SWE_LIVE_DATASET_REVISION,
+        )
+        excluded_ids.update(prior_ids)
+        excluded_repositories.update(prior_repositories)
+        exposure_digest = store.write_exposure_ledger(
+            instance_ids=excluded_ids,
+            repositories=excluded_repositories,
+            secret=guard_secret,
+            dataset_revision=SWE_LIVE_DATASET_REVISION,
         )
         optimization_repositories = self._optimization_repositories(protocol)
 
@@ -419,6 +594,7 @@ class SWEHoldoutGuardService:
             guard_secret=guard_secret,
             optimization_repositories=optimization_repositories,
             excluded_ids=excluded_ids,
+            excluded_repositories=excluded_repositories,
             max_candidates=max_candidates,
             qualify=qualify,
             progress=progress,
@@ -446,6 +622,10 @@ class SWEHoldoutGuardService:
                 "runtime_doctor_digest": doctor_digest,
                 **final.aggregate(),
                 "operator_visible_exclusion_count": len(excluded_ids),
+                "operator_visible_repository_exclusion_count": len(
+                    excluded_repositories
+                ),
+                "encrypted_exposure_ledger_sha256": exposure_digest,
                 "encrypted_catalog_sha256": guard_artifact_digest(catalog_path),
                 "completed_at": utc_now(),
             }

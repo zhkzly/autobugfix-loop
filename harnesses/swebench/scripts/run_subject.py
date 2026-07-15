@@ -132,26 +132,14 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         backend=codex,
         verifier_backend=verifier,
     )
-    task = service.create_task(
-        repo_id,
-        f"SWE eval {request['case_token']}",
-        str(request["problem_statement"]),
-        metadata={
-            "origin": "eval",
-            "memory_eligible": False,
-            "eval_case_token": str(request["case_token"]),
-            "eval_adapter": str(request["adapter"]),
-            "experiment_role": str(request["experiment_role"]),
-        },
-    )
-    for context in request.get("context") or ():
-        if not isinstance(context, dict):
-            raise ValueError("subject context entries must be mappings")
-        service.add_context(
-            task.task_id,
-            str(context["kind"]),
-            str(context["content"]),
-        )
+    task = service.store.load(str(request["task_id"]))
+    if (
+        task.repo_id != repo_id
+        or task.state != "ready"
+        or task.metadata.get("origin") != "eval"
+        or task.metadata.get("eval_case_token") != str(request["case_token"])
+    ):
+        raise RuntimeError("trusted broker prepared an invalid Execution task")
 
     while True:
         service.run_task(task.task_id)

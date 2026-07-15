@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import hashlib
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -58,12 +59,74 @@ class SWEGuardStore:
         ).encode("ascii")
 
     def _catalog_path(self, protocol_digest: str, runtime_id: str) -> Path:
-        import hashlib
-
         token = hashlib.sha256(
             f"{protocol_digest}:{runtime_id}".encode("ascii")
         ).hexdigest()
         return self.root / "qualification-catalogs" / f"{token}.abfg"
+
+    def _exposure_path(self, dataset_revision: str) -> Path:
+        token = hashlib.sha256(dataset_revision.encode("utf-8")).hexdigest()
+        return self.root / "exposure-ledgers" / f"{token}.abfg"
+
+    def load_exposure_ledger(
+        self,
+        *,
+        secret: str | bytes,
+        dataset_revision: str,
+    ) -> tuple[set[str], set[str]]:
+        path = self._exposure_path(dataset_revision)
+        if not path.is_file():
+            return set(), set()
+        aad = self._aad("exposure-ledger", dataset_revision=dataset_revision)
+        try:
+            payload = decrypt_json(path, secret=secret, aad=aad)
+            verify_record(payload)
+        except BenchmarkContractError as exc:
+            raise SWEGuardStoreError("SWE exposure ledger is invalid") from exc
+        if (
+            payload.get("schema") != "autobugfix-swe-exposure-ledger-v1"
+            or payload.get("dataset_revision") != dataset_revision
+            or not isinstance(payload.get("instance_ids"), list)
+            or not isinstance(payload.get("repositories"), list)
+        ):
+            raise SWEGuardStoreError("SWE exposure ledger binding drift")
+        return (
+            {str(item) for item in payload["instance_ids"]},
+            {str(item) for item in payload["repositories"]},
+        )
+
+    def write_exposure_ledger(
+        self,
+        *,
+        instance_ids: set[str],
+        repositories: set[str],
+        secret: str | bytes,
+        dataset_revision: str,
+    ) -> str:
+        previous_ids, previous_repositories = self.load_exposure_ledger(
+            secret=secret,
+            dataset_revision=dataset_revision,
+        )
+        if not previous_ids.issubset(instance_ids) or not previous_repositories.issubset(
+            repositories
+        ):
+            raise SWEGuardStoreError("SWE exposure ledger cannot remove prior evidence")
+        payload = record_with_digest(
+            {
+                "schema": "autobugfix-swe-exposure-ledger-v1",
+                "dataset_revision": dataset_revision,
+                "instance_ids": sorted(instance_ids),
+                "repositories": sorted(repositories),
+            }
+        )
+        path = self._exposure_path(dataset_revision)
+        encrypt_json(
+            payload,
+            path,
+            secret=secret,
+            aad=self._aad("exposure-ledger", dataset_revision=dataset_revision),
+        )
+        return guard_artifact_digest(path)
 
     def load_qualifications(
         self,

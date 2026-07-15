@@ -59,6 +59,9 @@ H0 benchmark measurement in which the system under test must remain frozen:
 4. Bind each Request to current line generation/head and current grant.
    Supervisor, Writer, and semantic Verifier reserve usage before the SDK call
    and record a terminal outcome afterward.
+   For SWE Optimization, grant case IDs are official benchmark instance IDs;
+   trusted Eval admits only cases in the current wave and meters every inner
+   Execution Writer/Evaluator call through that grant.
 5. Integrate only a clean, committed, VERIFIED candidate through the trusted
    service. It reruns policy and validation in a separate worktree, compares
    the candidate patch, then advances Git ref and SQLite generation with CAS.
@@ -71,14 +74,26 @@ H0 benchmark measurement in which the system under test must remain frozen:
 
 The benchmark metric transition is deliberately split across trust domains:
 
-1. `operator study guard-binding` derives a digest-bound projection of the
-   current Study, subject SHA, line, grant, wave, manifest, and success
-   contract. It is not approval or a metric.
-2. A human runs `eval benchmark guard-run` from the clean configured trusted
+1. `operator study guard-binding --kind OPTIMIZATION` derives a public binding
+   for visible case execution. After Eval freezes a case report, import it via
+   `operator study evidence-register`. Line-bound Requests accept only the
+   resulting `study-evidence:<id>` and reject arbitrary paths or evidence from
+   another Study, cohort, treatment, or subject. A non-SWE report must use the
+   formal Optimization schema and retain real verifier argv/exit status,
+   stdout/stderr digests, and passing noninterference evidence.
+   SWE evidence additionally maps its opaque case token to the frozen public
+   manifest and retains the pinned official scorer command, stdout, stderr,
+   report, output root, and matching content digests. A self-consistent YAML
+   result without those trusted artifacts is rejected.
+2. `operator study guard-binding --kind CANDIDATE` is an interactive human
+   transition that permanently closes the current line with CAS before it
+   returns a Holdout binding. Writer, scope, integration, and retry transitions
+   are forbidden after this point even if scoring or import later fails.
+3. A human runs `eval benchmark guard-run` from the clean configured trusted
    control ref. Guard authenticates its encrypted Holdout bundle, revalidates
    Docker image IDs, executes cases, encrypts case-level evidence, and signs
    only the aggregate plus the Study binding.
-3. `operator study import-guard-metric` requires an interactive human secret,
+4. `operator study import-guard-metric` requires an interactive human secret,
    verifies the signature and frozen Guard Git/constitution/harness identity,
    compares the binding to current service state, and deterministically checks
    numeric success-contract conditions. Only then can the service create a

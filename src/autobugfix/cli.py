@@ -232,10 +232,28 @@ def command_memory(args: argparse.Namespace) -> int:
         _print_yaml(service.status())
     elif action == "proposals":
         _print_yaml(service.proposals())
-    elif action in {"review", "show"}:
+    elif action == "review":
+        _print_yaml(service.review(args.proposal_id))
+    elif action == "show":
         print(service.show(args.proposal_id))
     elif action == "approve":
-        print(service.approve(args.proposal_id, args.note))
+        print(
+            service.approve(
+                args.proposal_id,
+                args.note,
+                args.confirm_review_digest,
+            )
+        )
+    elif action == "approve-skill":
+        print(
+            service.approve_skill(
+                args.proposal_id,
+                args.skill_name,
+                args.description,
+                args.note,
+                args.confirm_review_digest,
+            )
+        )
     elif action == "reject":
         print(service.reject(args.proposal_id, args.reason))
     elif action == "lint":
@@ -463,7 +481,7 @@ def command_eval(args: argparse.Namespace) -> int:
                 run_id=args.run_id,
             )
             _print_yaml(report)
-            return 0 if report["resolved"] and not report["harness_error"] else 1
+            return 0 if not report["harness_error"] else 1
         if args.benchmark_action == "guard-run-swe":
             if not sys.stdin.isatty():
                 raise RuntimeError(
@@ -478,7 +496,11 @@ def command_eval(args: argparse.Namespace) -> int:
                 guard_secret=secret,
                 wave_token=args.wave_token,
                 study_binding_path=Path(args.study_binding),
-                out_root=Path(args.out),
+                out_root=(
+                    Path(args.out)
+                    if args.out
+                    else Path(args.guard_root) / "results/swe"
+                ),
                 run_id=args.run_id,
             )
             _print_yaml(report)
@@ -547,12 +569,7 @@ def command_eval(args: argparse.Namespace) -> int:
                 study_binding=study_binding,
             )
             _print_yaml(report)
-            return (
-                0
-                if report["failed_count"] == 0
-                and report["harness_error_count"] == 0
-                else 1
-            )
+            return 0 if report["harness_error_count"] == 0 else 1
         if args.benchmark_action == "run-case":
             report = service.run_case(
                 Path(args.manifest),
@@ -675,11 +692,41 @@ def command_operator(args: argparse.Namespace) -> int:
         elif args.study_action == "list":
             _print_yaml({"studies": service.list_studies()})
         elif args.study_action == "guard-binding":
+            terminalize = False
+            if args.kind == "CANDIDATE":
+                if not sys.stdin.isatty():
+                    raise RuntimeError(
+                        "candidate Guard binding requires an interactive trusted human terminal"
+                    )
+                print(
+                    "This permanently closes the Study line before Holdout scoring. "
+                    f"Type the Study ID {args.study_id!r} to continue: ",
+                    file=sys.stderr,
+                    end="",
+                    flush=True,
+                )
+                confirmation = input()
+                if confirmation != args.study_id:
+                    raise RuntimeError("candidate Guard binding confirmation did not match")
+                terminalize = True
             _print_yaml(
                 service.guard_study_binding(
                     args.study_id,
                     kind=args.kind,
+                    terminalize=terminalize,
                 )
+            )
+        elif args.study_action == "evidence-register":
+            evidence = service.register_study_evidence(
+                args.study_id,
+                binding_path=args.binding,
+                artifact_path=args.artifact,
+            )
+            _print_yaml(
+                {
+                    "reference": service.study_evidence_reference(evidence),
+                    "evidence": evidence.to_dict(),
+                }
             )
         elif args.study_action == "import-guard-metric":
             if not sys.stdin.isatty():
@@ -1089,7 +1136,15 @@ def build_parser() -> argparse.ArgumentParser:
     approve = memory_sub.add_parser("approve")
     approve.add_argument("proposal_id")
     approve.add_argument("--note", required=True)
+    approve.add_argument("--confirm-review-digest", required=True)
     approve.set_defaults(func=command_memory)
+    approve_skill = memory_sub.add_parser("approve-skill")
+    approve_skill.add_argument("proposal_id")
+    approve_skill.add_argument("--skill-name", required=True)
+    approve_skill.add_argument("--description", required=True)
+    approve_skill.add_argument("--note", required=True)
+    approve_skill.add_argument("--confirm-review-digest", required=True)
+    approve_skill.set_defaults(func=command_memory)
     reject = memory_sub.add_parser("reject")
     reject.add_argument("proposal_id")
     reject.add_argument("--reason", required=True)
@@ -1260,9 +1315,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_guard_run_swe.add_argument("--wave-token", required=True)
     benchmark_guard_run_swe.add_argument("--study-binding", required=True)
     benchmark_guard_run_swe.add_argument("--run-id", required=True)
-    benchmark_guard_run_swe.add_argument(
-        "--out", default=".autobugfix/guard-results/swe"
-    )
+    benchmark_guard_run_swe.add_argument("--out")
     benchmark_guard_run_swe.set_defaults(func=command_eval)
     benchmark_prepare_evaluation = benchmark_sub.add_parser("prepare-evaluation")
     benchmark_prepare_evaluation.add_argument("--manifest", required=True)
@@ -1392,9 +1445,17 @@ def build_parser() -> argparse.ArgumentParser:
     governance_options(study_guard_binding)
     study_guard_binding.add_argument("--study-id", required=True)
     study_guard_binding.add_argument(
-        "--kind", choices=["BASELINE", "CANDIDATE"], required=True
+        "--kind",
+        choices=["BASELINE", "OPTIMIZATION", "CANDIDATE"],
+        required=True,
     )
     study_guard_binding.set_defaults(func=command_operator)
+    study_evidence_register = study_sub.add_parser("evidence-register")
+    governance_options(study_evidence_register)
+    study_evidence_register.add_argument("--study-id", required=True)
+    study_evidence_register.add_argument("--binding", required=True)
+    study_evidence_register.add_argument("--artifact", required=True)
+    study_evidence_register.set_defaults(func=command_operator)
     study_import_guard = study_sub.add_parser("import-guard-metric")
     governance_options(study_import_guard)
     study_import_guard.add_argument("--study-id", required=True)

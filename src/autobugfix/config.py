@@ -5,6 +5,8 @@ from typing import Any
 
 import yaml
 
+from autobugfix.git_utils import GitError, git_common_dir
+
 from autobugfix.models import (
     AutobugfixConfig,
     CodexConfig,
@@ -207,7 +209,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "command_timeout_seconds": 1800,
             "issue_timeout_seconds": 60,
             "min_free_disk_gb": 10,
-            "guard": {"trusted_ref": "origin/main"},
+            "guard": {"trusted_ref": "origin/main", "docker_host": None},
             "raw_codex": {
                 "runner_project": "baselines/raw_codex_sdk",
                 "runtime_root": ".autobugfix/raw-codex-baseline",
@@ -576,6 +578,11 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
             min_free_disk_gb=int(benchmark_raw.get("min_free_disk_gb", 10)),
             guard=EvalGuardConfig(
                 trusted_ref=str(guard_raw.get("trusted_ref", "origin/main")),
+                docker_host=(
+                    str(guard_raw["docker_host"]).strip()
+                    if guard_raw.get("docker_host") is not None
+                    else None
+                ),
             ),
             raw_codex=RawCodexBaselineConfig(
                 runner_project=_resolve(
@@ -967,6 +974,14 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
         raise ConfigError("eval.benchmarks.defects4j.image must not be empty")
     if not benchmark_config.guard.trusted_ref.strip():
         raise ConfigError("eval.benchmarks.guard.trusted_ref must not be empty")
+    guard_docker_host = benchmark_config.guard.docker_host
+    if guard_docker_host is not None and (
+        not guard_docker_host.startswith("unix://")
+        or not Path(guard_docker_host.removeprefix("unix://")).is_absolute()
+    ):
+        raise ConfigError(
+            "eval.benchmarks.guard.docker_host must be an absolute local unix endpoint"
+        )
     if not benchmark_config.defects4j.verifier_image.strip():
         raise ConfigError(
             "eval.benchmarks.defects4j.verifier_image must not be empty"
@@ -1089,8 +1104,12 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
 
     project_runtime_root = (root / ".autobugfix").resolve()
     configured_task_root = Path(str(merged.get("task_root", ".autobugfix/tasks")))
+    try:
+        project_git_authority = git_common_dir(root)
+    except GitError:
+        project_git_authority = (root / ".git").resolve()
     protected_data_roots = {
-        "project_git": (root / ".git").resolve(),
+        "project_git": project_git_authority,
         "project_source": (root / "src").resolve(),
         "project_tests": (root / "tests").resolve(),
         "execution_tasks": (
@@ -1099,6 +1118,7 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
             else configured_task_root
         ).resolve(),
         "execution_archive": (root / ".autobugfix/archive").resolve(),
+        "memory": memory_root,
         "codex_runtime": (
             (root / role_runtime.runtime_root)
             if not role_runtime.runtime_root.is_absolute()
@@ -1109,6 +1129,14 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
         protected_data_roots[f"repo.{repo_id}.main_checkout"] = repo.main_checkout.resolve()
         if repo.worktree_root is not None:
             protected_data_roots[f"repo.{repo_id}.worktrees"] = repo.worktree_root.resolve()
+    for operator_name, operator_root in runtime_roots.items():
+        for protected_name, protected_root in protected_data_roots.items():
+            if _paths_overlap(operator_root, protected_root):
+                raise ConfigError(
+                    "Operator runtime root overlaps protected state or data plane: "
+                    f"{operator_name}={operator_root}, "
+                    f"{protected_name}={protected_root}"
+                )
     for benchmark_name, benchmark_root in benchmark_roots.items():
         if benchmark_root.is_relative_to(root) and not benchmark_root.is_relative_to(
             project_runtime_root

@@ -109,6 +109,7 @@ class SWEExperimentProtocol:
     timeout_seconds: int
     qualification_repeats: int
     optimization_cases: tuple[SWEOptimizationSelection, ...]
+    holdout_excluded_instances: tuple[str, ...]
     schema_version: int = 2
 
     def __post_init__(self) -> None:
@@ -135,6 +136,18 @@ class SWEExperimentProtocol:
             raise BenchmarkContractError("Optimization dataset must be SWE-bench Verified")
         if self.holdout_dataset != SWE_LIVE_DATASET:
             raise BenchmarkContractError("Holdout dataset must be SWE-bench-Live MultiLang")
+        if not self.holdout_excluded_instances:
+            raise BenchmarkContractError(
+                "SWE Holdout protocol requires an explicit exposure exclusion ledger"
+            )
+        for instance_id in self.holdout_excluded_instances:
+            safe_component(instance_id, "holdout.excluded_instances")
+        if len(set(self.holdout_excluded_instances)) != len(
+            self.holdout_excluded_instances
+        ):
+            raise BenchmarkContractError(
+                "SWE Holdout exclusion identities must be unique"
+            )
         if len(self.optimization_cases) != self.optimization_count:
             raise BenchmarkContractError(
                 "SWE protocol must name exactly ten Optimization cases"
@@ -186,7 +199,11 @@ class SWEExperimentProtocol:
             {"dataset", "count", "cases"},
             "SWE optimization protocol",
         )
-        _only_fields(holdout, {"dataset", "count"}, "SWE holdout protocol")
+        _only_fields(
+            holdout,
+            {"dataset", "count", "excluded_instances"},
+            "SWE holdout protocol",
+        )
         optimization_cases = tuple(
             SWEOptimizationSelection.from_dict(item)
             for item in _sequence(optimization.get("cases") or (), "optimization.cases")
@@ -216,6 +233,10 @@ class SWEExperimentProtocol:
             optimization_dataset=_required(optimization.get("dataset"), "optimization.dataset"),
             holdout_dataset=_required(holdout.get("dataset"), "holdout.dataset"),
             optimization_cases=optimization_cases,
+            holdout_excluded_instances=_string_tuple(
+                holdout.get("excluded_instances") or (),
+                "holdout.excluded_instances",
+            ),
         )
 
     @staticmethod
@@ -268,7 +289,11 @@ class SWEExperimentProtocol:
                 "count": self.optimization_count,
                 "cases": [case.to_dict() for case in self.optimization_cases],
             },
-            "holdout": {"dataset": self.holdout_dataset, "count": self.holdout_count},
+            "holdout": {
+                "dataset": self.holdout_dataset,
+                "count": self.holdout_count,
+                "excluded_instances": list(self.holdout_excluded_instances),
+            },
             "waves": {"3": 3, "8": 8, "16": 16},
             "upstreams": {
                 "swebench_version": SWE_BENCH_VERSION,
