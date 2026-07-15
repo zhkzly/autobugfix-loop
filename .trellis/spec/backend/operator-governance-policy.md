@@ -160,6 +160,9 @@ manifest, not authority. It is generated before the candidate commit to avoid
 a head/digest cycle. A Writer could forge it, so trusted CI:
 
 - loads validator and constitution from the PR base checkout;
+- selects exactly one bundle added or modified relative to the current PR base,
+  so historical bundles retained on main cannot authorize or contaminate a new
+  candidate;
 - derives the actual full diff and risk from the candidate checkout;
 - re-reads allowlisted GitHub reviews and binds them to request/head/PR;
 - ignores candidate local phase/check claims for the merge decision;

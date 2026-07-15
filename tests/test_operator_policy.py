@@ -50,6 +50,15 @@ def load_real_repository_acceptance():
     return module
 
 
+def load_operator_pr_validator():
+    path = PROJECT_ROOT / "scripts/validate_operator_pr.py"
+    spec = importlib.util.spec_from_file_location("trusted_operator_pr_validator", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=True)
 
@@ -537,7 +546,8 @@ def test_remote_operator_gate_fetches_history_and_preserves_authoritative_logs()
     assert "ref: ${{ github.workflow_sha }}" in workflow
     assert "path: guard" in workflow
     assert "Resolve signed frozen authority base" in workflow
-    assert "yaml.safe_load" in workflow
+    assert "--resolve-frozen-base-only" in workflow
+    assert "candidate.glob" not in workflow
     assert "ref: ${{ steps.frozen-base.outputs.sha }}" in workflow
     assert "merge-base --is-ancestor" in workflow
     assert "kernel.unprivileged_userns_clone=1" in workflow
@@ -549,6 +559,7 @@ def test_remote_operator_gate_fetches_history_and_preserves_authoritative_logs()
     assert "--runtime-venv guard/.venv" in workflow
     assert "--expected-guard-sha ${{ github.workflow_sha }}" in workflow
     assert "--expected-base-sha ${{ steps.frozen-base.outputs.sha }}" in workflow
+    assert workflow.count("--pull-request-base-sha") == 2
     assert "--skip-live-experiment" in workflow
     assert "GH_TOKEN" not in workflow
     assert "pull-requests: read" not in workflow
@@ -558,6 +569,38 @@ def test_remote_operator_gate_fetches_history_and_preserves_authoritative_logs()
     )
     assert "actions/upload-artifact@v4" in workflow
     assert "trusted/.autobugfix/operator-pr" in workflow
+
+
+def test_remote_gate_selects_only_bundle_changed_by_current_pull_request(tmp_path: Path):
+    validator = load_operator_pr_validator()
+    root = tmp_path / "candidate"
+    root.mkdir()
+    run(["git", "init", "-b", "main"], root)
+    run(["git", "config", "user.email", "operator@example.com"], root)
+    run(["git", "config", "user.name", "Operator User"], root)
+    inherited = root / ".autobugfix-governance/old-request/bundle.yaml"
+    inherited.parent.mkdir(parents=True)
+    inherited.write_text("request: {base_sha: inherited}\n", encoding="utf-8")
+    run(["git", "add", "."], root)
+    run(["git", "commit", "-m", "historical bundle"], root)
+    pull_request_base = run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+
+    current = root / ".autobugfix-governance/current-request/bundle.yaml"
+    current.parent.mkdir(parents=True)
+    current.write_text("request: {base_sha: current}\n", encoding="utf-8")
+    run(["git", "add", "."], root)
+    run(["git", "commit", "-m", "current bundle"], root)
+
+    assert validator.changed_operator_bundle(root, pull_request_base) == current
+
+    duplicate = root / ".autobugfix-governance/duplicate-request/bundle.yaml"
+    duplicate.parent.mkdir(parents=True)
+    duplicate.write_text("request: {base_sha: duplicate}\n", encoding="utf-8")
+    run(["git", "add", "."], root)
+    run(["git", "commit", "-m", "duplicate current bundle"], root)
+
+    with pytest.raises(RuntimeError, match="changed by this pull request, found 2"):
+        validator.changed_operator_bundle(root, pull_request_base)
 
 
 def test_sandbox_remaps_read_only_runtime_venv_environment(tmp_path: Path):
