@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -28,6 +29,15 @@ from autobugfix.operator.workspace import create_operator_workspace
 
 PACKAGE_POLICY = Path(__file__).parents[1] / "src/autobugfix/operator/constitution.yaml"
 PROJECT_ROOT = Path(__file__).parents[1]
+
+
+def load_real_repository_acceptance():
+    path = PROJECT_ROOT / "scripts/real_repository_acceptance.py"
+    spec = importlib.util.spec_from_file_location("candidate_real_repository_acceptance", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -1168,3 +1178,74 @@ def test_request_requires_planned_paths_and_scope_layer_expansion_requires_path(
             add_paths=("src/autobugfix/eval/runner.py",),
             reason="declared layer does not match the proposed path",
         )
+
+
+def test_real_repository_clone_uses_http1_and_retries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    real_repository_acceptance = load_real_repository_acceptance()
+    seed = tmp_path / "upstream-seed"
+    calls: list[list[str]] = []
+    delays: list[int] = []
+    timeouts: list[int | None] = []
+
+    def fake_run(argv: list[str], *args, **kwargs) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        timeouts.append(kwargs.get("timeout_seconds"))
+        if len(calls) < 3:
+            seed.mkdir()
+            raise RuntimeError("transient clone failure")
+        seed.mkdir()
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(real_repository_acceptance, "run", fake_run)
+    monkeypatch.setattr(real_repository_acceptance.time, "sleep", delays.append)
+
+    real_repository_acceptance.clone_upstream(seed)
+
+    assert len(calls) == 3
+    assert all(call[1:3] == ["-c", "http.version=HTTP/1.1"] for call in calls)
+    assert all(call[-2:] == [real_repository_acceptance.UPSTREAM_URL, str(seed)] for call in calls)
+    assert delays == [1, 2]
+    assert timeouts == [real_repository_acceptance.UPSTREAM_CLONE_TIMEOUT_SECONDS] * 3
+
+
+def test_real_repository_clone_fails_after_bounded_attempts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    real_repository_acceptance = load_real_repository_acceptance()
+    seed = tmp_path / "upstream-seed"
+    calls = 0
+
+    def fake_run(argv: list[str], *args, **kwargs) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        seed.mkdir()
+        raise RuntimeError("persistent clone failure")
+
+    monkeypatch.setattr(real_repository_acceptance, "run", fake_run)
+    monkeypatch.setattr(real_repository_acceptance.time, "sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="persistent clone failure"):
+        real_repository_acceptance.clone_upstream(seed)
+
+    assert calls == real_repository_acceptance.UPSTREAM_CLONE_ATTEMPTS
+
+
+def test_real_repository_command_timeout_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_repository_acceptance = load_real_repository_acceptance()
+
+    def time_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            ["git", "clone"],
+            1,
+            output=b"partial stdout",
+            stderr=b"stalled transport",
+        )
+
+    monkeypatch.setattr(real_repository_acceptance.subprocess, "run", time_out)
+
+    with pytest.raises(RuntimeError, match=r"command timed out after 1s: git clone"):
+        real_repository_acceptance.run(["git", "clone"], timeout_seconds=1)
