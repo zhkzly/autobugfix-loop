@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import shutil
+import socket
 import tomllib
 import traceback
 from dataclasses import asdict, is_dataclass
@@ -17,6 +18,11 @@ from autobugfix.models import CodexRequest, CodexResult, utc_now
 
 class CodexSDKError(RuntimeError):
     pass
+
+
+CODEX_BROKER_SOCKET_ENV = "AUTOBUGFIX_CODEX_BROKER_SOCKET"
+CODEX_BROKER_TOKEN_ENV = "AUTOBUGFIX_CODEX_BROKER_TOKEN"
+_BROKER_RESPONSE_LIMIT = 4 * 1024 * 1024
 
 
 def _jsonable(value: Any) -> Any:
@@ -68,8 +74,16 @@ class CodexSDKBackend(CodexBackend):
 
     module_names = ("openai_codex", "codex")
 
-    def __init__(self, module_name: str | None = None) -> None:
+    def __init__(
+        self,
+        module_name: str | None = None,
+        *,
+        source_home: Path | None = None,
+        runtime_root: Path | None = None,
+    ) -> None:
         self.module_name = module_name
+        self.source_home = source_home.resolve() if source_home is not None else None
+        self.runtime_root = runtime_root.resolve() if runtime_root is not None else None
 
     def _load_module(self) -> Any:
         names = (self.module_name,) if self.module_name else self.module_names
@@ -106,12 +120,12 @@ class CodexSDKBackend(CodexBackend):
         runtime = cfg.codex.role_runtime
         if not runtime.enabled:
             raise CodexSDKError("isolated Codex role runtime is disabled")
-        runtime_root = runtime.runtime_root
+        runtime_root = self.runtime_root or runtime.runtime_root
         if not runtime_root.is_absolute():
             runtime_root = project_root / runtime_root
         codex_home = runtime_root / "home"
         codex_home.mkdir(parents=True, exist_ok=True)
-        source_home = Path.home() / ".codex"
+        source_home = self.source_home or (Path.home() / ".codex")
         for name in ("auth.json", "version.json", "installation_id", ".personality_migration"):
             if name == "auth.json" and not runtime.bridge_auth:
                 continue
@@ -171,6 +185,59 @@ class CodexSDKBackend(CodexBackend):
         }
         env["CODEX_HOME"] = str(codex_home)
         return env
+
+    def _call_broker(self, request: CodexRequest) -> CodexResult:
+        raw_socket = os.environ.get(CODEX_BROKER_SOCKET_ENV)
+        token = os.environ.get(CODEX_BROKER_TOKEN_ENV)
+        if not raw_socket or not token:
+            raise CodexSDKError("trusted Codex broker configuration is incomplete")
+        socket_path = Path(raw_socket)
+        if not socket_path.is_absolute():
+            raise CodexSDKError("trusted Codex broker socket path must be absolute")
+        project_root = self._project_root_for(request)
+        if project_root is None:
+            raise CodexSDKError("cannot locate control root for trusted Codex broker request")
+        payload = {
+            "token": token,
+            "role": request.role,
+            "prompt": request.prompt,
+            "developer_instructions": request.developer_instructions,
+            "cwd": str(request.cwd.resolve()),
+            "control_root": str(project_root),
+            "sandbox": request.sandbox,
+            "approval_mode": request.approval_mode,
+            "model": request.model,
+            "timeout_seconds": request.timeout_seconds,
+        }
+        timeout_seconds = float((request.timeout_seconds or 600) + 60)
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(timeout_seconds)
+                connection.connect(str(socket_path))
+                with connection.makefile("rwb") as stream:
+                    stream.write(json.dumps(payload, sort_keys=True).encode("utf-8") + b"\n")
+                    stream.flush()
+                    response_line = stream.readline(_BROKER_RESPONSE_LIMIT + 1)
+        except OSError as exc:
+            raise CodexSDKError(f"trusted Codex broker transport failed: {exc}") from exc
+        if not response_line or len(response_line) > _BROKER_RESPONSE_LIMIT:
+            raise CodexSDKError("trusted Codex broker returned an empty or oversized response")
+        try:
+            response = json.loads(response_line)
+        except json.JSONDecodeError as exc:
+            raise CodexSDKError("trusted Codex broker returned invalid JSON") from exc
+        if not isinstance(response, dict):
+            raise CodexSDKError("trusted Codex broker response must be a mapping")
+        if response.get("error"):
+            raise CodexSDKError(str(response["error"]))
+        result = response.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("text"), str):
+            raise CodexSDKError("trusted Codex broker omitted its result")
+        return CodexResult(
+            text=result["text"],
+            exit_code=int(result.get("exit_code", 0)),
+            raw={"broker_receipt": result.get("receipt")},
+        )
 
     def _codex_bin(self, request: CodexRequest) -> str | None:
         override = os.environ.get("AUTOBUGFIX_CODEX_BIN")
@@ -257,11 +324,19 @@ class CodexSDKBackend(CodexBackend):
         with request.raw_log_path.open("a", encoding="utf-8") as raw:
             raw.write(json.dumps({"kind": "codex_request", "timestamp": utc_now(), "request": _jsonable(request)}, sort_keys=True) + "\n")
         try:
-            module = self._load_module()
-            result = self._call_sdk(module, request)
-            text = _extract_text(result)
-            raw_payload = _jsonable(result)
-            module_name = getattr(module, "__name__", self.module_name or type(module).__name__)
+            exit_code = 0
+            if os.environ.get(CODEX_BROKER_SOCKET_ENV) or os.environ.get(CODEX_BROKER_TOKEN_ENV):
+                broker_result = self._call_broker(request)
+                text = broker_result.text
+                raw_payload = _jsonable(broker_result.raw)
+                module_name = "trusted_operator_codex_broker"
+                exit_code = broker_result.exit_code
+            else:
+                module = self._load_module()
+                result = self._call_sdk(module, request)
+                text = _extract_text(result)
+                raw_payload = _jsonable(result)
+                module_name = getattr(module, "__name__", self.module_name or type(module).__name__)
             with request.raw_log_path.open("a", encoding="utf-8") as raw:
                 raw.write(
                     json.dumps(
@@ -275,7 +350,11 @@ class CodexSDKBackend(CodexBackend):
                     )
                     + "\n"
                 )
-            return CodexResult(text=text, raw={"module": module_name, "response": raw_payload})
+            return CodexResult(
+                text=text,
+                raw={"module": module_name, "response": raw_payload},
+                exit_code=exit_code,
+            )
         except Exception as exc:
             request.stderr_log_path.write_text(traceback.format_exc(), encoding="utf-8")
             with request.raw_log_path.open("a", encoding="utf-8") as raw:

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+import socket
 import sys
+import threading
 import types
 from pathlib import Path
 
 import pytest
 
-from autobugfix.codex_sdk import CodexSDKBackend, CodexSDKError
+from autobugfix.codex_sdk import (
+    CODEX_BROKER_SOCKET_ENV,
+    CODEX_BROKER_TOKEN_ENV,
+    CodexSDKBackend,
+    CodexSDKError,
+)
 from autobugfix.models import CodexRequest
 
 
@@ -153,3 +160,86 @@ def test_runtime_bridge_sanitizes_user_config_and_legacy_effort(tmp_path, monkey
     assert "mcp_servers" not in text
     assert "secret-value" not in text
     assert f"[projects.{json.dumps(str(project.resolve()))}]" in text
+
+
+def test_sdk_uses_trusted_broker_without_importing_candidate_sdk(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    write_project_config(project)
+    socket_path = tmp_path / "broker.sock"
+    token = "ephemeral-capability-token"
+    captured = {}
+    ready = threading.Event()
+
+    def serve() -> None:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(str(socket_path))
+            server.listen(1)
+            ready.set()
+            connection, _ = server.accept()
+            with connection, connection.makefile("rwb") as stream:
+                captured.update(json.loads(stream.readline()))
+                stream.write(
+                    json.dumps(
+                        {
+                            "result": {
+                                "text": "brokered result",
+                                "exit_code": 7,
+                                "receipt": {"sequence": 1},
+                            }
+                        }
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                stream.flush()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    assert ready.wait(timeout=5)
+    monkeypatch.setenv(CODEX_BROKER_SOCKET_ENV, str(socket_path))
+    monkeypatch.setenv(CODEX_BROKER_TOKEN_ENV, token)
+    request = CodexRequest(
+        role="writer",
+        prompt="repair the repository",
+        cwd=project,
+        sandbox="workspace-write",
+        model="gpt-5.4-mini",
+        timeout_seconds=30,
+        developer_instructions="follow the writer contract",
+        raw_log_path=project / "raw.jsonl",
+        stderr_log_path=project / "stderr.log",
+        approval_mode="auto_review",
+    )
+
+    result = CodexSDKBackend("candidate_sdk_must_not_be_imported").run(request)
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert result.text == "brokered result"
+    assert result.exit_code == 7
+    assert captured["token"] == token
+    assert captured["control_root"] == str(project)
+    raw_log = request.raw_log_path.read_text(encoding="utf-8")
+    assert "trusted_operator_codex_broker" in raw_log
+    assert token not in raw_log
+
+
+def test_sdk_rejects_partial_broker_environment(tmp_path, monkeypatch):
+    write_project_config(tmp_path)
+    monkeypatch.setenv(CODEX_BROKER_SOCKET_ENV, str(tmp_path / "missing.sock"))
+    monkeypatch.delenv(CODEX_BROKER_TOKEN_ENV, raising=False)
+    request = CodexRequest(
+        role="writer",
+        prompt="repair",
+        cwd=tmp_path,
+        sandbox="workspace-write",
+        model="gpt-5.4-mini",
+        timeout_seconds=30,
+        developer_instructions="writer contract",
+        raw_log_path=tmp_path / "raw.jsonl",
+        stderr_log_path=tmp_path / "stderr.log",
+        approval_mode="auto_review",
+    )
+
+    with pytest.raises(CodexSDKError, match="configuration is incomplete"):
+        CodexSDKBackend().run(request)

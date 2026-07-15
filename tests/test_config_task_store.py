@@ -19,6 +19,18 @@ def test_config_defaults_and_task_store_round_trip(tmp_path):
     real_profile = cfg.operator.experiments.profiles["real-e2e"]
     assert real_profile["network_access"] is True
     assert "scripts/real_repository_acceptance.py" in real_profile["commands"][0]["argv"]
+    assert real_profile["codex_broker"] == {
+        "enabled": True,
+        "model": "gpt-5.4-mini",
+        "required_role_sequence": [
+            "writer",
+            "evaluator",
+            "memory_maintainer",
+            "writer",
+            "evaluator",
+        ],
+        "max_timeout_seconds": 600,
+    }
     store = TaskStore(project_root, cfg.task_root)
     record = TaskRecord(task_id="t1", repo_id="toy_repo", title="title", body="body", state="ready")
     store.create(record)
@@ -71,4 +83,22 @@ def test_config_rejects_disabling_isolated_codex_role_runtime(tmp_path):
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(ConfigError, match="isolated CODEX_HOME"):
+        load_config(project_root)
+
+
+def test_config_rejects_invalid_operator_codex_broker_contract(tmp_path):
+    project_root, _ = make_service_project(tmp_path)
+    path = project_root / ".autobugfix/config.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data.setdefault("operator", {}).setdefault("experiments", {}).setdefault(
+        "profiles", {}
+    ).setdefault("real-e2e", {})["codex_broker"] = {
+        "enabled": True,
+        "model": "gpt-5.4-mini",
+        "required_role_sequence": ["operator_writer"],
+        "max_timeout_seconds": 600,
+    }
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="unsupported roles"):
         load_config(project_root)

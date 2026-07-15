@@ -673,6 +673,7 @@ class OperatorGovernanceService:
                 hidden_roots=(self.store.root, self.store.artifact_root),
                 writable_roots=(shadow_root,),
                 read_only_binds=self._runtime_binds(workspace),
+                codex_broker=profile_data.get("codex_broker"),
             )
             failed = [
                 str(item.get("name") or "command")
@@ -819,6 +820,7 @@ class OperatorGovernanceService:
                 hidden_roots=(self.store.root, self.store.artifact_root),
                 writable_roots=(shadow_root,),
                 read_only_binds=self._runtime_binds(experiment_workspace),
+                codex_broker=profile_data.get("codex_broker"),
             )
             for item in results:
                 for stream in ("stdout_path", "stderr_path"):
@@ -828,6 +830,15 @@ class OperatorGovernanceService:
                         trust_class="authoritative",
                         kind="experiment-log",
                         path=Path(item[stream]),
+                        patch_digest=snapshot.patch_digest,
+                    )
+                for artifact in item.get("codex_call_artifacts") or []:
+                    self.store.register_artifact_file(
+                        request_id,
+                        producer="trusted_codex_broker",
+                        trust_class="authoritative",
+                        kind="codex-call-artifact",
+                        path=Path(str(artifact)),
                         patch_digest=snapshot.patch_digest,
                     )
         except Exception as exc:
