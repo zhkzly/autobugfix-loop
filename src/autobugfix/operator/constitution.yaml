@@ -328,10 +328,6 @@ layers:
       - src/autobugfix/dataset.py
       - src/autobugfix/eval/**
       - .agents/role-skills/eval/**
-      - baselines/**
-      - benchmarks/**
-      - containers/**
-      - harnesses/**
       - tests/test_dataset.py
       - tests/test_eval.py
       - tests/test_eval_benchmarks.py
@@ -347,7 +343,6 @@ layers:
       - .agents/skills/autobugfix-eval-operator/**
       - .agents/skills/autobugfix-operator-governance/**
       - .agents/skills/oncall-bugfix/**
-      - .agents/role-skills/operator/**
       - scripts/validate_operator_policy.py
       - scripts/validate_operator_pr.py
       - scripts/install_operator_governance.py
@@ -386,7 +381,6 @@ layers:
       - .codex/hooks/operator-governance.py
       - .codex/hooks.json
       - tests/helpers.py
-      - .agents/role-skills/base/**
       - pyproject.toml
       - uv.lock
   docs_skills:

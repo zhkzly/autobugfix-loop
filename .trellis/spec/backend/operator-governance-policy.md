@@ -203,6 +203,9 @@ authority, semantic, or retry-budget blocks.
 - Candidate risk is recomputed from the trusted constitution and complete diff.
 - Layer ownership uses the most-specific matching constitution rule; equal
   top-specificity cross-layer matches are rejected as ambiguous.
+- `layer_resolution.governed_prefixes` and every layer's `paths` registry are
+  duplicate-free. Every tracked path below a governed prefix must resolve to
+  exactly one owning layer after the most-specific rule is applied.
 - Behavior-layer full verification requires a baseline and a matching trusted
   experiment receipt. Caller-provided numeric metrics have no authority.
 - Trusted-base PR admission loads the committed baseline from the PR base,

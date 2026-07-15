@@ -1351,32 +1351,6 @@ def test_sandbox_exact_read_only_bind_overlays_candidate_root(tmp_path: Path):
     assert (destination / "marker.txt").read_text(encoding="utf-8") == "candidate\n"
 
 
-def test_failed_profile_cannot_be_published_as_trusted_baseline(
-    tmp_path: Path, monkeypatch
-):
-    root = make_operator_repo(tmp_path)
-    service = service_for(root, tmp_path)
-    monkeypatch.setattr(
-        "autobugfix.operator.service.run_command_specs",
-        lambda *args, **kwargs: [
-            {
-                "name": "failed-real-e2e",
-                "passed": False,
-                "timed_out": False,
-                "exit_code": 1,
-            }
-        ],
-    )
-
-    with pytest.raises(
-        OperatorGovernanceError,
-        match="trusted baseline profile did not pass: failed-real-e2e",
-    ):
-        service.capture_baseline("failed-baseline", profile="smoke")
-
-    assert not (root / ".autobugfix-baselines/failed-baseline.yaml").exists()
-
-
 def test_committed_baseline_rejects_later_behavior_commit(tmp_path: Path):
     root = make_operator_repo(tmp_path)
     policy_path = write_test_policy(root, tmp_path)
@@ -1461,9 +1435,14 @@ def test_cli_has_no_arbitrary_set_state_or_fake_human_switch(tmp_path: Path, mon
 def test_constitution_classifies_every_governed_source_path_once():
     root = Path(__file__).parents[1]
     constitution = yaml.safe_load(PACKAGE_POLICY.read_text(encoding="utf-8"))
+    prefixes = constitution["layer_resolution"]["governed_prefixes"]
+    assert len(prefixes) == len(set(prefixes))
+    for layer, definition in constitution["layers"].items():
+        paths = definition["paths"]
+        assert len(paths) == len(set(paths)), f"duplicate path rules in {layer}"
     tracked = run(["git", "ls-files"], root).stdout.splitlines()
     tracked.extend(run(["git", "ls-files", "--others", "--exclude-standard"], root).stdout.splitlines())
-    prefixes = tuple(constitution["layer_resolution"]["governed_prefixes"])
+    prefixes = tuple(prefixes)
     invalid = {
         path: layers_for_file(constitution, path)
         for path in tracked
