@@ -232,7 +232,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
                             "writer",
                             "evaluator",
                         ],
-                        "max_timeout_seconds": 600,
+                        "role_timeout_seconds": {
+                            "writer": 600,
+                            "evaluator": 300,
+                            "memory_maintainer": 1800,
+                        },
                     },
                     "commands": [
                         {
@@ -564,7 +568,7 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
                 "enabled",
                 "model",
                 "required_role_sequence",
-                "max_timeout_seconds",
+                "role_timeout_seconds",
             }
             unknown_broker_keys = set(broker) - allowed_broker_keys
             if unknown_broker_keys:
@@ -592,11 +596,24 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
                 )
             if len(sequence) > 32:
                 raise ConfigError(f"{field}.required_role_sequence cannot exceed 32 calls")
-            max_timeout = broker.get("max_timeout_seconds")
-            if isinstance(max_timeout, bool) or not isinstance(max_timeout, int):
-                raise ConfigError(f"{field}.max_timeout_seconds must be an integer")
-            if max_timeout < 1 or max_timeout > 1800:
-                raise ConfigError(f"{field}.max_timeout_seconds must be between 1 and 1800")
+            raw_timeouts = broker.get("role_timeout_seconds")
+            if not isinstance(raw_timeouts, dict):
+                raise ConfigError(f"{field}.role_timeout_seconds must be a mapping")
+            sequence_roles = {str(role) for role in sequence}
+            timeout_roles = {str(role) for role in raw_timeouts}
+            if timeout_roles != sequence_roles:
+                raise ConfigError(
+                    f"{field}.role_timeout_seconds must exactly cover sequence roles"
+                )
+            for role, timeout in raw_timeouts.items():
+                if isinstance(timeout, bool) or not isinstance(timeout, int):
+                    raise ConfigError(
+                        f"{field}.role_timeout_seconds.{role} must be an integer"
+                    )
+                if timeout < 1 or timeout > 1800:
+                    raise ConfigError(
+                        f"{field}.role_timeout_seconds.{role} must be between 1 and 1800"
+                    )
     if operator_config.promotion.require_canary and not operator_config.promotion.canary_profiles:
         raise ConfigError("operator.promotion.canary_profiles must not be empty when canary is required")
     authority_roots = {

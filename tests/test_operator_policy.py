@@ -803,7 +803,7 @@ def test_operator_codex_server_enforces_role_sequence_and_authority_roots(
         source_home=source_home,
         model="gpt-5.4-mini",
         required_role_sequence=("writer", "evaluator"),
-        max_timeout_seconds=60,
+        role_timeout_seconds={"writer": 60, "evaluator": 60},
         backend=backend,
     )
 
@@ -814,6 +814,7 @@ def test_operator_codex_server_enforces_role_sequence_and_authority_roots(
         sandbox: str,
         approval_mode: str,
         index: int,
+        timeout_seconds: int = 30,
     ) -> CodexRequest:
         return CodexRequest(
             role=role,
@@ -821,7 +822,7 @@ def test_operator_codex_server_enforces_role_sequence_and_authority_roots(
             cwd=cwd,
             sandbox=sandbox,
             model="gpt-5.4-mini",
-            timeout_seconds=30,
+            timeout_seconds=timeout_seconds,
             developer_instructions="bounded role contract",
             raw_log_path=control_root / f"client-{index}.raw.jsonl",
             stderr_log_path=control_root / f"client-{index}.stderr.log",
@@ -852,13 +853,24 @@ def test_operator_codex_server_enforces_role_sequence_and_authority_roots(
                     index=2,
                 )
             )
+        with pytest.raises(CodexSDKError, match="timeout exceeds"):
+            client.run(
+                request(
+                    "writer",
+                    worktree,
+                    sandbox="workspace-write",
+                    approval_mode="auto_review",
+                    index=3,
+                    timeout_seconds=61,
+                )
+            )
         writer_result = client.run(
             request(
                 "writer",
                 worktree,
                 sandbox="workspace-write",
                 approval_mode="auto_review",
-                index=3,
+                index=4,
             )
         )
         assert writer_result.text == "completed writer"
@@ -869,7 +881,7 @@ def test_operator_codex_server_enforces_role_sequence_and_authority_roots(
                     worktree,
                     sandbox="workspace-write",
                     approval_mode="auto_review",
-                    index=4,
+                    index=5,
                 )
             )
         evaluator_result = client.run(
@@ -878,7 +890,7 @@ def test_operator_codex_server_enforces_role_sequence_and_authority_roots(
                 worktree,
                 sandbox="read-only",
                 approval_mode="deny_all",
-                index=5,
+                index=6,
             )
         )
         assert evaluator_result.text == "completed evaluator"
@@ -890,7 +902,7 @@ def test_operator_codex_server_enforces_role_sequence_and_authority_roots(
     artifacts = server.artifact_paths()
     assert len(artifacts) == 7
     events = (artifact_root / "broker-events.jsonl").read_text(encoding="utf-8")
-    assert events.count('"status": "rejected"') == 3
+    assert events.count('"status": "rejected"') == 4
     assert events.count('"status": "completed"') == 2
     assert all("one-command-token" not in Path(path).read_text(encoding="utf-8") for path in artifacts)
     assert all("host-only" not in Path(path).read_text(encoding="utf-8") for path in artifacts)
@@ -924,7 +936,7 @@ def test_brokered_command_fails_if_required_sdk_sequence_is_skipped(
             "enabled": True,
             "model": "gpt-5.4-mini",
             "required_role_sequence": ["writer"],
-            "max_timeout_seconds": 60,
+            "role_timeout_seconds": {"writer": 60},
         },
     )
 

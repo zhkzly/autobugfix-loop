@@ -102,7 +102,7 @@ class _OperatorCodexServer(AbstractContextManager["_OperatorCodexServer"]):
         source_home: Path,
         model: str,
         required_role_sequence: tuple[str, ...],
-        max_timeout_seconds: int,
+        role_timeout_seconds: Mapping[str, int],
         backend: CodexBackend | None = None,
     ) -> None:
         self.socket_path = socket_path.resolve()
@@ -113,7 +113,7 @@ class _OperatorCodexServer(AbstractContextManager["_OperatorCodexServer"]):
         self.source_home = source_home.resolve()
         self.model = model
         self.required_role_sequence = required_role_sequence
-        self.max_timeout_seconds = max_timeout_seconds
+        self.role_timeout_seconds = dict(role_timeout_seconds)
         self.backend = backend or CodexSDKBackend(
             source_home=self.source_home,
             runtime_root=self.runtime_root,
@@ -169,7 +169,7 @@ class _OperatorCodexServer(AbstractContextManager["_OperatorCodexServer"]):
         if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, int):
             raise OperatorValidationError("Codex broker timeout must be an integer")
         timeout_seconds = raw_timeout
-        if timeout_seconds < 1 or timeout_seconds > self.max_timeout_seconds:
+        if timeout_seconds < 1 or timeout_seconds > self.role_timeout_seconds[role]:
             raise OperatorValidationError("Codex broker timeout exceeds the profile contract")
         return CodexRequest(
             role=role,
@@ -334,7 +334,7 @@ class _OperatorCodexServer(AbstractContextManager["_OperatorCodexServer"]):
             self._socket.close()
         thread_alive = False
         if self._thread is not None:
-            self._thread.join(timeout=self.max_timeout_seconds + 60)
+            self._thread.join(timeout=max(self.role_timeout_seconds.values()) + 60)
             thread_alive = self._thread.is_alive()
         self.socket_path.unlink(missing_ok=True)
         if not thread_alive:
@@ -426,7 +426,7 @@ def _codex_broker_contract(raw: Mapping[str, Any] | None) -> dict[str, Any] | No
         "enabled",
         "model",
         "required_role_sequence",
-        "max_timeout_seconds",
+        "role_timeout_seconds",
     }
     unknown = set(raw) - allowed_keys
     if unknown:
@@ -451,17 +451,31 @@ def _codex_broker_contract(raw: Mapping[str, Any] | None) -> dict[str, Any] | No
         )
     if len(sequence) > 32:
         raise OperatorValidationError("Codex broker role sequence cannot exceed 32 calls")
-    max_timeout = raw.get("max_timeout_seconds")
-    if isinstance(max_timeout, bool) or not isinstance(max_timeout, int):
-        raise OperatorValidationError("Codex broker max_timeout_seconds must be an integer")
-    if max_timeout < 1 or max_timeout > 1800:
+    raw_timeouts = raw.get("role_timeout_seconds")
+    if not isinstance(raw_timeouts, Mapping):
+        raise OperatorValidationError("Codex broker role_timeout_seconds must be a mapping")
+    sequence_roles = set(sequence)
+    timeout_roles = {str(role) for role in raw_timeouts}
+    if timeout_roles != sequence_roles:
         raise OperatorValidationError(
-            "Codex broker max_timeout_seconds must be between 1 and 1800"
+            "Codex broker role_timeout_seconds must exactly cover sequence roles"
         )
+    role_timeouts: dict[str, int] = {}
+    for raw_role, raw_timeout in raw_timeouts.items():
+        role = str(raw_role)
+        if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, int):
+            raise OperatorValidationError(
+                f"Codex broker timeout for {role} must be an integer"
+            )
+        if raw_timeout < 1 or raw_timeout > 1800:
+            raise OperatorValidationError(
+                f"Codex broker timeout for {role} must be between 1 and 1800"
+            )
+        role_timeouts[role] = raw_timeout
     return {
         "model": model,
         "required_role_sequence": sequence,
-        "max_timeout_seconds": max_timeout,
+        "role_timeout_seconds": role_timeouts,
     }
 
 
@@ -566,7 +580,7 @@ def _run_command(
                 source_home=Path(host_environment.get("HOME") or str(Path.home())) / ".codex",
                 model=str(broker_contract["model"]),
                 required_role_sequence=broker_contract["required_role_sequence"],
-                max_timeout_seconds=int(broker_contract["max_timeout_seconds"]),
+                role_timeout_seconds=broker_contract["role_timeout_seconds"],
             )
             broker_context = broker_server
             environment[CODEX_BROKER_SOCKET_ENV] = str(socket_path)

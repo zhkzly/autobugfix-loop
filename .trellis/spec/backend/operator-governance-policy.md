@@ -76,7 +76,7 @@ target state.
   The candidate receives only a short-lived read-only Unix socket mount and
   token, never the host Codex home or authentication file. The baseline-bound
   profile fixes the model, role sequence, role sandbox/approval contracts,
-  writable roots, and timeout ceiling. A command that skips or reorders a
+  writable roots, and role-specific timeout ceilings. A command that skips or reorders a
   required SDK call fails even if its shell exit code is zero. Host-side SDK
   raw logs, stderr, receipts, and rejected-call events remain authoritative
   artifacts outside the candidate worktree.
