@@ -1,0 +1,52 @@
+name: post-pr14-real-e2e
+base_sha: 6ee7ab56f50ec5d2206f89e0b1cf8241f38222cd
+profile: real-e2e
+profile_contract:
+  codex_broker:
+    enabled: true
+    model: gpt-5.4-mini
+    required_role_sequence:
+    - writer
+    - evaluator
+    - memory_maintainer
+    - writer
+    - evaluator
+    role_timeout_seconds:
+      evaluator: 300
+      memory_maintainer: 1800
+      writer: 600
+  commands:
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - scripts/real_repository_acceptance.py
+    - --root
+    - '{shadow_state_root}/real-e2e'
+    - --model
+    - gpt-5.4-mini
+    name: real-repository-e2e
+  network_access: true
+  timeout_seconds: 3600
+profile_digest: a2bc649587ab9ab8f76d0375baad5275e128c953a0066f32fc9dfafa3ed1c16c
+profile_values: {}
+input_digest: bb5358ae89259e0f0fd390d04e9e1c758867f2856f3c42ae82ed2b76a10d7b02
+metrics:
+  artifact_completeness: 1.0
+  pass_rate: 1.0
+  runtime_seconds: 749.4869054449955
+receipt_digest: 4eb813ac9c9e7c5fd51039fb991cde253d1ad2f9c17db271acdca077b04256ce
+commands:
+- name: real-repository-e2e
+  exit_code: 0
+  passed: true
+  timed_out: false
+  duration_seconds: 749.4869054449955
+  stdout_sha256: b7ad3a16714a3a79cb45b187f7d800672072dbd6bd7d93ab8a4425bb5991ec1a
+  stderr_sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+notes: Trusted real-repository E2E baseline captured after PR14 linked-worktree verification
+  repair
+created_at: '2026-07-16T16:50:37Z'
+baseline_digest: f986d238094d305eb28a8f5bea1f9b88822ad4fff92286e727731e91340d3cb6
