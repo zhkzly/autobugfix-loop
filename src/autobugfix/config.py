@@ -31,6 +31,14 @@ class ConfigError(RuntimeError):
     pass
 
 
+OPERATOR_CODEX_BROKER_ROLE_CONTRACTS: dict[str, tuple[str, str]] = {
+    "writer": ("workspace-write", "auto_review"),
+    "evaluator": ("read-only", "deny_all"),
+    "memory_maintainer": ("workspace-write", "auto_review"),
+    "eval_judge": ("read-only", "deny_all"),
+}
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "task_root": ".autobugfix/tasks",
     "scheduler": {
@@ -214,6 +222,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "real-e2e": {
                     "timeout_seconds": 3600,
                     "network_access": True,
+                    "codex_broker": {
+                        "enabled": True,
+                        "model": "gpt-5.4-mini",
+                        "required_role_sequence": [
+                            "writer",
+                            "evaluator",
+                            "memory_maintainer",
+                            "writer",
+                            "evaluator",
+                        ],
+                        "role_timeout_seconds": {
+                            "writer": 600,
+                            "evaluator": 300,
+                            "memory_maintainer": 1800,
+                        },
+                    },
                     "commands": [
                         {
                             "name": "real-repository-e2e",
@@ -533,6 +557,62 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
                 if not isinstance(command, dict) or not isinstance(command.get("argv"), list):
                     raise ConfigError(
                         f"operator.experiments.profiles.{name}.commands[{index}].argv must be a list"
+                    )
+            broker = profile.get("codex_broker")
+            if broker is None:
+                continue
+            field = f"operator.experiments.profiles.{name}.codex_broker"
+            if not isinstance(broker, dict):
+                raise ConfigError(f"{field} must be a mapping")
+            allowed_broker_keys = {
+                "enabled",
+                "model",
+                "required_role_sequence",
+                "role_timeout_seconds",
+            }
+            unknown_broker_keys = set(broker) - allowed_broker_keys
+            if unknown_broker_keys:
+                raise ConfigError(
+                    f"{field} contains unsupported fields: "
+                    + ", ".join(sorted(str(item) for item in unknown_broker_keys))
+                )
+            if broker.get("enabled") is not True:
+                raise ConfigError(f"{field}.enabled must be true")
+            if len(commands) != 1:
+                raise ConfigError(f"{field} requires exactly one profile command")
+            model = broker.get("model")
+            if not isinstance(model, str) or not model.strip():
+                raise ConfigError(f"{field}.model must be non-empty text")
+            sequence = broker.get("required_role_sequence")
+            if not isinstance(sequence, list) or not sequence:
+                raise ConfigError(f"{field}.required_role_sequence must be a non-empty list")
+            unknown_roles = {
+                str(role) for role in sequence
+            } - set(OPERATOR_CODEX_BROKER_ROLE_CONTRACTS)
+            if unknown_roles:
+                raise ConfigError(
+                    f"{field}.required_role_sequence contains unsupported roles: "
+                    + ", ".join(sorted(unknown_roles))
+                )
+            if len(sequence) > 32:
+                raise ConfigError(f"{field}.required_role_sequence cannot exceed 32 calls")
+            raw_timeouts = broker.get("role_timeout_seconds")
+            if not isinstance(raw_timeouts, dict):
+                raise ConfigError(f"{field}.role_timeout_seconds must be a mapping")
+            sequence_roles = {str(role) for role in sequence}
+            timeout_roles = {str(role) for role in raw_timeouts}
+            if timeout_roles != sequence_roles:
+                raise ConfigError(
+                    f"{field}.role_timeout_seconds must exactly cover sequence roles"
+                )
+            for role, timeout in raw_timeouts.items():
+                if isinstance(timeout, bool) or not isinstance(timeout, int):
+                    raise ConfigError(
+                        f"{field}.role_timeout_seconds.{role} must be an integer"
+                    )
+                if timeout < 1 or timeout > 1800:
+                    raise ConfigError(
+                        f"{field}.role_timeout_seconds.{role} must be between 1 and 1800"
                     )
     if operator_config.promotion.require_canary and not operator_config.promotion.canary_profiles:
         raise ConfigError("operator.promotion.canary_profiles must not be empty when canary is required")

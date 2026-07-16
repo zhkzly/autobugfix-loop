@@ -72,6 +72,14 @@ target state.
   Bubblewrap mounts the candidate writable, hides authority roots, removes
   network by default, and binds the trusted runtime venv read-only while
   `PYTHONPATH` selects candidate source.
+- Credentialed experiment profiles use a trusted-host Codex capability broker.
+  The candidate receives only a short-lived read-only Unix socket mount and
+  token, never the host Codex home or authentication file. The baseline-bound
+  profile fixes the model, role sequence, role sandbox/approval contracts,
+  writable roots, and role-specific timeout ceilings. A command that skips or reorders a
+  required SDK call fails even if its shell exit code is zero. Host-side SDK
+  raw logs, stderr, receipts, and rejected-call events remain authoritative
+  artifacts outside the candidate worktree.
 
 #### Roles
 
@@ -152,6 +160,9 @@ manifest, not authority. It is generated before the candidate commit to avoid
 a head/digest cycle. A Writer could forge it, so trusted CI:
 
 - loads validator and constitution from the PR base checkout;
+- selects exactly one bundle added or modified relative to the current PR base,
+  so historical bundles retained on main cannot authorize or contaminate a new
+  candidate;
 - derives the actual full diff and risk from the candidate checkout;
 - re-reads allowlisted GitHub reviews and binds them to request/head/PR;
 - ignores candidate local phase/check claims for the merge decision;
@@ -179,6 +190,9 @@ state, Git worktrees, deterministic verification, and external admission.
 - Candidate config weakens role/process sandbox -> preflight or role launch fails.
 - Preview Codex SDK cannot accept isolated `env`/`codex_bin` configuration ->
   production role launch fails closed instead of using global runtime state.
+- Credentialed experiment omits/reorders a required role call, changes model,
+  requests a weaker sandbox, or names a cwd outside shadow state -> broker and
+  profile fail closed with host-side evidence.
 - Validation command fails/times out/harness errors -> CheckRun fails closed.
 - Semantic verifier errors -> full check fails closed.
 - Candidate changes during check -> check fails.

@@ -227,6 +227,7 @@ def validate_bundle(
                     hidden_roots=(authority_hidden_root,),
                     writable_roots=(shadow_root,),
                     read_only_binds=runtime_binds,
+                    codex_broker=profile.get("codex_broker"),
                 )
                 metric_receipt = derive_metric_receipt(
                     source="trusted_pr_admission_experiment",

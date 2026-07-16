@@ -14,6 +14,12 @@ import pytest
 import yaml
 
 from autobugfix.cli import main
+from autobugfix.codex_sdk import (
+    CODEX_BROKER_SOCKET_ENV,
+    CODEX_BROKER_TOKEN_ENV,
+    CodexSDKBackend,
+    CodexSDKError,
+)
 from autobugfix.models import CodexRequest, CodexResult
 from autobugfix.operator.bundle import OperatorBundleError, validate_bundle
 from autobugfix.operator.guard import compute_scope_risk
@@ -23,7 +29,11 @@ from autobugfix.operator.models import OperatorModelError, digest_payload
 from autobugfix.operator.service import OperatorGovernanceError, OperatorGovernanceService
 from autobugfix.operator.store import OperatorStoreError
 from autobugfix.operator.trusted import load_trusted_policy
-from autobugfix.operator.validator import OperatorValidationError, _run_command
+from autobugfix.operator.validator import (
+    OperatorValidationError,
+    _OperatorCodexServer,
+    _run_command,
+)
 from autobugfix.operator.workspace import create_operator_workspace
 
 
@@ -34,6 +44,15 @@ PROJECT_ROOT = Path(__file__).parents[1]
 def load_real_repository_acceptance():
     path = PROJECT_ROOT / "scripts/real_repository_acceptance.py"
     spec = importlib.util.spec_from_file_location("candidate_real_repository_acceptance", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_operator_pr_validator():
+    path = PROJECT_ROOT / "scripts/validate_operator_pr.py"
+    spec = importlib.util.spec_from_file_location("trusted_operator_pr_validator", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -87,6 +106,20 @@ class BlockingOperatorBackend(OperatorBackend):
         self.started.set()
         assert self.release.wait(timeout=10)
         return CodexResult(text="cancelled run returned")
+
+
+class BrokerBackend:
+    def __init__(self) -> None:
+        self.calls: list[CodexRequest] = []
+
+    def run(self, request: CodexRequest) -> CodexResult:
+        self.calls.append(request)
+        request.raw_log_path.write_text(
+            json.dumps({"role": request.role, "model": request.model}) + "\n",
+            encoding="utf-8",
+        )
+        request.stderr_log_path.write_text("", encoding="utf-8")
+        return CodexResult(text=f"completed {request.role}")
 
 
 def make_operator_repo(tmp_path: Path) -> Path:
@@ -513,7 +546,8 @@ def test_remote_operator_gate_fetches_history_and_preserves_authoritative_logs()
     assert "ref: ${{ github.workflow_sha }}" in workflow
     assert "path: guard" in workflow
     assert "Resolve signed frozen authority base" in workflow
-    assert "yaml.safe_load" in workflow
+    assert "--resolve-frozen-base-only" in workflow
+    assert "candidate.glob" not in workflow
     assert "ref: ${{ steps.frozen-base.outputs.sha }}" in workflow
     assert "merge-base --is-ancestor" in workflow
     assert "kernel.unprivileged_userns_clone=1" in workflow
@@ -525,6 +559,7 @@ def test_remote_operator_gate_fetches_history_and_preserves_authoritative_logs()
     assert "--runtime-venv guard/.venv" in workflow
     assert "--expected-guard-sha ${{ github.workflow_sha }}" in workflow
     assert "--expected-base-sha ${{ steps.frozen-base.outputs.sha }}" in workflow
+    assert workflow.count("--pull-request-base-sha") == 2
     assert "--skip-live-experiment" in workflow
     assert "GH_TOKEN" not in workflow
     assert "pull-requests: read" not in workflow
@@ -534,6 +569,38 @@ def test_remote_operator_gate_fetches_history_and_preserves_authoritative_logs()
     )
     assert "actions/upload-artifact@v4" in workflow
     assert "trusted/.autobugfix/operator-pr" in workflow
+
+
+def test_remote_gate_selects_only_bundle_changed_by_current_pull_request(tmp_path: Path):
+    validator = load_operator_pr_validator()
+    root = tmp_path / "candidate"
+    root.mkdir()
+    run(["git", "init", "-b", "main"], root)
+    run(["git", "config", "user.email", "operator@example.com"], root)
+    run(["git", "config", "user.name", "Operator User"], root)
+    inherited = root / ".autobugfix-governance/old-request/bundle.yaml"
+    inherited.parent.mkdir(parents=True)
+    inherited.write_text("request: {base_sha: inherited}\n", encoding="utf-8")
+    run(["git", "add", "."], root)
+    run(["git", "commit", "-m", "historical bundle"], root)
+    pull_request_base = run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+
+    current = root / ".autobugfix-governance/current-request/bundle.yaml"
+    current.parent.mkdir(parents=True)
+    current.write_text("request: {base_sha: current}\n", encoding="utf-8")
+    run(["git", "add", "."], root)
+    run(["git", "commit", "-m", "current bundle"], root)
+
+    assert validator.changed_operator_bundle(root, pull_request_base) == current
+
+    duplicate = root / ".autobugfix-governance/duplicate-request/bundle.yaml"
+    duplicate.parent.mkdir(parents=True)
+    duplicate.write_text("request: {base_sha: duplicate}\n", encoding="utf-8")
+    run(["git", "add", "."], root)
+    run(["git", "commit", "-m", "duplicate current bundle"], root)
+
+    with pytest.raises(RuntimeError, match="changed by this pull request, found 2"):
+        validator.changed_operator_bundle(root, pull_request_base)
 
 
 def test_sandbox_remaps_read_only_runtime_venv_environment(tmp_path: Path):
@@ -749,6 +816,186 @@ def test_sandbox_rejects_candidate_runtime_symlink(tmp_path: Path):
             writable_roots=(),
             read_only_binds=((Path(sys.prefix), candidate / ".venv"),),
         )
+
+
+def test_operator_codex_server_enforces_role_sequence_and_authority_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source_home = tmp_path / "host-codex"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"host-only"}\n', encoding="utf-8")
+    allowed_root = tmp_path / "shadow"
+    control_root = allowed_root / "control"
+    worktree = allowed_root / "target-worktree"
+    worktree.mkdir(parents=True)
+    (control_root / ".autobugfix").mkdir(parents=True)
+    (control_root / ".autobugfix/config.yaml").write_text("{}\n", encoding="utf-8")
+    outside_control = tmp_path / "outside-control"
+    (outside_control / ".autobugfix").mkdir(parents=True)
+    (outside_control / ".autobugfix/config.yaml").write_text("{}\n", encoding="utf-8")
+    backend = BrokerBackend()
+    socket_path = tmp_path / "capability/codex.sock"
+    artifact_root = tmp_path / "authority/calls"
+    runtime_root = tmp_path / "authority/runtime"
+    server = _OperatorCodexServer(
+        socket_path,
+        "one-command-token",
+        allowed_roots=(allowed_root,),
+        artifact_root=artifact_root,
+        runtime_root=runtime_root,
+        source_home=source_home,
+        model="gpt-5.4-mini",
+        required_role_sequence=("writer", "evaluator"),
+        role_timeout_seconds={"writer": 60, "evaluator": 60},
+        backend=backend,
+    )
+
+    def request(
+        role: str,
+        cwd: Path,
+        *,
+        sandbox: str,
+        approval_mode: str,
+        index: int,
+        timeout_seconds: int = 30,
+    ) -> CodexRequest:
+        return CodexRequest(
+            role=role,
+            prompt=f"prompt {index}",
+            cwd=cwd,
+            sandbox=sandbox,
+            model="gpt-5.4-mini",
+            timeout_seconds=timeout_seconds,
+            developer_instructions="bounded role contract",
+            raw_log_path=control_root / f"client-{index}.raw.jsonl",
+            stderr_log_path=control_root / f"client-{index}.stderr.log",
+            approval_mode=approval_mode,
+        )
+
+    with server:
+        monkeypatch.setenv(CODEX_BROKER_SOCKET_ENV, str(socket_path))
+        monkeypatch.setenv(CODEX_BROKER_TOKEN_ENV, "one-command-token")
+        client = CodexSDKBackend("candidate_sdk_must_not_load")
+        with pytest.raises(CodexSDKError, match="role sequence mismatch"):
+            client.run(
+                request(
+                    "evaluator",
+                    worktree,
+                    sandbox="read-only",
+                    approval_mode="deny_all",
+                    index=1,
+                )
+            )
+        with pytest.raises(CodexSDKError, match="outside sandboxed profile state"):
+            client.run(
+                request(
+                    "writer",
+                    outside_control,
+                    sandbox="workspace-write",
+                    approval_mode="auto_review",
+                    index=2,
+                )
+            )
+        with pytest.raises(CodexSDKError, match="timeout exceeds"):
+            client.run(
+                request(
+                    "writer",
+                    worktree,
+                    sandbox="workspace-write",
+                    approval_mode="auto_review",
+                    index=3,
+                    timeout_seconds=61,
+                )
+            )
+        writer_result = client.run(
+            request(
+                "writer",
+                worktree,
+                sandbox="workspace-write",
+                approval_mode="auto_review",
+                index=4,
+            )
+        )
+        assert writer_result.text == "completed writer"
+        with pytest.raises(CodexSDKError, match="role sequence mismatch"):
+            client.run(
+                request(
+                    "writer",
+                    worktree,
+                    sandbox="workspace-write",
+                    approval_mode="auto_review",
+                    index=5,
+                )
+            )
+        evaluator_result = client.run(
+            request(
+                "evaluator",
+                worktree,
+                sandbox="read-only",
+                approval_mode="deny_all",
+                index=6,
+            )
+        )
+        assert evaluator_result.text == "completed evaluator"
+        assert server.completion_error() is None
+
+    assert [call.role for call in backend.calls] == ["writer", "evaluator"]
+    assert not socket_path.exists()
+    assert not runtime_root.exists()
+    artifacts = server.artifact_paths()
+    assert len(artifacts) == 7
+    events = (artifact_root / "broker-events.jsonl").read_text(encoding="utf-8")
+    assert events.count('"status": "rejected"') == 4
+    assert events.count('"status": "completed"') == 2
+    assert all("one-command-token" not in Path(path).read_text(encoding="utf-8") for path in artifacts)
+    assert all("host-only" not in Path(path).read_text(encoding="utf-8") for path in artifacts)
+
+
+def test_brokered_command_fails_if_required_sdk_sequence_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    if os.environ.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap":
+        pytest.skip("credential broker intentionally rejects an inherited sandbox")
+    if shutil.which("bwrap") is None:
+        pytest.skip("Bubblewrap is unavailable")
+    monkeypatch.setenv("OPENAI_API_KEY", "host-only-test-key")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    result = _run_command(
+        candidate,
+        tmp_path / "logs",
+        "broker-skip",
+        ["/bin/true"],
+        30,
+        process_sandbox="bubblewrap",
+        require_process_sandbox=True,
+        network_access=False,
+        hidden_roots=(),
+        writable_roots=(shadow,),
+        read_only_binds=(),
+        codex_broker={
+            "enabled": True,
+            "model": "gpt-5.4-mini",
+            "required_role_sequence": ["writer"],
+            "role_timeout_seconds": {"writer": 60},
+        },
+    )
+
+    assert result["exit_code"] == 125
+    assert not result["passed"]
+    assert "role sequence incomplete" in Path(result["stderr_path"]).read_text(
+        encoding="utf-8"
+    )
+    capability_paths = {
+        Path(value)
+        for value in result["executed_argv"]
+        if value.startswith("/tmp/autobugfix-operator-codex-")
+    }
+    assert capability_paths
+    assert all(not path.exists() for path in capability_paths)
+    assert result["codex_call_artifacts"] == []
 
 
 def test_real_state_machine_uses_sandboxed_checks_and_advisory_manifest(tmp_path: Path):

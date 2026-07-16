@@ -50,29 +50,15 @@ jobs:
       - name: Resolve signed frozen authority base
         id: frozen-base
         shell: bash
+        env:
+          CURRENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          guard/.venv/bin/python - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          import yaml
-
-          candidate = Path("candidate").resolve()
-          bundles = sorted(candidate.glob(".autobugfix-governance/*/bundle.yaml"))
-          if len(bundles) != 1:
-              raise SystemExit(f"expected exactly one Operator bundle, found {len(bundles)}")
-          bundle = bundles[0]
-          if bundle.is_symlink() or bundle.stat().st_size > 2_000_000:
-              raise SystemExit("Operator bundle must be a regular file no larger than 2 MB")
-          data = yaml.safe_load(bundle.read_text(encoding="utf-8")) or {}
-          base_sha = str((data.get("request") or {}).get("base_sha") or "")
-          if re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
-              raise SystemExit("Operator bundle request has an invalid base SHA")
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-              output.write(f"sha={base_sha}\n")
-          PY
+          base_sha="$(guard/.venv/bin/python guard/scripts/validate_operator_pr.py \
+            --candidate-root candidate \
+            --pull-request-base-sha "$CURRENT_BASE_SHA" \
+            --resolve-frozen-base-only)"
+          printf 'sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
 
       - name: Checkout frozen trusted authority
         uses: actions/checkout@v4
@@ -140,6 +126,7 @@ jobs:
           --runtime-venv guard/.venv
           --expected-guard-sha ${{ github.workflow_sha }}
           --expected-base-sha ${{ steps.frozen-base.outputs.sha }}
+          --pull-request-base-sha ${{ github.event.pull_request.base.sha }}
           --repository ${{ github.repository }}
           --pull-request ${{ github.event.pull_request.number }}
           --skip-live-experiment
