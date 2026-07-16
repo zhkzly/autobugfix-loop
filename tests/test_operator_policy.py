@@ -674,6 +674,95 @@ def test_sandbox_remaps_read_only_runtime_venv_environment(tmp_path: Path):
     )
 
 
+def test_sandbox_reopens_linked_worktree_git_metadata_read_only(tmp_path: Path):
+    if os.environ.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap":
+        pytest.skip("linked metadata is owned by the inherited admission sandbox")
+    if shutil.which("bwrap") is None:
+        pytest.skip("Bubblewrap is unavailable")
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    run(["git", "init", "-b", "main"], repository)
+    run(["git", "config", "user.email", "operator@example.com"], repository)
+    run(["git", "config", "user.name", "Operator User"], repository)
+    tracked = repository / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    run(["git", "add", "tracked.txt"], repository)
+    run(["git", "commit", "-m", "base"], repository)
+    base_sha = run(["git", "rev-parse", "HEAD"], repository).stdout.strip()
+    candidate = tmp_path / "candidate"
+    run(["git", "worktree", "add", "-b", "candidate", str(candidate)], repository)
+    (candidate / "tracked.txt").write_text("candidate\n", encoding="utf-8")
+
+    result = _run_command(
+        candidate,
+        tmp_path / "logs",
+        "linked-worktree-git",
+        [
+            "/bin/sh",
+            "-c",
+            (
+                f"git diff --check {base_sha} -- && "
+                "git ls-files --error-unmatch tracked.txt >/dev/null && "
+                "common=$(git rev-parse --git-common-dir) && "
+                "if touch \"$common/write-probe\" 2>/dev/null; then exit 73; fi"
+            ),
+        ],
+        30,
+        process_sandbox="bubblewrap",
+        require_process_sandbox=True,
+        network_access=False,
+        hidden_roots=(),
+        writable_roots=(),
+        read_only_binds=(),
+    )
+
+    assert result["passed"], Path(result["stderr_path"]).read_text(encoding="utf-8")
+    assert not (repository / ".git/write-probe").exists()
+    common_dir = str((repository / ".git").resolve())
+    argv = result["executed_argv"]
+    assert any(
+        argv[index : index + 3] == ["--ro-bind", common_dir, common_dir]
+        for index in range(len(argv) - 2)
+    )
+
+
+def test_sandbox_rejects_mismatched_linked_worktree_back_pointer(tmp_path: Path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    run(["git", "init", "-b", "main"], repository)
+    run(["git", "config", "user.email", "operator@example.com"], repository)
+    run(["git", "config", "user.name", "Operator User"], repository)
+    (repository / "tracked.txt").write_text("base\n", encoding="utf-8")
+    run(["git", "add", "tracked.txt"], repository)
+    run(["git", "commit", "-m", "base"], repository)
+    candidate = tmp_path / "candidate"
+    run(["git", "worktree", "add", "-b", "candidate", str(candidate)], repository)
+    git_dir = Path(
+        (candidate / ".git")
+        .read_text(encoding="utf-8")
+        .strip()
+        .removeprefix("gitdir: ")
+    )
+    (git_dir / "gitdir").write_text(
+        str(tmp_path / "other/.git") + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(OperatorValidationError, match="back pointer does not match"):
+        _run_command(
+            candidate,
+            tmp_path / "logs",
+            "mismatched-worktree-git",
+            ["/bin/true"],
+            30,
+            process_sandbox="bubblewrap",
+            require_process_sandbox=True,
+            network_access=False,
+            hidden_roots=(),
+            writable_roots=(),
+            read_only_binds=(),
+        )
+
+
 def test_sandbox_reopens_exact_runtime_source_below_masked_tmp(tmp_path: Path):
     if os.environ.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap":
         pytest.skip("runtime overlay is owned by the inherited admission sandbox")

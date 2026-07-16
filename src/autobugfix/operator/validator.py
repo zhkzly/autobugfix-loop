@@ -408,6 +408,61 @@ def _sandbox_directory_args(masked_root: Path, destination: Path) -> list[str]:
     return args
 
 
+def _linked_worktree_common_git_dir(candidate_root: Path) -> Path | None:
+    """Return trusted Git metadata needed by a linked worktree sandbox."""
+    marker = candidate_root / ".git"
+    if marker.is_dir() or not marker.exists():
+        return None
+    if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 4096:
+        raise OperatorValidationError(
+            "candidate .git marker is not a regular worktree pointer"
+        )
+    lines = marker.read_text(encoding="utf-8").splitlines()
+    if len(lines) != 1 or not lines[0].startswith("gitdir: "):
+        raise OperatorValidationError("candidate .git marker is not a valid worktree pointer")
+    raw_git_dir = Path(lines[0].removeprefix("gitdir: "))
+    git_dir = (
+        raw_git_dir if raw_git_dir.is_absolute() else marker.parent / raw_git_dir
+    ).resolve()
+    common_marker = git_dir / "commondir"
+    back_pointer = git_dir / "gitdir"
+    if (
+        not git_dir.is_dir()
+        or common_marker.is_symlink()
+        or not common_marker.is_file()
+        or common_marker.stat().st_size > 4096
+        or back_pointer.is_symlink()
+        or not back_pointer.is_file()
+        or back_pointer.stat().st_size > 4096
+    ):
+        raise OperatorValidationError("candidate linked-worktree metadata is incomplete")
+    common_value = common_marker.read_text(encoding="utf-8").strip()
+    if not common_value or "\n" in common_value:
+        raise OperatorValidationError(
+            "candidate linked-worktree common directory is invalid"
+        )
+    raw_common_dir = Path(common_value)
+    common_dir = (
+        raw_common_dir if raw_common_dir.is_absolute() else git_dir / raw_common_dir
+    ).resolve()
+    if not common_dir.is_dir() or git_dir.parent != common_dir / "worktrees":
+        raise OperatorValidationError(
+            "candidate .git pointer is not a standard linked worktree"
+        )
+    back_value = back_pointer.read_text(encoding="utf-8").strip()
+    if not back_value or "\n" in back_value:
+        raise OperatorValidationError("candidate linked-worktree back pointer is invalid")
+    raw_back_pointer = Path(back_value)
+    resolved_back_pointer = (
+        raw_back_pointer
+        if raw_back_pointer.is_absolute()
+        else back_pointer.parent / raw_back_pointer
+    ).resolve()
+    if resolved_back_pointer != marker.resolve():
+        raise OperatorValidationError("candidate linked-worktree back pointer does not match")
+    return common_dir
+
+
 def _format_argv(argv: list[Any], values: Mapping[str, str]) -> list[str]:
     return [str(item).format_map(values) for item in argv]
 
@@ -607,6 +662,14 @@ def _run_command(
                 except ValueError:
                     wrapper.extend(["--tmpfs", str(resolved)])
                     masked_roots.add(resolved)
+        common_git_dir = _linked_worktree_common_git_dir(candidate_root)
+        if common_git_dir is not None:
+            for masked_root in (host_home, Path("/tmp")):
+                directory_args = _sandbox_directory_args(masked_root, common_git_dir)
+                if directory_args:
+                    wrapper.extend(directory_args)
+                    break
+            wrapper.extend(["--ro-bind", str(common_git_dir), str(common_git_dir)])
         for root in writable_roots:
             resolved = root.resolve()
             resolved.mkdir(parents=True, exist_ok=True)
