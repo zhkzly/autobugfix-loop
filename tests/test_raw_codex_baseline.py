@@ -15,6 +15,7 @@ from autobugfix.eval.baselines.isolation import (
     RawCodexProcessSandbox,
     RawProcessRun,
     RunnerMetadata,
+    _resolver_mount,
     _python_runtime_mounts,
 )
 from autobugfix.eval.baselines.models import (
@@ -403,6 +404,89 @@ def test_raw_process_preserves_sdk_transport_but_not_tool_network(
     assert "--unshare-ipc" in argv
     assert "--unshare-uts" in argv
     assert "--unshare-net" not in argv
+
+
+def test_resolver_mount_restores_only_resolved_file_under_masked_run(
+    tmp_path: Path,
+) -> None:
+    reset_root = tmp_path / "run"
+    source = reset_root / "systemd/resolve/stub-resolv.conf"
+    source.parent.mkdir(parents=True)
+    source.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+    resolver = tmp_path / "etc/resolv.conf"
+    resolver.parent.mkdir()
+    resolver.symlink_to("../run/systemd/resolve/stub-resolv.conf")
+
+    assert _resolver_mount(resolver_path=resolver, reset_root=reset_root) == (
+        source,
+        source,
+    )
+
+
+def test_raw_process_restores_only_resolver_file_after_masking_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "control"
+    runtime = project / ".autobugfix/raw-codex-baseline"
+    runner_environment = runtime / "runner"
+    worktree = runtime / "case/worktree"
+    input_root = runtime / "case/input"
+    output_root = runtime / "case/process"
+    codex_home = output_root / "codex-home"
+    for path in (
+        runner_environment / "bin",
+        worktree,
+        input_root,
+        output_root,
+        codex_home,
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    case_bundle = input_root / "case.json"
+    case_bundle.write_text("{}\n", encoding="utf-8")
+    source = tmp_path / "host-resolver.conf"
+    source.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+    destination = Path("/run/systemd/resolve/stub-resolv.conf")
+    sandbox = RawCodexProcessSandbox(
+        project,
+        RawCodexBaselineConfig(
+            runner_project=project / "baselines/raw_codex_sdk",
+            runtime_root=runtime,
+        ),
+        host_home=tmp_path / "home",
+    )
+    monkeypatch.setattr(
+        "autobugfix.eval.baselines.isolation.shutil.which",
+        lambda name: "/usr/bin/bwrap" if name == "bwrap" else None,
+    )
+    monkeypatch.setattr(
+        "autobugfix.eval.baselines.isolation._resolver_mount",
+        lambda: (source, destination),
+    )
+
+    argv = sandbox._sandbox_argv(
+        runner_environment=runner_environment,
+        runtime_mounts=(),
+        worktree=worktree,
+        input_root=input_root,
+        sdk_output_parent=output_root,
+        codex_home=codex_home,
+        case_bundle=case_bundle,
+        model="gpt-5.4-mini",
+        reasoning_effort="low",
+        service_tier=None,
+    )
+
+    mount_index = argv.index("--ro-bind", argv.index("--tmpfs") + 1)
+    assert argv[mount_index : mount_index + 3] == [
+        "--ro-bind",
+        str(source),
+        str(destination),
+    ]
+    assert ["--ro-bind", "/run", "/run"] not in [
+        argv[index : index + 3] for index in range(len(argv) - 2)
+    ]
+    assert "--dir" in argv
+    assert str(destination.parent) in argv
 
 
 def test_raw_worker_scrubs_auth_before_recursive_cleanup_failure(

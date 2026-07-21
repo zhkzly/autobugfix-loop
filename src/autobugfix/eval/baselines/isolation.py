@@ -119,6 +119,22 @@ def _destination_dirs(paths: tuple[Path, ...], reset_root: Path) -> list[str]:
     return argv
 
 
+def _resolver_mount(
+    *,
+    resolver_path: Path = Path("/etc/resolv.conf"),
+    reset_root: Path = Path("/run"),
+) -> tuple[Path, Path] | None:
+    """Return an exact resolver-file mount when resetting ``/run`` hides it."""
+    try:
+        source = resolver_path.resolve(strict=True)
+        root = reset_root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not source.is_file() or not source.is_relative_to(root):
+        return None
+    return source, source
+
+
 def _runner_project_digest(project: Path) -> str:
     required = (project / "pyproject.toml", project / "uv.lock")
     files = [*required, *sorted((project / "src").rglob("*.py"))]
@@ -493,6 +509,7 @@ class RawCodexProcessSandbox:
             Path(os.path.abspath(destination))
             for _, destination in runtime_mounts
         )
+        resolver_mount = _resolver_mount()
         executable = runner_environment / "bin" / "raw-codex-sdk-baseline"
         command = [
             str(executable),
@@ -530,6 +547,11 @@ class RawCodexProcessSandbox:
             "/tmp",
             "--tmpfs",
             "/run",
+            *(
+                _destination_dirs((resolver_mount[1].parent,), Path("/run"))
+                if resolver_mount is not None
+                else ()
+            ),
             "--tmpfs",
             str(home),
             *_destination_dirs(
@@ -547,6 +569,12 @@ class RawCodexProcessSandbox:
                     hidden_root,
                 )
             )
+        if resolver_mount is not None:
+            source, destination = resolver_mount
+            # /etc/resolv.conf can be a symlink into /run. Recreate only its
+            # resolved target after the /run tmpfs so the SDK control client
+            # can resolve its endpoint without restoring host runtime state.
+            argv.extend(("--ro-bind", str(source), str(destination)))
         for source, destination in runtime_mounts:
             argv.extend(
                 (
