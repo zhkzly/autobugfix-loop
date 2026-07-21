@@ -517,6 +517,8 @@ class RawCodexProcessSandbox:
             "--unshare-pid",
             "--unshare-ipc",
             "--unshare-uts",
+            # The Codex SDK client must reach the service endpoint. Tool
+            # network access remains disabled by the locked CODEX_HOME config.
             "--ro-bind",
             "/",
             "/",

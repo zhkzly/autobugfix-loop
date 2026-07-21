@@ -353,6 +353,58 @@ def test_codex_home_disables_hooks_skills_and_multi_agent(
     assert (codex_home / "auth.json").read_text(encoding="utf-8") == "{}\n"
 
 
+def test_raw_process_preserves_sdk_transport_but_not_tool_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "control"
+    runtime = project / ".autobugfix/raw-codex-baseline"
+    runner_environment = runtime / "runner"
+    worktree = runtime / "case/worktree"
+    input_root = runtime / "case/input"
+    output_root = runtime / "case/process"
+    codex_home = output_root / "codex-home"
+    for path in (
+        runner_environment / "bin",
+        worktree,
+        input_root,
+        output_root,
+        codex_home,
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    case_bundle = input_root / "case.json"
+    case_bundle.write_text("{}\n", encoding="utf-8")
+    sandbox = RawCodexProcessSandbox(
+        project,
+        RawCodexBaselineConfig(
+            runner_project=project / "baselines/raw_codex_sdk",
+            runtime_root=runtime,
+        ),
+        host_home=tmp_path / "home",
+    )
+    monkeypatch.setattr(
+        "autobugfix.eval.baselines.isolation.shutil.which",
+        lambda name: "/usr/bin/bwrap" if name == "bwrap" else None,
+    )
+
+    argv = sandbox._sandbox_argv(
+        runner_environment=runner_environment,
+        runtime_mounts=(),
+        worktree=worktree,
+        input_root=input_root,
+        sdk_output_parent=output_root,
+        codex_home=codex_home,
+        case_bundle=case_bundle,
+        model="gpt-5.4-mini",
+        reasoning_effort="low",
+        service_tier=None,
+    )
+
+    assert "--unshare-pid" in argv
+    assert "--unshare-ipc" in argv
+    assert "--unshare-uts" in argv
+    assert "--unshare-net" not in argv
+
+
 def test_raw_worker_scrubs_auth_before_recursive_cleanup_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
