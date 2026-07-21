@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from autobugfix.cli import build_parser, main
+from autobugfix.models import CodexResult
 from tests.helpers import make_service_project
 
 
@@ -72,6 +73,29 @@ def test_memory_approve_skill_cli_requires_human_review_binding() -> None:
     assert args.memory_action == "approve-skill"
     assert args.skill_name == "preserve-verifier-evidence"
     assert args.confirm_review_digest == "a" * 64
+
+
+def test_codex_probe_uses_a_private_log_leaf_below_hidden_controller(
+    tmp_path, monkeypatch
+):
+    project_root, _ = make_service_project(tmp_path)
+    captured = {}
+
+    def fake_run(self, request):
+        del self
+        captured["request"] = request
+        return CodexResult(text="ready", raw={"module": "test"}, exit_code=0)
+
+    monkeypatch.setattr("autobugfix.cli.CodexSDKBackend.run", fake_run)
+    monkeypatch.chdir(project_root)
+
+    assert main(["codex", "probe-role", "--role", "evaluator", "--execute"]) == 0
+
+    request = captured["request"]
+    controller = project_root / ".autobugfix/controller"
+    assert request.raw_log_path.parent.is_relative_to(controller / "probes")
+    assert controller in request.hidden_paths
+    assert request.raw_log_path.parent not in request.hidden_paths
 
 
 def test_defects4j_run_case_cli_forwards_bounded_production_options(

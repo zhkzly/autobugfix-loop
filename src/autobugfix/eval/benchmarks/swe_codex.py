@@ -15,6 +15,7 @@ from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.codex_runtime import build_codex_request
 from autobugfix.config import load_config
 from autobugfix.eval.benchmarks.models import record_with_digest
+from autobugfix.eval.benchmarks.swe_models import SWESubjectTreatmentRuntime
 from autobugfix.eval.benchmarks.swe_runtime import SWERuntimeError
 from autobugfix.git_utils import git_common_dir
 from autobugfix.models import CodexResult, utc_now
@@ -222,7 +223,7 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
         worktree_root: Path,
         artifact_root: Path,
         hidden_paths: tuple[Path, ...],
-        model: str,
+        treatment: SWESubjectTreatmentRuntime,
         ledger: SWEExecutionLedger,
         backend: CodexSDKBackend | None = None,
         backend_factory: Callable[[str, int, int], CodexBackend] | None = None,
@@ -235,7 +236,8 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
         self.worktree_root = worktree_root.resolve()
         self.artifact_root = artifact_root.resolve()
         self.hidden_paths = tuple(path.resolve() for path in hidden_paths)
-        self.model = model
+        self.treatment = treatment
+        self.model = treatment.model
         self.ledger = ledger
         self.backend = backend or CodexSDKBackend()
         self.backend_factory = backend_factory
@@ -277,6 +279,14 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
             raise SWERuntimeError("SWE production roles must use the Codex backend")
         if resolved.model != self.model:
             raise SWERuntimeError("resolved Codex role model differs from frozen protocol")
+        if (
+            self.config.codex.reasoning_effort != self.treatment.reasoning_effort
+            or self.config.codex.service_tier != self.treatment.service_tier
+            or not self.config.codex.disable_response_storage
+        ):
+            raise SWERuntimeError(
+                "resolved Codex runtime differs from frozen SWE treatment"
+            )
         call_root = self.artifact_root / f"call-{sequence:04d}-{role}"
         call_root.mkdir(parents=True, mode=0o700, exist_ok=False)
         request = build_codex_request(
@@ -310,6 +320,9 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
                 "sequence": sequence,
                 "role": role,
                 "model": request.model,
+                "reasoning_effort": self.treatment.reasoning_effort,
+                "service_tier": self.treatment.service_tier,
+                "treatment_contract_digest": self.treatment.contract_digest,
                 "sandbox": request.sandbox,
                 "approval_mode": request.approval_mode,
                 "cwd": str(cwd),

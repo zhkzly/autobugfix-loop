@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib import metadata
 import os
 import subprocess
 import time
@@ -155,6 +156,8 @@ def run_case(
             "case_digest": case.record_digest,
             "sdk_package": "openai-codex",
             "sdk_version": openai_codex.__version__,
+            "cli_package": "openai-codex-cli-bin",
+            "cli_version": metadata.version("openai-codex-cli-bin"),
             "model": model,
             "reasoning_effort": reasoning_effort,
             "service_tier": service_tier,
@@ -248,6 +251,8 @@ def run_case(
             "case_digest": case.record_digest,
             "sdk_package": "openai-codex",
             "sdk_version": openai_codex.__version__,
+            "cli_package": "openai-codex-cli-bin",
+            "cli_version": metadata.version("openai-codex-cli-bin"),
             "model": model,
             "reasoning_effort": reasoning_effort,
             "service_tier": service_tier,

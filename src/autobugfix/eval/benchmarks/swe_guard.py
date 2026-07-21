@@ -173,10 +173,10 @@ class SWEGuardStore:
     ) -> dict[str, Any]:
         verify_record(record)
         if (
-            record.get("schema") != "autobugfix-swe-qualification-v3"
+            record.get("schema") != "autobugfix-swe-qualification-v4"
             or record.get("adapter") != "swebench_live"
-            or record.get("protocol_digest") != protocol_digest
-            or record.get("runtime_id") != runtime_id
+            or record.get("qualification_contract_digest") != protocol_digest
+            or record.get("evaluator_runtime_id") != runtime_id
         ):
             raise SWEGuardStoreError("SWE Holdout qualification binding is invalid")
         artifact_token = secrets.token_hex(32)

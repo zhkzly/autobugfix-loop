@@ -7,7 +7,8 @@ requires-python = ">=3.11"
 dependencies = [
     "cryptography>=44.0.0",
     "gradio>=4.44.0",
-    "openai-codex>=0.1.0a0",
+    "openai-codex==0.144.4",
+    "openai-codex-cli-bin==0.144.4",
     "pyyaml>=6.0.2",
 ]
 

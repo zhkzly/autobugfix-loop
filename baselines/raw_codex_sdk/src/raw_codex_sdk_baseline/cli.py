@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+from importlib import metadata
 import json
 from pathlib import Path
 
@@ -14,6 +16,13 @@ from raw_codex_sdk_baseline.runner import (
     SANDBOX_MODE,
     run_case,
 )
+
+
+def _distribution_record_digest(distribution: str) -> str:
+    record = metadata.distribution(distribution).read_text("RECORD")
+    if not record:
+        raise RuntimeError(f"{distribution} has no installed RECORD")
+    return hashlib.sha256(record.encode("utf-8")).hexdigest()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
                     "schema": "raw-codex-sdk-runner-metadata-v1",
                     "sdk_package": "openai-codex",
                     "sdk_version": openai_codex.__version__,
+                    "sdk_record_digest": _distribution_record_digest("openai-codex"),
+                    "cli_package": "openai-codex-cli-bin",
+                    "cli_version": metadata.version("openai-codex-cli-bin"),
+                    "cli_record_digest": _distribution_record_digest(
+                        "openai-codex-cli-bin"
+                    ),
                     "approval_mode": APPROVAL_MODE,
                     "sandbox": SANDBOX_MODE,
                     "network_access": NETWORK_ACCESS,

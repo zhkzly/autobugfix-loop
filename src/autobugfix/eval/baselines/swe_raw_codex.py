@@ -136,8 +136,12 @@ class SWERawCodexBaselineService:
             )
         if (
             source.optimization_count != treatment.expected_case_count
-            or source.model != treatment.model
-            or source.timeout_seconds != treatment.timeout_seconds
+            or source.codex_runtime.model != treatment.model
+            or source.codex_runtime.sdk_version != treatment.sdk_version
+            or source.codex_runtime.cli_version != treatment.cli_version
+            or source.codex_runtime.reasoning_effort != treatment.reasoning_effort
+            or source.codex_runtime.service_tier != treatment.service_tier
+            or source.codex_runtime.timeout_seconds != treatment.timeout_seconds
             or source.case_concurrency != treatment.case_concurrency
         ):
             raise SWERawCodexBaselineError(
@@ -156,6 +160,7 @@ class SWERawCodexBaselineService:
             runner_relative != treatment.runner_project
             or configured.model != treatment.model
             or configured.sdk_version != treatment.sdk_version
+            or configured.cli_version != treatment.cli_version
             or configured.reasoning_effort != treatment.reasoning_effort
             or configured.service_tier != treatment.service_tier
             or configured.approval_mode != treatment.approval_mode
@@ -180,6 +185,7 @@ class SWERawCodexBaselineService:
                         self.project_root
                     ).as_posix(),
                     "sdk_version": raw.sdk_version,
+                    "cli_version": raw.cli_version,
                     "model": raw.model,
                     "reasoning_effort": raw.reasoning_effort,
                     "service_tier": raw.service_tier,
@@ -462,6 +468,9 @@ class SWERawCodexBaselineService:
             or observation.prompt_template_digest != treatment.prompt_template_digest
             or observation.prompt_template_digest != runner.prompt_template_digest
             or data.get("sdk_package") != "openai-codex"
+            or data.get("cli_package") != "openai-codex-cli-bin"
+            or data.get("cli_version") != treatment.cli_version
+            or data.get("cli_version") != runner.cli_version
             or not request_path.is_file()
             or not events_path.is_file()
             or not stderr_path.is_file()
@@ -486,6 +495,7 @@ class SWERawCodexBaselineService:
         runner = self.sandbox.ensure_runner_environment()
         if (
             runner.sdk_version != treatment.sdk_version
+            or runner.cli_version != treatment.cli_version
             or runner.approval_mode != treatment.approval_mode
             or runner.sandbox != treatment.sandbox
             or runner.network_access is not treatment.network_access
@@ -909,6 +919,7 @@ class SWERawCodexBaselineService:
             runner_lock_digest=digest_file(
                 self.config.eval.benchmarks.raw_codex.runner_project / "uv.lock"
             ),
+            runner_runtime_digest=runner_metadata.runtime_digest,
             config_digest=self._config_digest(),
             cases=tuple(item[0] for item in qualified),
             prepared_at=utc_now(),
@@ -965,6 +976,7 @@ class SWERawCodexBaselineService:
             "runner_lock_digest": digest_file(
                 self.config.eval.benchmarks.raw_codex.runner_project / "uv.lock"
             ),
+            "runner_runtime_digest": runner_metadata.runtime_digest,
             "config_digest": self._config_digest(),
             "runtime_id": official_runner.runtime.runtime_id,
         }
@@ -974,6 +986,7 @@ class SWERawCodexBaselineService:
             "runner_source_digest": prepared.runner_source_digest,
             "runner_install_digest": prepared.runner_install_digest,
             "runner_lock_digest": prepared.runner_lock_digest,
+            "runner_runtime_digest": prepared.runner_runtime_digest,
             "config_digest": prepared.config_digest,
             "runtime_id": prepared.runtime_id,
         }
@@ -1067,6 +1080,8 @@ class SWERawCodexBaselineService:
                 "prompt_template_digest": prepared.treatment.prompt_template_digest,
                 "model": prepared.treatment.model,
                 "sdk_version": prepared.treatment.sdk_version,
+                "cli_version": prepared.treatment.cli_version,
+                "runner_runtime_digest": prepared.runner_runtime_digest,
                 "approval_mode": prepared.treatment.approval_mode,
                 "sandbox": prepared.treatment.sandbox,
                 "network_access": prepared.treatment.network_access,

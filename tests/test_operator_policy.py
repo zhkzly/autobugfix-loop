@@ -1279,7 +1279,10 @@ def test_sandbox_blocks_secrets_and_host_docker_daemon_across_nested_sandbox(
         writable_roots=(),
         read_only_binds=(),
     )
-    assert nested["passed"], Path(nested["stderr_path"]).read_text(encoding="utf-8")
+    nested_stderr = Path(nested["stderr_path"]).read_text(encoding="utf-8")
+    if "No permissions to create a new namespace" in nested_stderr:
+        pytest.skip("kernel does not permit nested unprivileged user namespaces")
+    assert nested["passed"], nested_stderr
 
     if shutil.which("docker") is None:
         pytest.skip("Docker client is unavailable")

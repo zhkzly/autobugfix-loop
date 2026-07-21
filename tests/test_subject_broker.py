@@ -21,6 +21,7 @@ from autobugfix.eval.benchmarks.swe_codex import (
     SWEExecutionLedger,
 )
 from autobugfix.eval.benchmarks.swe_materialize import SWEMaterializedRepository
+from autobugfix.eval.benchmarks.swe_models import SWESubjectTreatmentRuntime
 from autobugfix.eval.benchmarks.swe_verifier import (
     SWEDockerVisibleVerifier,
     SWEVerifierServer,
@@ -70,6 +71,20 @@ def broker(project: Path) -> SWESubjectBroker:
         ),
     )
     return SWESubjectBroker(project, runtime)
+
+
+def treatment() -> SWESubjectTreatmentRuntime:
+    return SWESubjectTreatmentRuntime(
+        model="gpt-5.4-mini",
+        reasoning_effort="low",
+        service_tier=None,
+        sdk_package="openai-codex",
+        sdk_version="0.144.4",
+        cli_package="openai-codex-cli-bin",
+        cli_version="0.144.4",
+        max_attempts=2,
+        timeout_seconds=900,
+    )
 
 
 def test_subject_broker_materializes_exact_clean_sha_and_rejects_drift(
@@ -281,6 +296,8 @@ def test_subject_broker_freezes_failure_evidence_for_postprocess_errors(
             image_id="sha256:" + "c" * 64,
             artifact_root=artifact_root,
             protocol_digest="d" * 64,
+            treatment=treatment(),
+            subject_runtime=cast(Any, {}),
         )
 
     assert (artifact_root / "broker-failure.yaml").is_file()
@@ -300,6 +317,14 @@ def test_codex_broker_rebuilds_trusted_role_request_and_rejects_extra_authority(
     worktrees = tmp_path / "worktrees"
     worktree = worktrees / "task"
     worktrees.mkdir()
+    # The fixture remote may retain the Git installation's default HEAD name.
+    # Pin the local checkout to the pushed main ref before adding a worktree.
+    subprocess.run(
+        ["git", "-C", str(main), "checkout", "-B", "main", "origin/main"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
     subprocess.run(
         ["git", "-C", str(main), "worktree", "add", "--detach", str(worktree)],
         check=True,
@@ -312,8 +337,7 @@ def test_codex_broker_rebuilds_trusted_role_request_and_rejects_extra_authority(
         main,
         worktrees,
         "swe_target",
-        "gpt-5.4-mini",
-        120,
+        treatment(),
     )
     for relative in (
         "base/autobugfix-runtime-base/SKILL.md",
@@ -343,7 +367,7 @@ def test_codex_broker_rebuilds_trusted_role_request_and_rejects_extra_authority(
         worktree_root=worktrees,
         artifact_root=tmp_path / "codex-artifacts",
         hidden_paths=(tmp_path / "hidden",),
-        model="gpt-5.4-mini",
+        treatment=treatment(),
         ledger=ledger,
         backend=cast(Any, backend),
         backend_factory=backend_factory,

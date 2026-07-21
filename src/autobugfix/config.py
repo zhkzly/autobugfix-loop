@@ -213,7 +213,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "raw_codex": {
                 "runner_project": "baselines/raw_codex_sdk",
                 "runtime_root": ".autobugfix/raw-codex-baseline",
-                "sdk_version": "0.1.0b3",
+                "sdk_version": "0.144.4",
+                "cli_version": "0.144.4",
                 "model": "gpt-5.4-mini",
                 "reasoning_effort": "medium",
                 "service_tier": None,
@@ -597,7 +598,8 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
                     ),
                 )
                 or (root / ".autobugfix/raw-codex-baseline"),
-                sdk_version=str(raw_codex_raw.get("sdk_version", "0.1.0b3")),
+                sdk_version=str(raw_codex_raw.get("sdk_version", "0.144.4")),
+                cli_version=str(raw_codex_raw.get("cli_version", "0.144.4")),
                 model=str(raw_codex_raw.get("model", "gpt-5.4-mini")),
                 reasoning_effort=str(
                     raw_codex_raw.get("reasoning_effort", "medium")
@@ -1004,9 +1006,13 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
         raise ConfigError(
             "eval.benchmarks.raw_codex.model must remain gpt-5.4-mini"
         )
-    if raw_codex.sdk_version != "0.1.0b3":
+    if raw_codex.sdk_version != "0.144.4":
         raise ConfigError(
-            "eval.benchmarks.raw_codex.sdk_version must remain 0.1.0b3"
+            "eval.benchmarks.raw_codex.sdk_version must remain 0.144.4"
+        )
+    if raw_codex.cli_version != "0.144.4":
+        raise ConfigError(
+            "eval.benchmarks.raw_codex.cli_version must remain 0.144.4"
         )
     if raw_codex.reasoning_effort not in {"low", "medium", "high", "xhigh"}:
         raise ConfigError(

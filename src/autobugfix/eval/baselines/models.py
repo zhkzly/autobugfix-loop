@@ -80,7 +80,7 @@ class RawBaselineSeedManifest:
             )
         for case_id in self.development_case_ids:
             safe_component(case_id, "development_case_id")
-        if self.model != "gpt-5.4-mini" or self.sdk_version != "0.1.0b3":
+        if self.model != "gpt-5.4-mini" or self.sdk_version != "0.144.4":
             raise BenchmarkContractError(
                 "Raw baseline seed model or SDK version is not pinned"
             )
@@ -261,8 +261,8 @@ class PreparedRawBaselineManifest:
             raise BenchmarkContractError("Raw baseline benchmark must be defects4j")
         if self.model != "gpt-5.4-mini":
             raise BenchmarkContractError("Raw baseline model must be gpt-5.4-mini")
-        if self.sdk_version != "0.1.0b3":
-            raise BenchmarkContractError("Raw baseline SDK must be 0.1.0b3")
+        if self.sdk_version != "0.144.4":
+            raise BenchmarkContractError("Raw baseline SDK must be 0.144.4")
         if self.reasoning_effort not in {"low", "medium", "high", "xhigh"}:
             raise BenchmarkContractError("unsupported Raw baseline reasoning effort")
         if (

@@ -32,6 +32,7 @@ from autobugfix.eval.benchmarks.swe_materialize import SWEMaterializedRepository
 from autobugfix.eval.benchmarks.swe_models import (
     SWEInstance,
     SWESubmission,
+    SWESubjectTreatmentRuntime,
     SWEVisibleCase,
 )
 from autobugfix.eval.benchmarks.swe_runtime import SWERuntime, SWERuntimeError
@@ -366,8 +367,7 @@ class SWESubjectBroker:
         main_checkout: Path,
         worktree_root: Path,
         repo_id: str,
-        model: str,
-        timeout_seconds: int,
+        treatment: SWESubjectTreatmentRuntime,
         codex_runtime_root: Path | None = None,
     ) -> Path:
         frozen_config_path = self._subject_config_path(subject)
@@ -378,9 +378,12 @@ class SWESubjectBroker:
             raise SWESubjectBrokerError("subject config must be a mapping")
         source_codex = subject_config.get("codex")
         codex = dict(source_codex) if isinstance(source_codex, Mapping) else {}
-        codex["default_model"] = model
-        codex["writer_model"] = model
-        codex["evaluator_model"] = model
+        codex["default_model"] = treatment.model
+        codex["writer_model"] = treatment.model
+        codex["evaluator_model"] = treatment.model
+        codex["reasoning_effort"] = treatment.reasoning_effort
+        codex["service_tier"] = treatment.service_tier
+        codex["disable_response_storage"] = True
         codex["role_runtime"] = {
             "enabled": True,
             "runtime_root": str(
@@ -405,10 +408,10 @@ class SWESubjectBroker:
             role_config.update(
                 {
                     "backend": "codex",
-                    "model": model,
+                    "model": treatment.model,
                     "sandbox": sandbox,
                     "approval_mode": approval,
-                    "timeout_seconds": timeout_seconds,
+                    "timeout_seconds": treatment.timeout_seconds,
                 }
             )
             roles[role] = role_config
@@ -417,11 +420,11 @@ class SWESubjectBroker:
             "task_root": ".autobugfix/tasks",
             "scheduler": {
                 "default_max_concurrent": 1,
-                "lock_timeout_seconds": timeout_seconds * 3,
-                "max_auto_iterations": 2,
-                "codex_timeout_seconds": timeout_seconds,
-                "writer_timeout_seconds": timeout_seconds,
-                "evaluator_timeout_seconds": timeout_seconds,
+                "lock_timeout_seconds": treatment.timeout_seconds * 3,
+                "max_auto_iterations": treatment.max_attempts,
+                "codex_timeout_seconds": treatment.timeout_seconds,
+                "writer_timeout_seconds": treatment.timeout_seconds,
+                "evaluator_timeout_seconds": treatment.timeout_seconds,
             },
             "codex": codex,
             "repos": {
@@ -740,9 +743,8 @@ class SWESubjectBroker:
         image_id: str,
         artifact_root: Path,
         protocol_digest: str,
-        model: str = "gpt-5.4-mini",
-        max_attempts: int = 2,
-        timeout_seconds: int = 900,
+        treatment: SWESubjectTreatmentRuntime,
+        subject_runtime: Mapping[str, Any],
         experiment_role: str = "optimization",
         study_binding: Mapping[str, Any] | None = None,
         memory_snapshot: Path | None = None,
@@ -758,9 +760,8 @@ class SWESubjectBroker:
                 image_id=image_id,
                 artifact_root=artifact_root,
                 protocol_digest=protocol_digest,
-                model=model,
-                max_attempts=max_attempts,
-                timeout_seconds=timeout_seconds,
+                treatment=treatment,
+                subject_runtime=subject_runtime,
                 experiment_role=experiment_role,
                 study_binding=study_binding,
                 memory_snapshot=memory_snapshot,
@@ -815,16 +816,26 @@ class SWESubjectBroker:
         image_id: str,
         artifact_root: Path,
         protocol_digest: str,
-        model: str = "gpt-5.4-mini",
-        max_attempts: int = 2,
-        timeout_seconds: int = 900,
+        treatment: SWESubjectTreatmentRuntime,
+        subject_runtime: Mapping[str, Any],
         experiment_role: str = "optimization",
         study_binding: Mapping[str, Any] | None = None,
         memory_snapshot: Path | None = None,
         codex_backend_factory: Callable[[str, int, int], CodexBackend] | None = None,
     ) -> FrozenSWESubmission:
-        if model != "gpt-5.4-mini" or max_attempts != 2:
-            raise SWESubjectBrokerError("SWE subject budget must use Mini and two attempts")
+        try:
+            verify_record(subject_runtime)
+        except Exception as exc:
+            raise SWESubjectBrokerError("SWE subject runtime identity is invalid") from exc
+        if (
+            subject_runtime.get("schema") != "autobugfix-swe-subject-runtime-v1"
+            or subject_runtime.get("treatment_contract_digest")
+            != treatment.contract_digest
+            or subject_runtime.get("treatment") != treatment.to_dict()
+        ):
+            raise SWESubjectBrokerError(
+                "SWE subject runtime identity differs from the frozen treatment"
+            )
         if experiment_role not in {"optimization", "sealed_holdout"}:
             raise SWESubjectBrokerError("unsupported SWE experiment role")
         if study_binding is not None:
@@ -843,7 +854,7 @@ class SWESubjectBroker:
             if (
                 study_binding.get("subject_sha") != subject_sha
                 or study_binding.get("subject_tree") != expected_subject_tree
-                or study_binding.get("primary_model") != model
+                or study_binding.get("primary_model") != treatment.model
                 or study_binding.get("target_checkpoint_name") != "H_general"
             ):
                 raise SWESubjectBrokerError("SWE Study binding differs from execution")
@@ -876,8 +887,7 @@ class SWESubjectBroker:
             main,
             worktree_root,
             repo_id,
-            model,
-            timeout_seconds,
+            treatment,
             root / "trusted-codex-runtime",
         )
         worker_source = self.project_root / "harnesses/swebench/scripts/run_subject.py"
@@ -918,7 +928,7 @@ class SWESubjectBroker:
             main,
             allowed_task_branch=prepared_task.branch,
         )
-        ledger = SWEExecutionLedger(max_attempts)
+        ledger = SWEExecutionLedger(treatment.max_attempts)
         capability_root = Path(
             tempfile.mkdtemp(prefix="autobugfix-swe-cap-", dir="/tmp")
         ).resolve()
@@ -931,7 +941,7 @@ class SWESubjectBroker:
         result_path = control / "subject-result.json"
         visible_case_digest = str(visible_case.to_dict()["record_digest"])
         subject_binding = record_with_digest({
-            "schema": "autobugfix-swe-subject-request-v3",
+            "schema": "autobugfix-swe-subject-request-v4",
             "subject_sha": subject_sha,
             "subject_tree": subject_tree,
             "repo_id": repo_id,
@@ -939,15 +949,17 @@ class SWESubjectBroker:
             "case_token": visible_case.case_token,
             "adapter": visible_case.benchmark,
             "experiment_role": experiment_role,
-            "model": model,
-            "max_attempts": max_attempts,
-            "codex_timeout_seconds": timeout_seconds,
+            "codex_runtime": treatment.to_dict(),
+            "subject_runtime_contract_digest": treatment.contract_digest,
+            "subject_runtime_digest": subject_runtime["record_digest"],
+            "max_attempts": treatment.max_attempts,
+            "codex_timeout_seconds": treatment.timeout_seconds,
             "verifier_command_id": VISIBLE_VERIFIER_COMMAND_ID,
             "visible_case_digest": visible_case_digest,
             "source_snapshot_digest": materialized.source_digest,
             "source_image_id": image_id,
             "protocol_digest": protocol_digest,
-            "runtime_id": self.runtime.runtime_id,
+            "evaluator_runtime_id": self.runtime.evaluator_runtime_id,
             "study_binding_digest": (
                 str(study_binding.get("record_digest") or "")
                 if study_binding is not None
@@ -983,11 +995,15 @@ class SWESubjectBroker:
             "adapter": visible_case.benchmark,
             "experiment_role": experiment_role,
             "problem_statement": visible_case.problem_statement,
-            "model": model,
-            "max_attempts": max_attempts,
+            "context": [
+                {"kind": "public-hint", "content": hint}
+                for hint in visible_case.public_hints
+            ],
+            "model": treatment.model,
+            "max_attempts": treatment.max_attempts,
             "codex_socket": str(codex_socket),
             "codex_token": codex_token,
-            "codex_timeout_seconds": timeout_seconds,
+            "codex_timeout_seconds": treatment.timeout_seconds,
             "verifier_socket": str(verifier_socket),
             "verifier_token": verifier_token,
             "verifier_command_id": VISIBLE_VERIFIER_COMMAND_ID,
@@ -1032,7 +1048,7 @@ class SWESubjectBroker:
                         worktree_root=worktree_root,
                         artifact_root=root / "codex-broker",
                         hidden_paths=hidden_paths,
-                        model=model,
+                        treatment=treatment,
                         ledger=ledger,
                         backend_factory=codex_backend_factory,
                     )
@@ -1043,7 +1059,7 @@ class SWESubjectBroker:
                         verifier_token,
                         verifier,
                         ledger=ledger,
-                        max_timeout_seconds=timeout_seconds,
+                        max_timeout_seconds=treatment.timeout_seconds,
                     )
                 )
                 command = run_command(
@@ -1058,7 +1074,7 @@ class SWESubjectBroker:
                     cwd=self.project_root,
                     artifact_dir=root / "subject-process",
                     name="exact-subject-execution",
-                    timeout_seconds=timeout_seconds * max_attempts + 300,
+                    timeout_seconds=treatment.timeout_seconds * treatment.max_attempts + 300,
                     env=self._subject_environment(),
                     inherit_env=False,
                 )

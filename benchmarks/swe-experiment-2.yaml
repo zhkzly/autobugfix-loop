@@ -1,10 +1,17 @@
-schema_version: 2
+schema_version: 3
 protocol_id: swe-h-general-16
 h0_subject: f529f09de53183d7ddbf9e05b31a9d3b3fbde008
-model: gpt-5.4-mini
-max_attempts: 2
+codex_runtime:
+  model: gpt-5.4-mini
+  reasoning_effort: low
+  service_tier: null
+  sdk_package: openai-codex
+  sdk_version: 0.144.4
+  cli_package: openai-codex-cli-bin
+  cli_version: 0.144.4
+  max_attempts: 2
+  timeout_seconds: 900
 case_concurrency: 1
-timeout_seconds: 900
 qualification_repeats: 2
 optimization:
   dataset: princeton-nlp/SWE-bench_Verified

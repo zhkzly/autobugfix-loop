@@ -38,6 +38,7 @@ from autobugfix.eval.benchmarks.swe_models import (
     SWEAttachment,
     SWEExperimentProtocol,
     SWEInstance,
+    SWESubjectTreatmentRuntime,
     SWEVisibleCase,
 )
 from autobugfix.eval.benchmarks.swe_verified import SWEVerifiedAdapter
@@ -534,8 +535,8 @@ class EvalBenchmarkService:
             )
         receipt = record_with_digest(
             {
-                "schema": "autobugfix-swe-qualification-v3",
-                "protocol_digest": protocol.protocol_digest,
+                "schema": "autobugfix-swe-qualification-v4",
+                "qualification_contract_digest": protocol.qualification_contract_digest,
                 "adapter": adapter,
                 "role": role,
                 "instance_id": instance.instance_id,
@@ -547,6 +548,7 @@ class EvalBenchmarkService:
                 "dataset_snapshot_sha256": runner.snapshot.sha256,
                 "runtime_id": runner.runtime.runtime_id,
                 "docker_authority_digest": runner.runtime.docker_authority_digest,
+                "evaluator_runtime_id": runner.runtime.evaluator_runtime_id,
                 "official_attempts": official_attempts,
                 "official_result_digest": official_attempts[-1]["record_digest"],
                 "official_result_path": official_attempts[-1]["record_path"],
@@ -567,8 +569,8 @@ class EvalBenchmarkService:
                 receipt,
                 run_root,
                 secret=guard_secret,
-                protocol_digest=protocol.protocol_digest,
-                runtime_id=runner.runtime.runtime_id,
+                protocol_digest=protocol.qualification_contract_digest,
+                runtime_id=runner.runtime.evaluator_runtime_id,
             )
             if materialized is not None:
                 source = Path(materialized.source_path)
@@ -729,6 +731,9 @@ class EvalBenchmarkService:
             identity,
             visible.to_dict(),
         )
+        subject_runtime = runner.runtime.subject_runtime_identity(
+            protocol.codex_runtime
+        )
         frozen = SWESubjectBroker(self.project_root, runner.runtime).run(
             subject_sha=selected_subject,
             expected_subject_tree=rev_parse(
@@ -740,9 +745,8 @@ class EvalBenchmarkService:
             image_id=image_id,
             artifact_root=root / "subject-run",
             protocol_digest=protocol.protocol_digest,
-            model=model,
-            max_attempts=max_attempts,
-            timeout_seconds=timeout_seconds,
+            treatment=protocol.codex_runtime,
+            subject_runtime=subject_runtime,
             experiment_role="optimization",
         )
         before = frozen.identity()
@@ -776,6 +780,9 @@ class EvalBenchmarkService:
                 "schema": "autobugfix-swe-development-run-v1",
                 "development_only": True,
                 "protocol_digest": protocol.protocol_digest,
+                "subject_runtime_contract_digest": protocol.subject_runtime_contract_digest,
+                "subject_runtime_digest": subject_runtime["record_digest"],
+                "evaluator_runtime_id": runner.runtime.evaluator_runtime_id,
                 "adapter": adapter,
                 "instance_id": identity,
                 "visible_case_digest": visible.to_dict()["record_digest"],
@@ -825,8 +832,14 @@ class EvalBenchmarkService:
         if not isinstance(raw, Mapping):
             raise EvalBenchmarkServiceError("formal SWE manifest is invalid")
         verify_record(raw)
-        if raw.get("schema") != "autobugfix-swe-sealed-manifest-v1":
+        if raw.get("schema") != "autobugfix-swe-sealed-manifest-v2":
             raise EvalBenchmarkServiceError("unsupported formal SWE manifest")
+        runtime = raw.get("codex_runtime")
+        subject_runtime = raw.get("subject_runtime")
+        if not isinstance(runtime, Mapping) or not isinstance(subject_runtime, Mapping):
+            raise EvalBenchmarkServiceError("formal SWE manifest runtime binding is invalid")
+        SWESubjectTreatmentRuntime.from_dict(runtime)
+        verify_record(subject_runtime)
         return dict(raw)
 
     def _load_swe_study_binding(
@@ -850,7 +863,10 @@ class EvalBenchmarkService:
             raw.get("kind") not in expected_kinds
             or raw.get("manifest_digest") != public_manifest.get("record_digest")
             or raw.get("target_checkpoint_name") != "H_general"
-            or raw.get("primary_model") != "gpt-5.4-mini"
+            or raw.get("primary_model")
+            != SWESubjectTreatmentRuntime.from_dict(
+                public_manifest["codex_runtime"]
+            ).model
             or not raw.get("cohort_id")
         ):
             raise EvalBenchmarkServiceError(
@@ -891,11 +907,21 @@ class EvalBenchmarkService:
         image_id: str,
         study_binding: Mapping[str, Any],
         protocol_digest: str,
+        treatment: SWESubjectTreatmentRuntime,
+        subject_runtime: Mapping[str, Any],
+        evaluator_runtime_id: str,
         run_root: Path,
         run_id: str,
         experiment_role: str,
         authority_root: Path,
     ) -> dict[str, Any]:
+        current_subject_runtime = runner.runtime.subject_runtime_identity(treatment)
+        if current_subject_runtime.get("record_digest") != subject_runtime.get(
+            "record_digest"
+        ):
+            raise EvalBenchmarkServiceError("SWE subject runtime identity drift")
+        if runner.runtime.evaluator_runtime_id != evaluator_runtime_id:
+            raise EvalBenchmarkServiceError("SWE evaluator runtime identity drift")
         subject_sha = str(study_binding["subject_sha"])
         subject_tree = str(study_binding["subject_tree"])
         try:
@@ -946,9 +972,8 @@ class EvalBenchmarkService:
             image_id=image_id,
             artifact_root=run_root / "subject-run",
             protocol_digest=protocol_digest,
-            model="gpt-5.4-mini",
-            max_attempts=2,
-            timeout_seconds=900,
+            treatment=treatment,
+            subject_runtime=subject_runtime,
             experiment_role=experiment_role,
             study_binding=study_binding,
             memory_snapshot=memory_snapshot,
@@ -970,7 +995,12 @@ class EvalBenchmarkService:
         )
         report = record_with_digest(
             {
-                "schema": "autobugfix-swe-formal-case-v1",
+                "schema": "autobugfix-swe-formal-case-v2",
+                "protocol_digest": protocol_digest,
+                "codex_runtime": treatment.to_dict(),
+                "subject_runtime_contract_digest": treatment.contract_digest,
+                "subject_runtime_digest": subject_runtime["record_digest"],
+                "evaluator_runtime_id": evaluator_runtime_id,
                 "case_token": visible.case_token,
                 "experiment_role": experiment_role,
                 "study_id": study_binding["study_id"],
@@ -1039,6 +1069,8 @@ class EvalBenchmarkService:
         if not isinstance(raw_visible, Mapping):
             raise EvalBenchmarkServiceError("SWE visible case is invalid")
         visible = SWEVisibleCase.from_dict(raw_visible)
+        treatment = SWESubjectTreatmentRuntime.from_dict(public["codex_runtime"])
+        subject_runtime = public["subject_runtime"]
         instance_id = str(selected["benchmark_instance_id"])
         runner = self._swe_adapter("swebench_verified")
         output = out_root.resolve()
@@ -1068,6 +1100,9 @@ class EvalBenchmarkService:
             image_id=image_id,
             study_binding=binding,
             protocol_digest=str(public["protocol_digest"]),
+            treatment=treatment,
+            subject_runtime=subject_runtime,
+            evaluator_runtime_id=str(public["evaluator_runtime_id"]),
             run_root=root,
             run_id=safe_component(run_id, "run_id"),
             experiment_role="optimization",
@@ -1120,9 +1155,15 @@ class EvalBenchmarkService:
         except SWEGuardStoreError as exc:
             raise EvalBenchmarkServiceError(str(exc)) from exc
         if (
-            bundle.get("schema") != "autobugfix-swe-guard-bundle-v1"
+            bundle.get("schema") != "autobugfix-swe-guard-bundle-v2"
             or bundle.get("guard_id") != guard_id
             or bundle.get("preparation_digest") != public.get("preparation_digest")
+            or bundle.get("qualification_contract_digest")
+            != public.get("qualification_contract_digest")
+            or bundle.get("evaluator_runtime_id")
+            != public.get("evaluator_runtime_id")
+            or bundle.get("codex_runtime") != public.get("codex_runtime")
+            or bundle.get("subject_runtime") != public.get("subject_runtime")
         ):
             raise EvalBenchmarkServiceError("SWE Guard bundle binding drift")
         raw_identity = bundle.get("code_identity")
@@ -1176,6 +1217,8 @@ class EvalBenchmarkService:
             or bundle.get("guard_runtime_id") != public.get("guard_runtime_id")
             or bundle.get("docker_authority_digest")
             != public.get("docker_authority_digest")
+            or bundle.get("evaluator_runtime_id")
+            != public.get("evaluator_runtime_id")
         ):
             raise EvalBenchmarkServiceError("SWE Guard runtime identity drift")
         output = out_root.resolve()
@@ -1239,6 +1282,11 @@ class EvalBenchmarkService:
                         image_id=image_id,
                         study_binding=binding,
                         protocol_digest=str(public["protocol_digest"]),
+                        treatment=SWESubjectTreatmentRuntime.from_dict(
+                            public["codex_runtime"]
+                        ),
+                        subject_runtime=public["subject_runtime"],
+                        evaluator_runtime_id=str(public["evaluator_runtime_id"]),
                         run_root=case_root,
                         run_id=f"{run_name}-case-{index:02d}",
                         experiment_role="sealed_holdout",
@@ -1338,15 +1386,14 @@ class EvalBenchmarkService:
             verify_record(raw)
             if path.name != f"{raw['record_digest']}.yaml":
                 raise EvalBenchmarkServiceError("SWE qualification path digest drift")
-            if raw.get("schema") not in {
-                "autobugfix-swe-qualification-v1",
-                "autobugfix-swe-qualification-v2",
-                "autobugfix-swe-qualification-v3",
-            }:
+            if raw.get("schema") != "autobugfix-swe-qualification-v4":
                 continue
-            if raw.get("protocol_digest") != protocol.protocol_digest:
+            if (
+                raw.get("qualification_contract_digest")
+                != protocol.qualification_contract_digest
+            ):
                 continue
-            if raw.get("runtime_id") != runner.runtime.runtime_id:
+            if raw.get("evaluator_runtime_id") != runner.runtime.evaluator_runtime_id:
                 continue
             if raw.get("dataset_revision") != runner.snapshot.revision:
                 continue
@@ -1361,7 +1408,7 @@ class EvalBenchmarkService:
         return [
             record
             for record in by_instance.values()
-            if record.get("schema") == "autobugfix-swe-qualification-v3"
+            if record.get("schema") == "autobugfix-swe-qualification-v4"
             and record.get("eligible")
         ]
 
@@ -1455,6 +1502,20 @@ class EvalBenchmarkService:
         holdout_staging = Path(guard_temporary.name)
         verified_runner = self._swe_adapter("swebench_verified")
         live_runner = self._swe_guard_adapter("swebench_live", guard_store)
+        evaluator_runtime_id = verified_runner.runtime.evaluator_runtime_id
+        guard_runtime_id = live_runner.runtime.evaluator_runtime_id
+        subject_runtime = verified_runner.runtime.subject_runtime_identity(
+            protocol.codex_runtime
+        )
+        if (
+            live_runner.runtime.subject_runtime_identity(protocol.codex_runtime).get(
+                "record_digest"
+            )
+            != subject_runtime.get("record_digest")
+        ):
+            raise EvalBenchmarkServiceError(
+                "SWE Verified and Live subject runtime identities differ"
+            )
         optimization_pool = self._swe_qualification_pool(
             protocol, "swebench_verified"
         )
@@ -1463,10 +1524,10 @@ class EvalBenchmarkService:
                 record
                 for record in guard_store.qualification_records(
                     secret=guard_secret,
-                    protocol_digest=protocol.protocol_digest,
-                    runtime_id=live_runner.runtime.runtime_id,
+                    protocol_digest=protocol.qualification_contract_digest,
+                    runtime_id=live_runner.runtime.evaluator_runtime_id,
                 )
-                if record.get("schema") == "autobugfix-swe-qualification-v3"
+                if record.get("schema") == "autobugfix-swe-qualification-v4"
                 and record.get("eligible")
             ]
         except SWEGuardStoreError as exc:
@@ -1655,12 +1716,16 @@ class EvalBenchmarkService:
 
         private_record = record_with_digest(
             {
-                "schema": "autobugfix-swe-private-cohort-v1",
+                "schema": "autobugfix-swe-private-cohort-v2",
                 "preparation_id": preparation_id,
                 "protocol_digest": protocol.protocol_digest,
-                "runtime_id": verified_runner.runtime.runtime_id,
-                "guard_runtime_id": live_runner.runtime.runtime_id,
+                "runtime_id": evaluator_runtime_id,
+                "guard_runtime_id": guard_runtime_id,
                 "docker_authority_digest": live_runner.runtime.docker_authority_digest,
+                "qualification_contract_digest": protocol.qualification_contract_digest,
+                "evaluator_runtime_id": evaluator_runtime_id,
+                "codex_runtime": protocol.codex_runtime.to_dict(),
+                "subject_runtime": subject_runtime,
                 "h0_subject": protocol.h0_subject,
                 "cases": private_cases,
                 "created_at": utc_now(),
@@ -1671,17 +1736,21 @@ class EvalBenchmarkService:
             private_record,
             secret=guard_secret,
             protocol_digest=protocol.protocol_digest,
-            runtime_id=live_runner.runtime.runtime_id,
+            runtime_id=guard_runtime_id,
         )
         guard_temporary.cleanup()
         prepared = record_with_digest(
             {
-                "schema": "autobugfix-swe-preparation-v1",
+                "schema": "autobugfix-swe-preparation-v2",
                 "preparation_id": preparation_id,
                 "protocol_digest": protocol.protocol_digest,
-                "runtime_id": verified_runner.runtime.runtime_id,
-                "guard_runtime_id": live_runner.runtime.runtime_id,
+                "runtime_id": evaluator_runtime_id,
+                "guard_runtime_id": guard_runtime_id,
                 "docker_authority_digest": live_runner.runtime.docker_authority_digest,
+                "qualification_contract_digest": protocol.qualification_contract_digest,
+                "evaluator_runtime_id": evaluator_runtime_id,
+                "codex_runtime": protocol.codex_runtime.to_dict(),
+                "subject_runtime": subject_runtime,
                 "h0_subject": protocol.h0_subject,
                 "h0_tree": rev_parse(
                     self.project_root, f"{protocol.h0_subject}^{{tree}}"
@@ -1729,7 +1798,7 @@ class EvalBenchmarkService:
         if not isinstance(prepared, Mapping):
             raise EvalBenchmarkServiceError("SWE preparation record is invalid")
         verify_record(prepared)
-        if prepared.get("schema") != "autobugfix-swe-preparation-v1":
+        if prepared.get("schema") != "autobugfix-swe-preparation-v2":
             raise EvalBenchmarkServiceError("unsupported SWE preparation schema")
         if resolved.name != f"{prepared['record_digest']}.yaml":
             raise EvalBenchmarkServiceError("SWE preparation path digest drift")
@@ -1742,6 +1811,14 @@ class EvalBenchmarkService:
             or prepared.get("waves") != {"3": 3, "8": 8, "16": 16}
         ):
             raise EvalBenchmarkServiceError("SWE preparation cohort shape is invalid")
+        raw_treatment = prepared.get("codex_runtime")
+        raw_subject_runtime = prepared.get("subject_runtime")
+        if not isinstance(raw_treatment, Mapping) or not isinstance(
+            raw_subject_runtime, Mapping
+        ):
+            raise EvalBenchmarkServiceError("SWE preparation runtime binding is invalid")
+        SWESubjectTreatmentRuntime.from_dict(raw_treatment)
+        verify_record(raw_subject_runtime)
         guard_store = self._swe_guard_store(guard_root)
         try:
             private = guard_store.load_preparation(
@@ -1763,7 +1840,13 @@ class EvalBenchmarkService:
             or private.get("guard_runtime_id") != prepared.get("guard_runtime_id")
             or private.get("docker_authority_digest")
             != prepared.get("docker_authority_digest")
+            or private.get("qualification_contract_digest")
+            != prepared.get("qualification_contract_digest")
+            or private.get("evaluator_runtime_id")
+            != prepared.get("evaluator_runtime_id")
             or private.get("h0_subject") != prepared.get("h0_subject")
+            or private.get("codex_runtime") != prepared.get("codex_runtime")
+            or private.get("subject_runtime") != prepared.get("subject_runtime")
             or not isinstance(private_cases, list)
             or len(private_cases) != 16
             or sum(
@@ -1789,13 +1872,17 @@ class EvalBenchmarkService:
         }
         guard_bundle = record_with_digest(
             {
-                "schema": "autobugfix-swe-guard-bundle-v1",
+                "schema": "autobugfix-swe-guard-bundle-v2",
                 "guard_id": guard_id,
                 "preparation_digest": prepared["record_digest"],
                 "protocol_digest": prepared["protocol_digest"],
                 "runtime_id": prepared["runtime_id"],
                 "guard_runtime_id": prepared["guard_runtime_id"],
                 "docker_authority_digest": prepared["docker_authority_digest"],
+                "qualification_contract_digest": prepared["qualification_contract_digest"],
+                "evaluator_runtime_id": prepared["evaluator_runtime_id"],
+                "codex_runtime": prepared["codex_runtime"],
+                "subject_runtime": prepared["subject_runtime"],
                 "code_identity": code_identity.to_dict(),
                 "wave_tokens": wave_tokens,
                 "private_cohort": private,
@@ -1810,13 +1897,17 @@ class EvalBenchmarkService:
         )
         public_manifest = record_with_digest(
             {
-                "schema": "autobugfix-swe-sealed-manifest-v1",
+                "schema": "autobugfix-swe-sealed-manifest-v2",
                 "manifest_id": f"swe-general-{guard_id}",
                 "preparation_digest": prepared["record_digest"],
                 "protocol_digest": prepared["protocol_digest"],
                 "runtime_id": prepared["runtime_id"],
                 "guard_runtime_id": prepared["guard_runtime_id"],
                 "docker_authority_digest": prepared["docker_authority_digest"],
+                "qualification_contract_digest": prepared["qualification_contract_digest"],
+                "evaluator_runtime_id": prepared["evaluator_runtime_id"],
+                "codex_runtime": prepared["codex_runtime"],
+                "subject_runtime": prepared["subject_runtime"],
                 "h0_subject": prepared["h0_subject"],
                 "h0_tree": prepared["h0_tree"],
                 "optimization_cases": list(prepared["optimization_cases"]),

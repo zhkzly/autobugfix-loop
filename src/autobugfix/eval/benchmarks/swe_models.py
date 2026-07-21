@@ -96,36 +96,114 @@ class SWEOptimizationSelection:
 
 
 @dataclass(slots=True, frozen=True)
+class SWESubjectTreatmentRuntime:
+    """Immutable Codex treatment variables for one SWE experiment protocol."""
+
+    model: str
+    reasoning_effort: str
+    service_tier: str | None
+    sdk_package: str
+    sdk_version: str
+    cli_package: str
+    cli_version: str
+    max_attempts: int
+    timeout_seconds: int
+
+    def __post_init__(self) -> None:
+        if self.model != SWE_PRIMARY_MODEL:
+            raise BenchmarkContractError("SWE experiment model must be gpt-5.4-mini")
+        if self.reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+            raise BenchmarkContractError("unsupported SWE Codex reasoning effort")
+        if self.sdk_package != "openai-codex" or self.sdk_version != "0.144.4":
+            raise BenchmarkContractError("SWE experiment SDK must be openai-codex 0.144.4")
+        if (
+            self.cli_package != "openai-codex-cli-bin"
+            or self.cli_version != "0.144.4"
+        ):
+            raise BenchmarkContractError(
+                "SWE experiment Codex CLI must be openai-codex-cli-bin 0.144.4"
+            )
+        if self.max_attempts != 2:
+            raise BenchmarkContractError("SWE experiment requires exactly two Writer attempts")
+        if self.timeout_seconds != 900:
+            raise BenchmarkContractError("SWE experiment timeout must be 900 seconds")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "SWESubjectTreatmentRuntime":
+        _only_fields(
+            data,
+            {
+                "model",
+                "reasoning_effort",
+                "service_tier",
+                "sdk_package",
+                "sdk_version",
+                "cli_package",
+                "cli_version",
+                "max_attempts",
+                "timeout_seconds",
+            },
+            "SWE Codex runtime",
+        )
+        return cls(
+            model=_required(data.get("model"), "codex_runtime.model"),
+            reasoning_effort=_required(
+                data.get("reasoning_effort"), "codex_runtime.reasoning_effort"
+            ),
+            service_tier=(
+                str(data["service_tier"])
+                if data.get("service_tier") is not None
+                else None
+            ),
+            sdk_package=_required(data.get("sdk_package"), "codex_runtime.sdk_package"),
+            sdk_version=_required(data.get("sdk_version"), "codex_runtime.sdk_version"),
+            cli_package=_required(data.get("cli_package"), "codex_runtime.cli_package"),
+            cli_version=_required(data.get("cli_version"), "codex_runtime.cli_version"),
+            max_attempts=int(data.get("max_attempts") or 0),
+            timeout_seconds=int(data.get("timeout_seconds") or 0),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "reasoning_effort": self.reasoning_effort,
+            "service_tier": self.service_tier,
+            "sdk_package": self.sdk_package,
+            "sdk_version": self.sdk_version,
+            "cli_package": self.cli_package,
+            "cli_version": self.cli_version,
+            "max_attempts": self.max_attempts,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+    @property
+    def contract_digest(self) -> str:
+        return digest_payload(self.to_dict())
+
+
+@dataclass(slots=True, frozen=True)
 class SWEExperimentProtocol:
     protocol_id: str
     h0_subject: str
-    model: str
-    max_attempts: int
+    codex_runtime: SWESubjectTreatmentRuntime
     case_concurrency: int
     optimization_count: int
     holdout_count: int
     optimization_dataset: str
     holdout_dataset: str
-    timeout_seconds: int
     qualification_repeats: int
     optimization_cases: tuple[SWEOptimizationSelection, ...]
     holdout_excluded_instances: tuple[str, ...]
-    schema_version: int = 2
+    schema_version: int = 3
 
     def __post_init__(self) -> None:
-        if self.schema_version != 2:
+        if self.schema_version != 3:
             raise BenchmarkContractError("unsupported SWE experiment protocol schema")
         safe_component(self.protocol_id, "protocol_id")
         if self.h0_subject != SWE_H0_SUBJECT:
             raise BenchmarkContractError("SWE experiment must start from the frozen H0")
-        if self.model != SWE_PRIMARY_MODEL:
-            raise BenchmarkContractError("SWE experiment model must be gpt-5.4-mini")
-        if self.max_attempts != 2:
-            raise BenchmarkContractError("SWE experiment requires exactly two Writer attempts")
         if self.case_concurrency != 1:
             raise BenchmarkContractError("SWE experiment case concurrency must be one")
-        if self.timeout_seconds != 900:
-            raise BenchmarkContractError("SWE experiment timeout must be 900 seconds")
         if self.qualification_repeats != 2:
             raise BenchmarkContractError(
                 "SWE experiment qualification requires two official gold runs"
@@ -173,10 +251,8 @@ class SWEExperimentProtocol:
                 "schema_version",
                 "protocol_id",
                 "h0_subject",
-                "model",
-                "max_attempts",
+                "codex_runtime",
                 "case_concurrency",
-                "timeout_seconds",
                 "qualification_repeats",
                 "optimization",
                 "holdout",
@@ -191,8 +267,11 @@ class SWEExperimentProtocol:
         waves = data.get("waves")
         if not isinstance(optimization, Mapping) or not isinstance(holdout, Mapping):
             raise BenchmarkContractError("SWE protocol optimization and holdout must be mappings")
+        codex_runtime = data.get("codex_runtime")
         if not isinstance(upstreams, Mapping) or not isinstance(waves, Mapping):
             raise BenchmarkContractError("SWE protocol upstreams and waves must be mappings")
+        if not isinstance(codex_runtime, Mapping):
+            raise BenchmarkContractError("SWE protocol codex_runtime must be a mapping")
         cls._validate_upstreams(upstreams)
         _only_fields(
             optimization,
@@ -223,10 +302,8 @@ class SWEExperimentProtocol:
             schema_version=int(data.get("schema_version") or 0),
             protocol_id=safe_component(data.get("protocol_id"), "protocol_id"),
             h0_subject=_required(data.get("h0_subject"), "h0_subject"),
-            model=_required(data.get("model"), "model"),
-            max_attempts=int(data.get("max_attempts") or 0),
+            codex_runtime=SWESubjectTreatmentRuntime.from_dict(codex_runtime),
             case_concurrency=int(data.get("case_concurrency") or 0),
-            timeout_seconds=int(data.get("timeout_seconds") or 0),
             qualification_repeats=int(data.get("qualification_repeats") or 0),
             optimization_count=int(optimization.get("count") or 0),
             holdout_count=int(holdout.get("count") or 0),
@@ -274,15 +351,42 @@ class SWEExperimentProtocol:
     def protocol_digest(self) -> str:
         return digest_payload(self.to_dict())
 
+    @property
+    def qualification_contract_digest(self) -> str:
+        """Identity for gold scoring/materialization, excluding subject treatment."""
+        return digest_payload(
+            {
+                "schema": "autobugfix-swe-qualification-contract-v1",
+                "qualification_repeats": self.qualification_repeats,
+                "optimization_dataset": self.optimization_dataset,
+                "holdout_dataset": self.holdout_dataset,
+                "upstreams": self.to_dict()["upstreams"],
+            }
+        )
+
+    @property
+    def subject_runtime_contract_digest(self) -> str:
+        return self.codex_runtime.contract_digest
+
+    @property
+    def model(self) -> str:
+        return self.codex_runtime.model
+
+    @property
+    def max_attempts(self) -> int:
+        return self.codex_runtime.max_attempts
+
+    @property
+    def timeout_seconds(self) -> int:
+        return self.codex_runtime.timeout_seconds
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "protocol_id": self.protocol_id,
             "h0_subject": self.h0_subject,
-            "model": self.model,
-            "max_attempts": self.max_attempts,
+            "codex_runtime": self.codex_runtime.to_dict(),
             "case_concurrency": self.case_concurrency,
-            "timeout_seconds": self.timeout_seconds,
             "qualification_repeats": self.qualification_repeats,
             "optimization": {
                 "dataset": self.optimization_dataset,

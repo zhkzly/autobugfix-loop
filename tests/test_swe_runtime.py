@@ -46,7 +46,7 @@ def test_swe_runtime_rejects_mutable_verified_image_namespace(tmp_path: Path) ->
         SWERuntime(project_root, config.eval.benchmarks)
 
 
-def test_swe_runtime_id_binds_lockfile(tmp_path: Path) -> None:
+def test_evaluator_runtime_id_binds_official_harness_lock_only(tmp_path: Path) -> None:
     project_root, _ = make_service_project(tmp_path)
     harness = project_root / "harnesses/swebench"
     harness.mkdir(parents=True)
@@ -61,6 +61,10 @@ def test_swe_runtime_id_binds_lockfile(tmp_path: Path) -> None:
     config = load_config(project_root)
     runtime = SWERuntime(project_root, config.eval.benchmarks)
     first = runtime.runtime_id
+
+    (project_root / "uv.lock").write_text("version = 2\n", encoding="utf-8")
+
+    assert runtime.runtime_id == first
 
     (harness / "uv.lock").write_text("version = 2\n", encoding="utf-8")
 

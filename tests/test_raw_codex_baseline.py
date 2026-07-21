@@ -80,7 +80,7 @@ def prepared_raw_manifest() -> PreparedRawBaselineManifest:
         runner_source_digest="7" * 64,
         runner_install_digest="f" * 64,
         runner_lock_digest="8" * 64,
-        sdk_version="0.1.0b3",
+        sdk_version="0.144.4",
         prompt_template_digest="9" * 64,
         config_digest="a" * 64,
         model="gpt-5.4-mini",
@@ -111,7 +111,7 @@ def test_raw_baseline_protocol_preregisters_primary_and_development() -> None:
     assert seed.turns_per_case == 1
     assert seed.concurrency == 1
     assert seed.model == "gpt-5.4-mini"
-    assert seed.sdk_version == "0.1.0b3"
+    assert seed.sdk_version == "0.144.4"
     assert seed.approval_mode == "deny_all"
     assert seed.sandbox == "workspace-write"
     assert seed.network_access is False
@@ -144,7 +144,8 @@ def test_config_resolves_raw_baseline_without_activating_it(tmp_path: Path) -> N
     assert config.runner_project == project_root / "baselines/raw_codex_sdk"
     assert config.runtime_root == project_root / ".autobugfix/raw-codex-baseline"
     assert config.model == "gpt-5.4-mini"
-    assert config.sdk_version == "0.1.0b3"
+    assert config.sdk_version == "0.144.4"
+    assert config.cli_version == "0.144.4"
     assert config.timeout_seconds == 500
     assert config.swe_timeout_seconds == 900
     assert config.approval_mode == "deny_all"
@@ -224,7 +225,7 @@ def test_prepare_freezes_h0_runner_runtime_and_cohorts(
     h0_path = tmp_path / "h0-report.yaml"
     h0_path.write_text(yaml.safe_dump(h0, sort_keys=False), encoding="utf-8")
     runner = RunnerMetadata(
-        sdk_version="0.1.0b3",
+        sdk_version="0.144.4",
         prompt_template_digest="9" * 64,
         source_digest="a" * 64,
         package_digest="b" * 64,
@@ -273,7 +274,7 @@ def test_formal_run_aborts_after_first_harness_error_and_writes_binding(
     service = RawCodexBaselineService(project_root)
     prepared = prepared_raw_manifest()
     runner = RunnerMetadata(
-        sdk_version="0.1.0b3",
+        sdk_version="0.144.4",
         prompt_template_digest=prepared.prompt_template_digest,
         source_digest="a" * 64,
         package_digest=prepared.runner_install_digest,
@@ -482,7 +483,7 @@ def test_bubblewrap_hides_control_and_sibling_state_but_allows_worktree(
     )
     result = sandbox.run(
         runner_metadata=RunnerMetadata(
-            sdk_version="0.1.0b3",
+            sdk_version="0.144.4",
             prompt_template_digest="b" * 64,
             source_digest="c" * 64,
             package_digest="d" * 64,
@@ -560,7 +561,7 @@ def test_bubblewrap_mounts_external_uv_python_prefix(
     )
     result = sandbox.run(
         runner_metadata=RunnerMetadata(
-            sdk_version="0.1.0b3",
+            sdk_version="0.144.4",
             prompt_template_digest="b" * 64,
             source_digest="c" * 64,
             package_digest="d" * 64,
@@ -618,7 +619,7 @@ def test_raw_worker_cannot_forge_retained_codex_config(
     with pytest.raises(RawCodexIsolationError, match="launch configuration"):
         sandbox.run(
             runner_metadata=RunnerMetadata(
-                sdk_version="0.1.0b3",
+                sdk_version="0.144.4",
                 prompt_template_digest="b" * 64,
                 source_digest="c" * 64,
                 package_digest="d" * 64,
@@ -675,7 +676,7 @@ class FakeRawSandbox:
                 "case_id": bundle["case_id"],
                 "case_digest": bundle["record_digest"],
                 "sdk_package": "openai-codex",
-                "sdk_version": "0.1.0b3",
+                "sdk_version": "0.144.4",
                 "model": "gpt-5.4-mini",
                 "reasoning_effort": "medium",
                 "service_tier": None,
@@ -752,7 +753,7 @@ def test_trusted_host_classifies_malformed_process_result_as_harness_error(
     case = raw_cases()[0]
     bundle = record_with_digest({"case_id": case.case_id})
     runner = RunnerMetadata(
-        sdk_version="0.1.0b3",
+        sdk_version="0.144.4",
         prompt_template_digest="b" * 64,
         source_digest="c" * 64,
         package_digest="d" * 64,
@@ -833,7 +834,7 @@ def test_trusted_service_derives_patch_and_scores_fresh_checkout(
     service = RawCodexBaselineService(project_root)
     service.sandbox = FakeRawSandbox()  # type: ignore[assignment]
     runner = RunnerMetadata(
-        sdk_version="0.1.0b3",
+        sdk_version="0.144.4",
         prompt_template_digest="b" * 64,
         source_digest="c" * 64,
         package_digest="d" * 64,
@@ -1014,7 +1015,7 @@ def test_comparison_report_revalidates_all_frozen_artifacts(tmp_path: Path) -> N
             "runner_source_digest": "c" * 64,
             "prompt_template_digest": "d" * 64,
             "model": "gpt-5.4-mini",
-            "sdk_version": "0.1.0b3",
+            "sdk_version": "0.144.4",
         }
     )
     (run_dir / "run-binding.yaml").write_text(

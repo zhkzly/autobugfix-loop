@@ -30,10 +30,26 @@ class RunnerMetadata:
     source_digest: str
     package_digest: str
     environment: Path
+    cli_version: str = "0.144.4"
+    sdk_record_digest: str = "0" * 64
+    cli_record_digest: str = "0" * 64
     approval_mode: str = "deny_all"
     sandbox: str = "workspace-write"
     network_access: bool = False
     runtime_mounts: tuple[tuple[Path, Path], ...] = ()
+
+    @property
+    def runtime_digest(self) -> str:
+        return digest_payload(
+            {
+                "sdk_package": "openai-codex",
+                "sdk_version": self.sdk_version,
+                "sdk_record_digest": self.sdk_record_digest,
+                "cli_package": "openai-codex-cli-bin",
+                "cli_version": self.cli_version,
+                "cli_record_digest": self.cli_record_digest,
+            }
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -304,6 +320,9 @@ class RawCodexProcessSandbox:
         if not isinstance(value, Mapping):
             raise RawCodexIsolationError("Raw runner metadata must be an object")
         sdk_version = str(value.get("sdk_version") or "")
+        cli_version = str(value.get("cli_version") or "")
+        sdk_record_digest = str(value.get("sdk_record_digest") or "")
+        cli_record_digest = str(value.get("cli_record_digest") or "")
         approval_mode = str(value.get("approval_mode") or "")
         sandbox = str(value.get("sandbox") or "")
         network_access = value.get("network_access")
@@ -312,6 +331,21 @@ class RawCodexProcessSandbox:
         if sdk_version != self.config.sdk_version:
             raise RawCodexIsolationError(
                 "locked Raw runner SDK version differs from configuration"
+            )
+        if cli_version != self.config.cli_version:
+            raise RawCodexIsolationError(
+                "locked Raw runner CLI version differs from configuration"
+            )
+        if (
+            len(sdk_record_digest) != 64
+            or len(cli_record_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in sdk_record_digest + cli_record_digest
+            )
+        ):
+            raise RawCodexIsolationError(
+                "Raw runner SDK/CLI distribution records are invalid"
             )
         if (
             approval_mode != self.config.approval_mode
@@ -331,6 +365,9 @@ class RawCodexProcessSandbox:
             )
         return RunnerMetadata(
             sdk_version=sdk_version,
+            cli_version=cli_version,
+            sdk_record_digest=sdk_record_digest,
+            cli_record_digest=cli_record_digest,
             approval_mode=approval_mode,
             sandbox=sandbox,
             network_access=network_access,

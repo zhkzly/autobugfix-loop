@@ -341,7 +341,7 @@ Memory, managed verifier callback, evaluator feedback, gold patch, fixed
 revision, hidden tests, or official verdict.
 
 The treatment is a separately locked uv project at
-`baselines/raw_codex_sdk`, pinned to `openai-codex==0.1.0b3`. The trusted Eval
+`baselines/raw_codex_sdk`, pinned to `openai-codex==0.144.4`. The trusted Eval
 service launches it in Bubblewrap with only the target worktree, visible case
 bundle, isolated `CODEX_HOME`, read-only runner environment, and raw output
 mount. The SDK process cannot write prepared manifests, submissions, scores,

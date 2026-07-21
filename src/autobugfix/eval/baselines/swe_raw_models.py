@@ -47,6 +47,7 @@ class SWERawTreatmentProtocol:
     runner_project: str
     model: str
     sdk_version: str
+    cli_version: str
     reasoning_effort: str
     service_tier: str | None
     approval_mode: str
@@ -72,10 +73,12 @@ class SWERawTreatmentProtocol:
             raise BenchmarkContractError("SWE Raw treatment requires ten public cases")
         if self.runner_project != "baselines/raw_codex_sdk":
             raise BenchmarkContractError("SWE Raw treatment runner project is not pinned")
-        if self.model != "gpt-5.4-mini" or self.sdk_version != "0.1.0b3":
+        if self.model != "gpt-5.4-mini" or self.sdk_version != "0.144.4":
             raise BenchmarkContractError("SWE Raw treatment model or SDK is not pinned")
-        if self.reasoning_effort not in {"low", "medium", "high", "xhigh"}:
-            raise BenchmarkContractError("unsupported SWE Raw reasoning effort")
+        if self.cli_version != "0.144.4":
+            raise BenchmarkContractError("SWE Raw treatment CLI is not pinned")
+        if self.reasoning_effort != "low":
+            raise BenchmarkContractError("SWE Raw treatment reasoning effort must be low")
         if (
             self.approval_mode != "deny_all"
             or self.sandbox != "workspace-write"
@@ -103,6 +106,7 @@ class SWERawTreatmentProtocol:
             "runner_project",
             "model",
             "sdk_version",
+            "cli_version",
             "reasoning_effort",
             "service_tier",
             "approval_mode",
@@ -130,6 +134,7 @@ class SWERawTreatmentProtocol:
             runner_project=required(data.get("runner_project"), "runner_project"),
             model=required(data.get("model"), "model"),
             sdk_version=required(data.get("sdk_version"), "sdk_version"),
+            cli_version=required(data.get("cli_version"), "cli_version"),
             reasoning_effort=required(data.get("reasoning_effort"), "reasoning_effort"),
             service_tier=(
                 str(data["service_tier"])
@@ -167,6 +172,7 @@ class SWERawTreatmentProtocol:
             "runner_project": self.runner_project,
             "model": self.model,
             "sdk_version": self.sdk_version,
+            "cli_version": self.cli_version,
             "reasoning_effort": self.reasoning_effort,
             "service_tier": self.service_tier,
             "approval_mode": self.approval_mode,
@@ -257,6 +263,7 @@ class PreparedSWERawManifest:
     runner_source_digest: str
     runner_install_digest: str
     runner_lock_digest: str
+    runner_runtime_digest: str
     config_digest: str
     cases: tuple[PreparedSWERawCase, ...]
     prepared_at: str
@@ -277,6 +284,7 @@ class PreparedSWERawManifest:
             (self.runner_source_digest, "runner_source_digest"),
             (self.runner_install_digest, "runner_install_digest"),
             (self.runner_lock_digest, "runner_lock_digest"),
+            (self.runner_runtime_digest, "runner_runtime_digest"),
             (self.config_digest, "config_digest"),
         ):
             sha256_value(value, name)
@@ -303,6 +311,7 @@ class PreparedSWERawManifest:
             "runner_source_digest",
             "runner_install_digest",
             "runner_lock_digest",
+            "runner_runtime_digest",
             "config_digest",
             "cases",
             "prepared_at",
@@ -339,6 +348,9 @@ class PreparedSWERawManifest:
             runner_lock_digest=sha256_value(
                 data.get("runner_lock_digest"), "runner_lock_digest"
             ),
+            runner_runtime_digest=sha256_value(
+                data.get("runner_runtime_digest"), "runner_runtime_digest"
+            ),
             config_digest=sha256_value(data.get("config_digest"), "config_digest"),
             cases=tuple(PreparedSWERawCase.from_dict(item) for item in raw_cases),
             prepared_at=required(data.get("prepared_at"), "prepared_at"),
@@ -365,6 +377,7 @@ class PreparedSWERawManifest:
                 "runner_source_digest": self.runner_source_digest,
                 "runner_install_digest": self.runner_install_digest,
                 "runner_lock_digest": self.runner_lock_digest,
+                "runner_runtime_digest": self.runner_runtime_digest,
                 "config_digest": self.config_digest,
                 "cases": [case.to_dict() for case in self.cases],
                 "prepared_at": self.prepared_at,

@@ -5,6 +5,7 @@ import getpass
 import importlib.metadata
 import json
 import sys
+import uuid
 from pathlib import Path
 
 import yaml
@@ -621,6 +622,12 @@ def command_eval(args: argparse.Namespace) -> int:
 def command_codex(args: argparse.Namespace) -> int:
     cfg = load_config(Path.cwd())
     resolved = resolve_role(cfg, args.role, repo_id=args.repo)
+    # Keep the authority directory hidden while mounting one private leaf for logs.
+    probe_root = (
+        Path.cwd()
+        / ".autobugfix/controller/probes"
+        / f"{args.role}-{uuid.uuid4().hex}"
+    )
     request = build_codex_request(
         Path.cwd(),
         args.role,
@@ -629,8 +636,8 @@ def command_codex(args: argparse.Namespace) -> int:
         None,
         None,
         None,
-        Path.cwd() / ".autobugfix/controller" / f"{args.role}.probe.raw.jsonl",
-        Path.cwd() / ".autobugfix/controller" / f"{args.role}.probe.stderr.log",
+        probe_root / "raw.jsonl",
+        probe_root / "stderr.log",
         repo_id=args.repo,
         resolved_role=resolved,
     )

@@ -27,6 +27,7 @@ from autobugfix.eval.benchmarks.swe_runtime import (
 from autobugfix.eval.benchmarks.swe_models import (
     SWEInstance,
     SWEOptimizationSelection,
+    SWESubjectTreatmentRuntime,
 )
 from tests.helpers import make_service_project
 
@@ -34,6 +35,24 @@ from tests.helpers import make_service_project
 SECRET = "guard-test-secret-with-32-bytes"
 PROTOCOL = "a" * 64
 RUNTIME = "sha256:" + "b" * 64
+TREATMENT = SWESubjectTreatmentRuntime(
+    model="gpt-5.4-mini",
+    reasoning_effort="low",
+    service_tier=None,
+    sdk_package="openai-codex",
+    sdk_version="0.144.4",
+    cli_package="openai-codex-cli-bin",
+    cli_version="0.144.4",
+    max_attempts=2,
+    timeout_seconds=900,
+)
+SUBJECT_RUNTIME = record_with_digest(
+    {
+        "schema": "autobugfix-swe-subject-runtime-v1",
+        "treatment_contract_digest": TREATMENT.contract_digest,
+        "treatment": TREATMENT.to_dict(),
+    }
+)
 
 
 def guard_store(tmp_path: Path) -> SWEGuardStore:
@@ -48,9 +67,9 @@ def guard_store(tmp_path: Path) -> SWEGuardStore:
 def qualification(canary: str) -> dict[str, object]:
     return record_with_digest(
         {
-            "schema": "autobugfix-swe-qualification-v3",
-            "protocol_digest": PROTOCOL,
-            "runtime_id": RUNTIME,
+            "schema": "autobugfix-swe-qualification-v4",
+            "qualification_contract_digest": PROTOCOL,
+            "evaluator_runtime_id": RUNTIME,
             "adapter": "swebench_live",
             "instance_id": canary,
             "eligible": True,
@@ -460,12 +479,16 @@ def test_swe_seal_publishes_no_holdout_plaintext_or_wave_tokens(
     canary = "sealed-owner__private-repo-999"
     private = record_with_digest(
         {
-            "schema": "autobugfix-swe-private-cohort-v1",
+            "schema": "autobugfix-swe-private-cohort-v2",
             "preparation_id": preparation_id,
             "protocol_digest": PROTOCOL,
             "runtime_id": RUNTIME,
             "guard_runtime_id": RUNTIME,
             "docker_authority_digest": "e" * 64,
+            "qualification_contract_digest": PROTOCOL,
+            "evaluator_runtime_id": RUNTIME,
+            "codex_runtime": TREATMENT.to_dict(),
+            "subject_runtime": SUBJECT_RUNTIME,
             "h0_subject": "a" * 40,
             "cases": [
                 {"role": "optimization", "instance_id": f"visible-{index}"}
@@ -490,12 +513,16 @@ def test_swe_seal_publishes_no_holdout_plaintext_or_wave_tokens(
     )
     prepared = record_with_digest(
         {
-            "schema": "autobugfix-swe-preparation-v1",
+            "schema": "autobugfix-swe-preparation-v2",
             "preparation_id": preparation_id,
             "protocol_digest": PROTOCOL,
             "runtime_id": RUNTIME,
             "guard_runtime_id": RUNTIME,
             "docker_authority_digest": "e" * 64,
+            "qualification_contract_digest": PROTOCOL,
+            "evaluator_runtime_id": RUNTIME,
+            "codex_runtime": TREATMENT.to_dict(),
+            "subject_runtime": SUBJECT_RUNTIME,
             "h0_subject": "a" * 40,
             "h0_tree": "b" * 40,
             "optimization_cases": [
@@ -560,6 +587,8 @@ def test_prepare_swe_builds_10_plus_6_without_plaintext_holdout(
     )
     protocol = SimpleNamespace(
         protocol_digest=PROTOCOL,
+        qualification_contract_digest=PROTOCOL,
+        codex_runtime=TREATMENT,
         optimization_count=10,
         holdout_count=6,
         optimization_cases=selections,
@@ -616,11 +645,13 @@ def test_prepare_swe_builds_10_plus_6_without_plaintext_holdout(
             self.runtime = SimpleNamespace(
                 runtime_id=RUNTIME,
                 docker_authority_digest="e" * 64,
+                evaluator_runtime_id=RUNTIME,
                 cache_root=external / "runtime-cache",
                 config=SimpleNamespace(
                     swebench_commit="swebench-commit",
                     live_commit="live-commit",
                 ),
+                subject_runtime_identity=lambda treatment: SUBJECT_RUNTIME,
             )
 
         def load_instance(self, instance_id: str, artifact_root: Path) -> SWEInstance:
@@ -640,9 +671,9 @@ def test_prepare_swe_builds_10_plus_6_without_plaintext_holdout(
         source_digest = (instance.instance_id.encode().hex()[:64]).ljust(64, "1")
         return record_with_digest(
             {
-                "schema": "autobugfix-swe-qualification-v3",
-                "protocol_digest": PROTOCOL,
-                "runtime_id": RUNTIME,
+                "schema": "autobugfix-swe-qualification-v4",
+                "qualification_contract_digest": PROTOCOL,
+                "evaluator_runtime_id": RUNTIME,
                 "adapter": instance.adapter,
                 "instance_id": instance.instance_id,
                 "recorded": True,

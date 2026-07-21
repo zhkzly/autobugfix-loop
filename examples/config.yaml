@@ -36,7 +36,8 @@ eval:
     raw_codex:
       runner_project: baselines/raw_codex_sdk
       runtime_root: .autobugfix/raw-codex-baseline
-      sdk_version: 0.1.0b3
+      sdk_version: 0.144.4
+      cli_version: 0.144.4
       model: gpt-5.4-mini
       reasoning_effort: medium
       service_tier: null

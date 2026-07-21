@@ -42,6 +42,7 @@ from autobugfix.eval.benchmarks.swe_constants import (
     SWE_VERIFIED_DATASET,
     SWE_VERIFIED_DATASET_REVISION,
 )
+from autobugfix.eval.benchmarks.swe_models import SWESubjectTreatmentRuntime
 from autobugfix.models import EvalBenchmarkConfig, SWEBenchmarkConfig, utc_now
 
 
@@ -328,16 +329,21 @@ class SWERuntime:
         return self.config.harness_project / "uv.lock"
 
     @property
-    def runtime_id(self) -> str:
-        root_lock = self.project_root / "uv.lock"
-        if not self.harness_lock.is_file() or not root_lock.is_file():
-            return "unavailable"
-        try:
-            codex_distribution = importlib.metadata.distribution("openai-codex")
-            codex_record = codex_distribution.read_text("RECORD") or ""
-        except importlib.metadata.PackageNotFoundError:
+    def evaluator_runtime_id(self) -> str:
+        """Identity of the official scorer/materializer, not the Codex subject."""
+        if not self.harness_lock.is_file():
             return "unavailable"
         source_entries = []
+        evaluator_modules = {
+            "models.py",
+            "runtime.py",
+            "swe_constants.py",
+            "swe_live.py",
+            "swe_materialize.py",
+            "swe_official.py",
+            "swe_runtime.py",
+            "swe_verified.py",
+        }
         for source_root in (
             self.project_root / "src/autobugfix/eval/benchmarks",
             self.project_root / "harnesses/swebench/scripts",
@@ -345,7 +351,14 @@ class SWERuntime:
             if not source_root.is_dir():
                 return "unavailable"
             for path in sorted(source_root.rglob("*")):
-                if path.is_file() and "__pycache__" not in path.parts:
+                if (
+                    path.is_file()
+                    and "__pycache__" not in path.parts
+                    and (
+                        source_root.name == "scripts"
+                        or path.name in evaluator_modules
+                    )
+                ):
                     source_entries.append(
                         {
                             "path": path.relative_to(self.project_root).as_posix(),
@@ -358,14 +371,9 @@ class SWERuntime:
                 "swebench_commit": self.config.swebench_commit,
                 "swebench_tree": self.config.swebench_tree,
                 "harness_lock_sha256": digest_file(self.harness_lock),
-                "root_lock_sha256": digest_file(root_lock),
-                "codex_sdk_version": codex_distribution.version,
-                "codex_sdk_record_sha256": hashlib.sha256(
-                    codex_record.encode("utf-8")
-                ).hexdigest(),
                 "python_version": sys.version,
                 "python_executable_sha256": digest_file(Path(sys.executable)),
-                "trusted_adapter_source": source_entries,
+                "official_adapter_source": source_entries,
                 "host_system": platform.system(),
                 "host_machine": platform.machine(),
                 "live_commit": self.config.live_commit,
@@ -379,6 +387,81 @@ class SWERuntime:
                     if self._docker_authority is not None
                     else None
                 ),
+            }
+        )
+
+    @property
+    def runtime_id(self) -> str:
+        """Backward-compatible evaluator identity used by official SWE adapters."""
+        return self.evaluator_runtime_id
+
+    @staticmethod
+    def _distribution_identity(package: str) -> dict[str, str]:
+        try:
+            distribution = importlib.metadata.distribution(package)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise SWERuntimeError(f"required Codex distribution is missing: {package}") from exc
+        record = distribution.read_text("RECORD") or ""
+        return {
+            "package": package,
+            "version": distribution.version,
+            "record_sha256": hashlib.sha256(record.encode("utf-8")).hexdigest(),
+        }
+
+    def subject_runtime_identity(
+        self,
+        treatment: SWESubjectTreatmentRuntime,
+    ) -> dict[str, Any]:
+        """Observe and bind the runtime that will execute the exact subject."""
+        root_lock = self.project_root / "uv.lock"
+        if not root_lock.is_file():
+            raise SWERuntimeError("subject Codex runtime has no root uv.lock")
+        sdk = self._distribution_identity(treatment.sdk_package)
+        cli = self._distribution_identity(treatment.cli_package)
+        expected = {
+            "sdk_package": treatment.sdk_package,
+            "sdk_version": treatment.sdk_version,
+            "cli_package": treatment.cli_package,
+            "cli_version": treatment.cli_version,
+        }
+        observed = {
+            "sdk_package": sdk["package"],
+            "sdk_version": sdk["version"],
+            "cli_package": cli["package"],
+            "cli_version": cli["version"],
+        }
+        if observed != expected:
+            raise SWERuntimeError(
+                "installed Codex runtime differs from SWE treatment: "
+                + ", ".join(
+                    key for key in expected if expected[key] != observed[key]
+                )
+            )
+        source_paths = (
+            self.project_root / "src/autobugfix/eval/benchmarks/subject_broker.py",
+            self.project_root / "src/autobugfix/eval/benchmarks/swe_codex.py",
+            self.project_root / "src/autobugfix/eval/benchmarks/swe_submission.py",
+            self.project_root / "harnesses/swebench/scripts/run_subject.py",
+        )
+        if any(not path.is_file() or path.is_symlink() for path in source_paths):
+            raise SWERuntimeError("subject Codex runtime source is incomplete")
+        return record_with_digest(
+            {
+                "schema": "autobugfix-swe-subject-runtime-v1",
+                "treatment_contract_digest": treatment.contract_digest,
+                "treatment": treatment.to_dict(),
+                "sdk": sdk,
+                "cli": cli,
+                "root_lock_sha256": digest_file(root_lock),
+                "python_version": sys.version,
+                "python_executable_sha256": digest_file(Path(sys.executable)),
+                "source": [
+                    {
+                        "path": path.relative_to(self.project_root).as_posix(),
+                        "sha256": digest_file(path),
+                    }
+                    for path in source_paths
+                ],
             }
         )
 

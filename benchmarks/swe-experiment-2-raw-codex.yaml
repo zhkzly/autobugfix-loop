@@ -1,13 +1,14 @@
 schema_version: 1
 treatment_id: swe-raw-codex-sdk-one-turn
-source_protocol_digest: a2f8e4d30a1b9d542b802367fd7c25cd6ecd0f5d2fbf7d3dc00855d36b66bd40
+source_protocol_digest: f430c7dcedf8b14c67d6db931c3955cac572932419b56661ba12951776371096
 benchmark: swebench_verified
 experiment_role: optimization
 expected_case_count: 10
 runner_project: baselines/raw_codex_sdk
 model: gpt-5.4-mini
-sdk_version: 0.1.0b3
-reasoning_effort: medium
+sdk_version: 0.144.4
+cli_version: 0.144.4
+reasoning_effort: low
 service_tier: null
 approval_mode: deny_all
 sandbox: workspace-write

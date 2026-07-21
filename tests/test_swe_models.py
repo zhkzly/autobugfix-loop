@@ -50,7 +50,12 @@ def test_experiment_protocol_pins_h0_upstreams_and_split() -> None:
     assert protocol.holdout_excluded_instances == (
         "formbricks__formbricks-6413",
     )
+    assert protocol.codex_runtime.reasoning_effort == "low"
+    assert protocol.codex_runtime.sdk_version == "0.144.4"
+    assert protocol.codex_runtime.cli_version == "0.144.4"
     assert len(protocol.protocol_digest) == 64
+    assert len(protocol.qualification_contract_digest) == 64
+    assert len(protocol.subject_runtime_contract_digest) == 64
 
 
 def test_experiment_protocol_requires_explicit_holdout_exposure_ledger() -> None:
@@ -71,6 +76,25 @@ def test_experiment_protocol_rejects_upstream_drift() -> None:
 
     with pytest.raises(BenchmarkContractError, match="upstream identity drift"):
         SWEExperimentProtocol.from_dict(protocol)
+
+
+def test_qualification_contract_excludes_subject_treatment() -> None:
+    baseline = SWEExperimentProtocol.from_yaml(
+        ROOT / "benchmarks/swe-experiment-2.yaml"
+    )
+    changed = baseline.to_dict()
+    changed["codex_runtime"]["reasoning_effort"] = "medium"  # type: ignore[index]
+    changed_protocol = SWEExperimentProtocol.from_dict(changed)
+
+    assert changed_protocol.protocol_digest != baseline.protocol_digest
+    assert (
+        changed_protocol.subject_runtime_contract_digest
+        != baseline.subject_runtime_contract_digest
+    )
+    assert (
+        changed_protocol.qualification_contract_digest
+        == baseline.qualification_contract_digest
+    )
 
 
 def test_visible_case_rejects_private_oracle_fields() -> None:

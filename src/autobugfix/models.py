@@ -209,7 +209,8 @@ class EvalGuardConfig:
 class RawCodexBaselineConfig:
     runner_project: Path = Path("baselines/raw_codex_sdk")
     runtime_root: Path = Path(".autobugfix/raw-codex-baseline")
-    sdk_version: str = "0.1.0b3"
+    sdk_version: str = "0.144.4"
+    cli_version: str = "0.144.4"
     model: str = "gpt-5.4-mini"
     reasoning_effort: str = "medium"
     service_tier: str | None = None

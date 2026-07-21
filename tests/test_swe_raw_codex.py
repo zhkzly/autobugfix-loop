@@ -148,7 +148,10 @@ def treatment() -> SWERawTreatmentProtocol:
 
 def runner_metadata(tmp_path: Path) -> RunnerMetadata:
     return RunnerMetadata(
-        sdk_version="0.1.0b3",
+        sdk_version="0.144.4",
+        cli_version="0.144.4",
+        sdk_record_digest="a" * 64,
+        cli_record_digest="b" * 64,
         prompt_template_digest=treatment().prompt_template_digest,
         source_digest="1" * 64,
         package_digest="2" * 64,
@@ -196,6 +199,8 @@ class FakeRawSandbox:
                     "case_digest": case["record_digest"],
                     "sdk_package": "openai-codex",
                     "sdk_version": kwargs["runner_metadata"].sdk_version,
+                    "cli_package": "openai-codex-cli-bin",
+                    "cli_version": kwargs["runner_metadata"].cli_version,
                     "model": kwargs["model"],
                     "reasoning_effort": kwargs["reasoning_effort"],
                     "service_tier": kwargs["service_tier"],
@@ -277,8 +282,11 @@ def test_swe_raw_treatment_is_bound_to_shared_protocol() -> None:
     source = SWEExperimentProtocol.from_yaml(SOURCE_PROTOCOL)
     raw = treatment()
     assert raw.source_protocol_digest == source.protocol_digest
-    assert raw.model == source.model == "gpt-5.4-mini"
-    assert raw.timeout_seconds == source.timeout_seconds == 900
+    assert raw.model == source.codex_runtime.model == "gpt-5.4-mini"
+    assert raw.sdk_version == source.codex_runtime.sdk_version == "0.144.4"
+    assert raw.cli_version == source.codex_runtime.cli_version == "0.144.4"
+    assert raw.reasoning_effort == source.codex_runtime.reasoning_effort == "low"
+    assert raw.timeout_seconds == source.codex_runtime.timeout_seconds == 900
     assert raw.turns_per_case == 1
     assert raw.expected_case_count == 10
     assert raw.approval_mode == "deny_all"
@@ -289,6 +297,8 @@ def test_swe_raw_treatment_is_bound_to_shared_protocol() -> None:
         replace(raw, source_protocol_digest="not-a-digest")
     with pytest.raises(BenchmarkContractError, match="deny approvals"):
         replace(raw, network_access=True)
+    with pytest.raises(BenchmarkContractError, match="reasoning effort must be low"):
+        replace(raw, reasoning_effort="medium")
 
 
 def test_prepared_swe_raw_manifest_round_trip_requires_ten_cases() -> None:
@@ -318,6 +328,7 @@ def test_prepared_swe_raw_manifest_round_trip_requires_ten_cases() -> None:
         runner_source_digest="d" * 64,
         runner_install_digest="e" * 64,
         runner_lock_digest="f" * 64,
+        runner_runtime_digest="0" * 64,
         config_digest="1" * 64,
         cases=cases,
         prepared_at=utc_now(),
