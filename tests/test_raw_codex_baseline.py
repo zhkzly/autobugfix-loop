@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -487,6 +488,76 @@ def test_raw_process_restores_only_resolver_file_after_masking_run(
     ]
     assert "--dir" in argv
     assert str(destination.parent) in argv
+
+
+def test_raw_runner_preflight_rejects_hosts_without_nested_tool_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "control"
+    sandbox = RawCodexProcessSandbox(
+        project,
+        RawCodexBaselineConfig(
+            runner_project=project / "baselines/raw_codex_sdk",
+            runtime_root=project / ".autobugfix/raw-codex-baseline",
+        ),
+        host_home=tmp_path / "home",
+    )
+    monkeypatch.setattr(
+        "autobugfix.eval.baselines.isolation.shutil.which",
+        lambda name: "/usr/bin/bwrap" if name == "bwrap" else None,
+    )
+    observed: list[list[str]] = []
+
+    def reject(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed.append(argv)
+        assert kwargs["timeout"] == 15
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stderr="bwrap: No permissions to create a new namespace",
+        )
+
+    monkeypatch.setattr("autobugfix.eval.baselines.isolation.subprocess.run", reject)
+
+    with pytest.raises(
+        RawCodexIsolationError,
+        match="cannot create a nested Bubblewrap namespace",
+    ):
+        sandbox.assert_nested_tool_sandbox()
+
+    assert observed == [
+        [
+            "/usr/bin/bwrap",
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--tmpfs",
+            "/tmp",
+            "--tmpfs",
+            "/run",
+            "--",
+            "/usr/bin/bwrap",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--unshare-user",
+            "--",
+            "/bin/true",
+        ]
+    ]
 
 
 def test_raw_worker_scrubs_auth_before_recursive_cleanup_failure(

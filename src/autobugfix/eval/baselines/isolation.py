@@ -263,6 +263,59 @@ class RawCodexProcessSandbox:
             raise RawCodexIsolationError("uv executable was not found")
         return executable
 
+    def assert_nested_tool_sandbox(self) -> None:
+        """Fail before a model call when Codex cannot start its tool sandbox."""
+        inner = [
+            self.bwrap,
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--unshare-user",
+            "--",
+            "/bin/true",
+        ]
+        outer = [
+            self.bwrap,
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--tmpfs",
+            "/tmp",
+            "--tmpfs",
+            "/run",
+            "--",
+            *inner,
+        ]
+        result = subprocess.run(
+            outer,
+            cwd=self.project_root,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise RawCodexIsolationError(
+                "Raw Codex tool sandbox cannot create a nested Bubblewrap "
+                f"namespace{': ' + detail if detail else ''}"
+            )
+
     def ensure_runner_environment(self) -> RunnerMetadata:
         if not (self.runner_project / "pyproject.toml").is_file():
             raise RawCodexIsolationError(
@@ -313,6 +366,7 @@ class RawCodexProcessSandbox:
                     "cannot create locked Raw Codex runner environment: "
                     + (command.stderr.strip() or command.stdout.strip())
                 )
+        self.assert_nested_tool_sandbox()
         metadata = subprocess.run(
             [str(executable), "metadata"],
             cwd=self.runner_project,
