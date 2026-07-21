@@ -436,6 +436,49 @@ def test_official_scorer_process_hides_host_authority_roots(
     )
 
 
+def test_official_scorer_reuses_runtime_already_mounted_from_cache(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project, _ = make_service_project(tmp_path)
+    service = EvalBenchmarkService(project)
+    runtime = SWERuntime(project, service.config.eval.benchmarks)
+    cache_python = (
+        runtime.cache_root
+        / "client-home/.local/share/uv/python"
+    )
+    resolved_runtime = cache_python / "cpython-3.13.14-linux-x86_64-gnu"
+    (resolved_runtime / "bin").mkdir(parents=True)
+    (resolved_runtime / "bin/python3.13").write_text("", encoding="utf-8")
+    compatibility_runtime = cache_python / "cpython-3.13-linux-x86_64-gnu"
+    compatibility_runtime.symlink_to(resolved_runtime, target_is_directory=True)
+    harness_python = project / "harnesses/swebench/.venv/bin/python"
+    harness_python.parent.mkdir(parents=True)
+    harness_python.symlink_to(compatibility_runtime / "bin/python3.13")
+    official_root = project / ".autobugfix/official-case"
+    official_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_runtime.shutil.which",
+        lambda name: "/usr/bin/bwrap" if name == "bwrap" else None,
+    )
+
+    argv = runtime.isolated_official_argv(
+        ["python", "-m", "swebench.harness.run_evaluation"],
+        cwd=official_root,
+        writable_roots=(official_root,),
+    )
+
+    assert any(
+        argv[index : index + 3]
+        == ["--ro-bind", str(runtime.cache_root), str(runtime.cache_root)]
+        for index in range(len(argv) - 2)
+    )
+    assert not any(
+        argv[index : index + 3]
+        == ["--ro-bind", str(resolved_runtime), str(compatibility_runtime)]
+        for index in range(len(argv) - 2)
+    )
+
+
 def test_guard_metric_subject_is_derived_from_case_reports() -> None:
     subject = "a" * 40
     assert (

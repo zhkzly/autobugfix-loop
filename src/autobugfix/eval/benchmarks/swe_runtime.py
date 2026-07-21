@@ -598,7 +598,13 @@ class SWERuntime:
                 raw_target = harness_python.parent / raw_target
             destination_runtime = raw_target.parent.parent
             source_runtime = harness_python.resolve(strict=True).parent.parent
-            mounts.append((source_runtime, destination_runtime, True))
+            # The locked harness virtualenv can point at a uv-managed runtime
+            # under the already read-only benchmark cache.  Binding that
+            # runtime again onto the virtualenv's compatibility symlink makes
+            # Bubblewrap reject the mount target.  The cache bind already
+            # exposes the resolved runtime, so no extra mount is needed.
+            if not source_runtime.is_relative_to(self.cache_root):
+                mounts.append((source_runtime, destination_runtime, True))
         if self._docker_authority is not None:
             mounts.append(
                 (
