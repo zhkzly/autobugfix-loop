@@ -445,6 +445,7 @@ layers:
       - tests/test_controller.py
       - tests/test_gradio_app.py
       - tests/test_prompts.py
+      - tests/__init__.py
       - .codex/hooks/operator-governance.py
       - .codex/hooks.json
       - tests/helpers.py
