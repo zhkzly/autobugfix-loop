@@ -541,8 +541,16 @@ class SWERuntime:
         cwd: Path,
         writable_roots: tuple[Path, ...],
         readable_roots: tuple[Path, ...] = (),
+        allow_network: bool = False,
     ) -> list[str]:
-        """Run pinned external scorer code without host credential visibility."""
+        """Run pinned external scorer code without host credential visibility.
+
+        The default is network isolation.  SWE-bench's upstream official scorer
+        sometimes resolves a public requirements file at a pinned repository
+        commit while constructing its test specification.  The trusted Eval
+        adapter may opt into that public dependency access only after an
+        Execution submission has been frozen.
+        """
 
         bwrap = shutil.which("bwrap")
         if not bwrap:
@@ -621,7 +629,7 @@ class SWERuntime:
             "--unshare-pid",
             "--unshare-ipc",
             "--unshare-uts",
-            "--unshare-net",
+            *([] if allow_network else ["--unshare-net"]),
             "--ro-bind",
             "/",
             "/",

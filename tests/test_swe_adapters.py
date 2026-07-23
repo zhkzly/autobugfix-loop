@@ -129,6 +129,7 @@ class OfficialRuntime:
         )
         self.benchmark_config = SimpleNamespace(command_timeout_seconds=30)
         self.live_checkout = root / "live"
+        self.official_network_access: list[bool] = []
         self.snapshot_path = root / "verified.jsonl"
         self.snapshot_path.write_text("{}\n", encoding="utf-8")
 
@@ -161,10 +162,12 @@ class OfficialRuntime:
         cwd: Path,
         writable_roots: tuple[Path, ...],
         readable_roots: tuple[Path, ...] = (),
+        allow_network: bool = False,
     ) -> list[str]:
         assert cwd in writable_roots
         for path in readable_roots:
             assert path.is_file()
+        self.official_network_access.append(allow_network)
         return argv
 
 
@@ -328,6 +331,7 @@ def test_verified_official_empty_patch_is_valid_unresolved(
 
     assert result.resolved is False
     assert result.harness_error == ""
+    assert runner.runtime.official_network_access == [True]
     assert result.report_path == "missing"
 
 

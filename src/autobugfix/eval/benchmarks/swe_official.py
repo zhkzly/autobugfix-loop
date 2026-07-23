@@ -318,6 +318,11 @@ class SWEOfficialRunner:
             cwd=cwd,
             writable_roots=(official_root, client_state),
             readable_roots=(prediction_path,) if prediction_path is not None else (),
+            # Upstream SWE-bench resolves public requirements at pinned commits
+            # while constructing some test specifications.  This is the only
+            # caller that retains network access, and it runs after submission
+            # freeze in the Eval authority plane.
+            allow_network=True,
         )
         command = run_command(
             argv,

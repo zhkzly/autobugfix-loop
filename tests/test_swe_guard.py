@@ -436,6 +436,54 @@ def test_official_scorer_process_hides_host_authority_roots(
     )
 
 
+def test_official_scorer_public_network_does_not_reopen_authority_roots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project, _ = make_service_project(tmp_path)
+    service = EvalBenchmarkService(project)
+    runtime = SWERuntime(project, service.config.eval.benchmarks)
+    runtime.command_env()
+    official_root = project / ".autobugfix/official-case"
+    official_root.mkdir(parents=True)
+    (project / ".autobugfix-memory").mkdir()
+    (project / ".codex").mkdir()
+    prediction = official_root.parent / "prediction.jsonl"
+    prediction.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_runtime.shutil.which",
+        lambda name: "/usr/bin/bwrap" if name == "bwrap" else None,
+    )
+
+    argv = runtime.isolated_official_argv(
+        ["python", "-m", "swebench.harness.run_evaluation"],
+        cwd=official_root,
+        writable_roots=(official_root,),
+        readable_roots=(prediction,),
+        allow_network=True,
+    )
+
+    assert "--unshare-net" not in argv
+    assert any(
+        argv[index : index + 2]
+        == ["--tmpfs", str(project / ".autobugfix-memory")]
+        for index in range(len(argv) - 1)
+    )
+    assert any(
+        argv[index : index + 2] == ["--tmpfs", str(project / ".codex")]
+        for index in range(len(argv) - 1)
+    )
+    assert any(
+        argv[index : index + 3]
+        == ["--ro-bind", str(project.resolve()), str(project.resolve())]
+        for index in range(len(argv) - 2)
+    )
+    assert any(
+        argv[index : index + 3]
+        == ["--ro-bind", str(prediction), str(prediction)]
+        for index in range(len(argv) - 2)
+    )
+
+
 def test_official_scorer_reuses_runtime_already_mounted_from_cache(
     tmp_path: Path, monkeypatch
 ) -> None:
