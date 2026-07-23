@@ -72,9 +72,13 @@ Exit gates:
 
 ```text
 uv run --cache-dir /tmp/uv-cache pytest -q tests/test_swe_raw_codex.py
-uv run --project baselines/raw_codex_sdk --cache-dir /tmp/uv-cache pytest -q
+uv run --directory baselines/raw_codex_sdk --cache-dir /tmp/uv-cache pytest -q
 uv run --cache-dir /tmp/uv-cache python scripts/validate_role_skills.py
 ```
+
+`--project` selects the Raw uv environment but does not change pytest's
+working directory. Use `--directory baselines/raw_codex_sdk` so pytest reads
+the standalone project's `pyproject.toml` and collects only its six tests.
 
 ## Phase 5: Full Static And Integration Verification
 
