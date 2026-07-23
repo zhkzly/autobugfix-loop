@@ -37,16 +37,18 @@ ownership.
    masks control/credential roots and record the bridge argv.
 6. **Acceptance**: host-level root tests completed with `330 passed`; focused
    SWE tests completed with `43 passed`; standalone Raw tests completed with
-   `6 passed`; compileall, `git diff --check`, and role-skill validation passed.
+   `6 passed`; compileall, `git diff --check`, role-skill validation, and the
+   real SWE doctor passed.
    A documented Raw test command was corrected to use `uv run --directory` so
    pytest collects the standalone project rather than the repository root.
 
 ## Findings
 
 - No source correctness or loop-boundary defect remains from this change.
-- The local SWE doctor currently fails only its free-disk guard: `/tmp` has
-  9.4 GiB free while the configured minimum is 10 GiB. This is a valid
-  preflight block, not a reason to lower the threshold or alter results.
+- The initial SWE doctor correctly blocked at 9.4 GiB free rather than
+  weakening its 10 GiB threshold. A clean, registered historical worktree was
+  duplicated and verified on persistent storage before its `/tmp` copy was
+  removed; the rerun passed with 10.58 GiB free.
 - The H0 development calibration was a valid unresolved repair and the Raw
   calibration was a valid resolved repair on the same public case. This is one
   development observation, not a formal result or authorization to change H0,
@@ -54,6 +56,6 @@ ownership.
 
 ## Required Follow-up
 
-Restore the configured `/tmp` capacity without deleting a registered Git
-worktree or real benchmark artifacts, rerun SWE doctor, then continue only
-with the sealed formal Experiment 2 preparation flow.
+Continue only with the sealed formal Experiment 2 preparation flow. The two
+development calibration outcomes remain observational and must not become
+feedback for H0 or Raw.
