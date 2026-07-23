@@ -297,6 +297,10 @@ class SWERuntime:
                 "formal SWE-bench Verified runs require local-build images; "
                 "verified_namespace must be null"
             )
+        if config.verified_build_network_mode not in {"default", "host"}:
+            raise SWERuntimeError(
+                "verified_build_network_mode must be one of: default, host"
+            )
         if config.scorer_timeout_seconds < 1:
             raise SWERuntimeError("SWE scorer timeout must be positive")
         if config.cpu_limit <= 0 or config.pids_limit < 1:
@@ -382,6 +386,7 @@ class SWERuntime:
                 "live_launch_tree": self.config.live_launch_tree,
                 "platform": self.config.platform,
                 "verified_image_mode": "local-build",
+                "verified_build_network_mode": self.config.verified_build_network_mode,
                 "docker_authority_digest": (
                     self._docker_authority.authority_digest
                     if self._docker_authority is not None

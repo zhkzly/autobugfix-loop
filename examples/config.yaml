@@ -57,6 +57,15 @@ eval:
       memory_limit: 8g
       cpu_limit: 4.0
       pids_limit: 1024
+    swe:
+      # Verified runs always build the official image locally.  Remote image
+      # namespaces are intentionally rejected for formal scoring.
+      verified_namespace: null
+      # Docker's normal bridge is the portable default.  "host" is an
+      # explicit local workaround for Docker bridge TLS failures while the
+      # official image is built; it changes the evaluator runtime identity and
+      # requires fresh qualification receipts.
+      verified_build_network_mode: default
 operator:
   experiment_lines:
     root: .autobugfix/operator-line-worktrees

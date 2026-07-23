@@ -46,6 +46,18 @@ def test_swe_runtime_rejects_mutable_verified_image_namespace(tmp_path: Path) ->
         SWERuntime(project_root, config.eval.benchmarks)
 
 
+def test_swe_runtime_rejects_unknown_verified_build_network_mode(tmp_path: Path) -> None:
+    project_root, _ = make_service_project(tmp_path)
+    config = load_config(project_root)
+    config.eval.benchmarks.swe = replace(
+        config.eval.benchmarks.swe,
+        verified_build_network_mode="unbounded",
+    )
+
+    with pytest.raises(SWERuntimeError, match="verified_build_network_mode"):
+        SWERuntime(project_root, config.eval.benchmarks)
+
+
 def test_evaluator_runtime_id_binds_official_harness_lock_only(tmp_path: Path) -> None:
     project_root, _ = make_service_project(tmp_path)
     harness = project_root / "harnesses/swebench"
@@ -70,6 +82,29 @@ def test_evaluator_runtime_id_binds_official_harness_lock_only(tmp_path: Path) -
 
     assert first.startswith("sha256:")
     assert runtime.runtime_id != first
+
+
+def test_evaluator_runtime_id_binds_verified_build_network_mode(tmp_path: Path) -> None:
+    project_root, _ = make_service_project(tmp_path)
+    harness = project_root / "harnesses/swebench"
+    harness.mkdir(parents=True)
+    (harness / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    (harness / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    (harness / "scripts").mkdir()
+    (harness / "scripts/run_official.py").write_text("VERSION = 1\n", encoding="utf-8")
+    adapter_source = project_root / "src/autobugfix/eval/benchmarks"
+    adapter_source.mkdir(parents=True)
+    (adapter_source / "swe_runtime.py").write_text("VERSION = 1\n", encoding="utf-8")
+    config = load_config(project_root)
+
+    default = SWERuntime(project_root, config.eval.benchmarks)
+    config.eval.benchmarks.swe = replace(
+        config.eval.benchmarks.swe,
+        verified_build_network_mode="host",
+    )
+    host = SWERuntime(project_root, config.eval.benchmarks)
+
+    assert default.evaluator_runtime_id != host.evaluator_runtime_id
 
 
 def test_dataset_snapshot_reader_rejects_digest_drift(tmp_path: Path) -> None:

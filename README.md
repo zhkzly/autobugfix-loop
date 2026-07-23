@@ -196,6 +196,28 @@ models, sandboxes, approval modes, timeouts, and skill paths under
 `codex.roles.<role>`. Repo profiles may override allowed roles under
 `repos.<repo-id>.codex.roles`.
 
+### SWE Eval Docker Build Network
+
+SWE-bench Verified uses the upstream official scorer to construct each local
+Docker image and evaluate a patch. Its image-build network is owned by Eval,
+not by the Execution Writer. Configure it under `eval.benchmarks.swe`:
+
+```yaml
+eval:
+  benchmarks:
+    swe:
+      verified_namespace: null
+      verified_build_network_mode: default
+```
+
+`default` keeps Docker's normal build network. `host` is an explicit,
+host-local workaround when that bridge cannot fetch a public upstream during
+official image construction. It grants host networking only to the official
+Docker build, never to the Codex Writer, Raw Codex model process, or Execution
+verifier. The selected mode is included in the official evaluator runtime
+identity and command artifacts, so changing it requires fresh SWE
+qualification before a result is comparable.
+
 ## Basic Flow
 
 ```bash

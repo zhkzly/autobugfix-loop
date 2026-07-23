@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import subprocess
 from pathlib import Path
@@ -125,6 +126,7 @@ class OfficialRuntime:
         self.config = SimpleNamespace(
             harness_project=root / "harness",
             verified_namespace="official",
+            verified_build_network_mode="default",
             scorer_timeout_seconds=30,
         )
         self.benchmark_config = SimpleNamespace(command_timeout_seconds=30)
@@ -213,6 +215,90 @@ def command_evidence(artifact_dir: Path, argv: list[str]) -> CommandEvidence:
         stderr_sha256=digest_file(stderr),
         environment_digest="f" * 64,
     )
+
+
+def test_verified_command_binds_explicit_build_network_mode(tmp_path: Path) -> None:
+    runtime = OfficialRuntime(tmp_path)
+    runtime.config.verified_build_network_mode = "host"
+    runner = SWEOfficialRunner(cast(Any, runtime), "swebench_verified")
+
+    argv = runner._verified_command(
+        instance("c" * 40),
+        "gold",
+        "network-mode",
+        tmp_path / "official",
+    )
+
+    assert str(runtime.config.harness_project / "scripts/run_official.py") in argv
+    assert argv[argv.index("--build-network-mode") + 1] == "host"
+    assert argv[argv.index("--module") + 1] == "swebench.harness.run_evaluation"
+
+
+def test_official_bridge_pins_host_network_mode() -> None:
+    bridge_path = (
+        Path(__file__).parents[1]
+        / "harnesses/swebench/scripts/run_official.py"
+    )
+    spec = importlib.util.spec_from_file_location("test_official_bridge", bridge_path)
+    assert spec is not None and spec.loader is not None
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+    calls: list[dict[str, Any]] = []
+
+    class FakeAPIClient:
+        def build(self, *args: Any, **kwargs: Any) -> str:
+            del args
+            calls.append(kwargs)
+            return "built"
+
+    bridge.install_build_network_mode(FakeAPIClient, "host")
+
+    assert FakeAPIClient().build(path="context") == "built"
+    assert calls == [{"path": "context", "network_mode": "host"}]
+    with pytest.raises(RuntimeError, match="conflicting"):
+        FakeAPIClient().build(path="context", network_mode="none")
+
+
+def test_official_bridge_dispatches_only_the_pinned_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_path = (
+        Path(__file__).parents[1]
+        / "harnesses/swebench/scripts/run_official.py"
+    )
+    spec = importlib.util.spec_from_file_location("test_official_bridge_main", bridge_path)
+    assert spec is not None and spec.loader is not None
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        bridge.runpy,
+        "run_module",
+        lambda module, *, run_name: calls.append((module, run_name)),
+    )
+    monkeypatch.setattr(bridge.sys, "argv", ["pytest"])
+
+    assert bridge.main(
+        [
+            "--build-network-mode",
+            "default",
+            "--module",
+            "swebench.harness.run_evaluation",
+            "--dataset_name",
+            "verified.jsonl",
+            "--instance_ids",
+            "sympy__sympy-12481",
+        ]
+    ) == 0
+
+    assert calls == [("swebench.harness.run_evaluation", "__main__")]
+    assert bridge.sys.argv == [
+        "swebench.harness.run_evaluation",
+        "--dataset_name",
+        "verified.jsonl",
+        "--instance_ids",
+        "sympy__sympy-12481",
+    ]
 
 
 def test_materializer_fetches_sanitized_dataset_base_below_synthetic_image_head(

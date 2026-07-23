@@ -203,6 +203,7 @@ class SWERawCodexBaselineService:
                     "verified_dataset": swe.verified_dataset,
                     "verified_dataset_revision": swe.verified_dataset_revision,
                     "verified_namespace": swe.verified_namespace,
+                    "verified_build_network_mode": swe.verified_build_network_mode,
                     "scorer_timeout_seconds": swe.scorer_timeout_seconds,
                     "memory_limit": swe.memory_limit,
                     "cpu_limit": swe.cpu_limit,
