@@ -511,6 +511,11 @@ class SWESubjectBroker:
         worker = control / "run_subject.py"
         main = target / "main"
         remote = target / "remote.git"
+        worktree_metadata = main / ".git" / "worktrees"
+        if not worktree_metadata.is_dir() or worktree_metadata.is_symlink():
+            raise SWESubjectBrokerError(
+                "exact subject target has no safe Git worktree metadata directory"
+            )
         docker_authority_masks = [
             path
             for path in (
@@ -588,6 +593,11 @@ class SWESubjectBroker:
             "--ro-bind",
             str(main),
             str(main),
+            # The Execution service creates an independent verifier worktree.
+            # Reopen only its Git bookkeeping child after making main read-only.
+            "--bind",
+            str(worktree_metadata),
+            str(worktree_metadata),
             "--ro-bind",
             str(remote),
             str(remote),

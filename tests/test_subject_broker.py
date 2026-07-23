@@ -439,6 +439,7 @@ def test_subject_outer_sandbox_masks_git_credentials_network_and_main_write(
         control / ".agents",
         control / ".autobugfix-memory",
         target / "main/.git",
+        target / "main/.git/worktrees",
         target / "remote.git",
         capability,
     ):
@@ -459,6 +460,7 @@ def test_subject_outer_sandbox_masks_git_credentials_network_and_main_write(
                 "subject_git_head": str(subject / ".git/HEAD"),
                 "main_source": str(target / "main/source.py"),
                 "main_git_probe": str(target / "main/.git/probe"),
+                "main_worktrees_probe": str(target / "main/.git/worktrees/probe"),
                 "remote_head": str(target / "remote.git/HEAD"),
                 "socket": str(socket_path),
                 "project_canary": str(project_canary),
@@ -496,6 +498,7 @@ Path(args.result).write_text(json.dumps({
     "subject_git_visible": Path(data["subject_git_head"]).exists(),
     "main_writable": writable(data["main_source"]),
     "main_git_writable": writable(data["main_git_probe"]),
+    "main_worktrees_writable": writable(data["main_worktrees_probe"]),
     "remote_writable": writable(data["remote_head"]),
     "openai_key_visible": "OPENAI_API_KEY" in os.environ,
     "codex_key_visible": "CODEX_API_KEY" in os.environ,
@@ -546,6 +549,7 @@ Path(args.result).write_text(json.dumps({
         "subject_git_visible": False,
         "main_writable": False,
         "main_git_writable": False,
+        "main_worktrees_writable": True,
         "remote_writable": False,
         "openai_key_visible": False,
         "codex_key_visible": False,
@@ -554,6 +558,105 @@ Path(args.result).write_text(json.dumps({
         "wsl_docker_visible": False,
         "capability_reply": "ok",
     }
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="Bubblewrap is unavailable")
+def test_subject_outer_sandbox_allows_only_verifier_worktree_bookkeeping(
+    tmp_path: Path,
+) -> None:
+    project, _ = make_service_project(tmp_path)
+    subject_broker = broker(project)
+    subject = tmp_path / "subject"
+    control = tmp_path / "isolated-control"
+    target = tmp_path / "isolated-target"
+    capability = tmp_path / "capability"
+    main, _, _ = make_repo(target, "main")
+    for path in (
+        subject / "src",
+        subject / ".git",
+        control / ".autobugfix",
+        control / ".agents",
+        control / ".autobugfix-memory",
+        target / "remote.git",
+        capability,
+        main / ".git/worktrees",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    (control / ".autobugfix/config.yaml").write_text("{}\n", encoding="utf-8")
+    request_path = control / "subject-request.json"
+    result_path = control / "subject-result.json"
+    verification_worktree = control / "verification-worktree"
+    request_path.write_text(
+        json.dumps(
+            {
+                "main": str(main),
+                "destination": str(verification_worktree),
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker = control / "run_subject.py"
+    worker.write_text(
+        """
+import argparse
+import json
+import subprocess
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--request", required=True)
+parser.add_argument("--result", required=True)
+args = parser.parse_args()
+data = json.loads(Path(args.request).read_text())
+added = subprocess.run(
+    ["git", "-C", data["main"], "worktree", "add", "--detach", data["destination"], "HEAD"],
+    text=True,
+    capture_output=True,
+)
+removed = subprocess.run(
+    ["git", "-C", data["main"], "worktree", "remove", "--force", data["destination"]],
+    text=True,
+    capture_output=True,
+) if added.returncode == 0 else None
+try:
+    (Path(data["main"]) / ".git/probe").write_text("forbidden" + chr(10))
+    main_git_writable = True
+except OSError:
+    main_git_writable = False
+Path(args.result).write_text(json.dumps({
+    "added": added.returncode,
+    "removed": None if removed is None else removed.returncode,
+    "main_git_writable": main_git_writable,
+}), encoding="utf-8")
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        subject_broker._sandbox_argv(
+            subject,
+            control,
+            target,
+            request_path,
+            result_path,
+            capability,
+        ),
+        cwd=project,
+        env=subject_broker._subject_environment(),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(result_path.read_text(encoding="utf-8")) == {
+        "added": 0,
+        "removed": 0,
+        "main_git_writable": False,
+    }
+    assert not verification_worktree.exists()
+    assert git(main, "status", "--porcelain=v1", "--untracked-files=all") == ""
 
 
 def test_subject_broker_copies_only_active_reviewed_memory(tmp_path: Path) -> None:
