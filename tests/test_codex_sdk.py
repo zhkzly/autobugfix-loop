@@ -601,6 +601,60 @@ def test_worker_bubblewrap_enforces_read_only_cwd_and_hides_home(tmp_path):
     assert not (worktree / "forbidden.txt").exists()
 
 
+def test_worker_bubblewrap_restores_only_resolver_file_after_masking_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    control = tmp_path / "control"
+    worktree = control / "worktree"
+    worktree.mkdir(parents=True)
+    write_project_config(control)
+    source = tmp_path / "host-resolver.conf"
+    source.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+    destination = Path("/run/systemd/resolve/stub-resolv.conf")
+    request = CodexRequest(
+        role="writer",
+        prompt="inspect resolver isolation",
+        cwd=worktree,
+        control_root=control,
+        sandbox="workspace-write",
+        model="m",
+        timeout_seconds=10,
+        developer_instructions="dev",
+        raw_log_path=control / "logs/raw.jsonl",
+        stderr_log_path=control / "logs/stderr.log",
+        approval_mode="auto_review",
+    )
+    monkeypatch.setattr(
+        "autobugfix.codex_sdk.shutil.which",
+        lambda name: "/usr/bin/bwrap" if name == "bwrap" else None,
+    )
+    monkeypatch.setattr(
+        "autobugfix.codex_sdk._resolver_mount_after_reset",
+        lambda: (source, destination),
+    )
+
+    argv = CodexSDKBackend().worker_launch_argv(request, [sys.executable, "-V"])
+    resolver_mount = ["--ro-bind", str(source), str(destination)]
+    resolver_index = next(
+        index
+        for index in range(len(argv) - 2)
+        if argv[index : index + 3] == resolver_mount
+    )
+    run_tmpfs_index = next(
+        index
+        for index in range(len(argv) - 1)
+        if argv[index : index + 2] == ["--tmpfs", "/run"]
+    )
+
+    assert run_tmpfs_index < resolver_index
+    assert ["--ro-bind", "/run", "/run"] not in [
+        argv[index : index + 3] for index in range(len(argv) - 2)
+    ]
+    assert ["--dir", str(destination.parent)] in [
+        argv[index : index + 2] for index in range(len(argv) - 1)
+    ]
+
+
 def test_worker_bubblewrap_keeps_all_task_logs_outside_role_sandbox(
     tmp_path,
 ):

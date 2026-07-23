@@ -31,6 +31,29 @@ class CodexSDKError(RuntimeError):
 _PREPARED_CODEX_HOME = "AUTOBUGFIX_PREPARED_CODEX_HOME"
 
 
+def _resolver_mount_after_reset(
+    *,
+    resolver_path: Path = Path("/etc/resolv.conf"),
+    reset_root: Path = Path("/run"),
+) -> tuple[Path, Path] | None:
+    """Return the exact resolver file to restore after a runtime-root reset.
+
+    Some Linux hosts expose ``/etc/resolv.conf`` as a symlink into ``/run``.
+    A sandbox may reset that runtime root to hide host authority state while
+    still needing DNS for the Codex control connection. Only the resolved
+    regular resolver file is eligible for a read-only remount.
+    """
+
+    try:
+        source = resolver_path.resolve(strict=True)
+        root = reset_root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not source.is_file() or not source.is_relative_to(root):
+        return None
+    return source, source
+
+
 def _make_descriptor_private(descriptor: int) -> None:
     fchmod = getattr(os, "fchmod", None)
     if callable(fchmod):
@@ -424,6 +447,11 @@ class CodexSDKBackend(CodexBackend):
         post_control_hidden = [
             path for path in remaining_hidden if path not in final_hidden
         ]
+        resolver_mount = (
+            _resolver_mount_after_reset()
+            if Path("/run") in post_control_hidden
+            else None
+        )
         early_mount_roots = {
             mount_root
             for mount_root in mount_roots
@@ -509,6 +537,18 @@ class CodexSDKBackend(CodexBackend):
             key=lambda item: (len(item.parts), str(item)),
         ):
             argv.extend(("--tmpfs", str(path)))
+        if resolver_mount is not None:
+            source, destination = resolver_mount
+            # /etc/resolv.conf can resolve under /run. Restore only its target
+            # after hiding /run so the SDK control client retains DNS without
+            # exposing the rest of host runtime state to the role process.
+            argv.extend(
+                self._bwrap_destination_dirs(
+                    [destination.parent],
+                    tuple(dict.fromkeys(post_control_hidden)),
+                )
+            )
+            argv.extend(("--ro-bind", str(source), str(destination)))
         argv.extend(
             self._bwrap_destination_dirs(
                 late_mount_roots,
