@@ -126,6 +126,28 @@ operator:
     enabled: true
     trusted_ref: origin/main
     default_profile: real-e2e
+    # Profiles default to baseline_mode: strict. A benchmark H0 that is
+    # expected to fail target tests must explicitly use baseline_mode: measure.
+  experiment_lines:
+    root: .autobugfix/operator-line-worktrees
+    checkpoint_root: .autobugfix/operator-checkpoints
+    active_release_root: .autobugfix/operator-active-experiments
+    branch_template: experiment/{study_id}-main
+    remote: origin
+    update_timeout_seconds: 300
+  budgets:
+    allowed_waves: [3, 8, 16]
+    allowed_primary_models: [gpt-5.4-mini]
+    max_calls_by_wave:
+      3: 30
+      8: 80
+      16: 160
+    default_case_concurrency: 1
+    max_case_concurrency: 1
+    default_max_writer_attempts: 2
+    default_max_operator_revisions: 3
+    default_wall_time_seconds: 7200
+    allow_model_fallback: false
   promotion:
     release_root: .autobugfix/releases
     active_release_link: .autobugfix/active-release
@@ -188,11 +210,46 @@ uv run autobugfix eval run --dataset problem_prompts.jsonl --out .autobugfix-eva
 
 ## Operator Governance
 
-Governance V3 makes the Operator a bounded supervisor, not a state owner.
+Governance V4 makes the Operator a bounded supervisor, not a state owner.
 Request phases are only `REQUESTED`, `ACTIVE`, `VERIFIED`, and `CLOSED`;
 Writer attempts, checks, gates, scope revisions, experiments, and promotions
 are independent records in the control checkout's SQLite store. Candidate
 worktrees contain no authoritative state.
+
+The default directory name `.autobugfix/operator-v3` is retained so existing
+authority databases migrate in place; its SQLite `user_version` is 4 and the
+loaded machine constitution is V4. The directory name is not the active policy
+version.
+
+The control checkout is the authority plane: the service owns SQLite records,
+Git experiment refs, budget usage, deterministic check output, integration
+receipts, and checkpoint pointers. Candidate worktrees are data planes, but
+the SDK Writer never receives the real candidate as its working directory.
+`writer-start` creates a service-owned staging directory, captures a
+content-addressed clean-candidate baseline, validates the staging diff against
+scope/layer rules, and only then copies approved files into the candidate. The
+service records each application with before/after Git and content digests.
+Candidate files cannot authorize scope, claim a check passed, consume or expand
+a budget, advance an experiment line, activate a release, or cause a later
+WriterRun to adopt an unrecorded patch. A Git hook is only an accident guard;
+service checks and trusted-base CI remain the merge authority.
+
+Fast and full deterministic verification each run in a disposable detached
+Git worktree created from the trusted candidate snapshot. For an uncommitted
+fast-check patch, the service materializes the already-audited changed files
+into that copy and verifies its digest before running commands. Test caches and
+other verifier side effects therefore cannot alter the candidate or invalidate
+the Writer-admission chain.
+
+Experiment profiles have two baseline semantics. `baseline_mode: strict`
+(the default) requires every baseline command to pass and is appropriate for
+runtime/regression health checks. `baseline_mode: measure` is only for an H0
+benchmark state where a target bug is intentionally failing: it records the
+observed nonzero test result into the immutable receipt so a candidate can be
+compared against it. Measure mode does not ignore operational failures: timeout,
+sandbox/broker/harness exit, and missing raw stdout/stderr logs still reject the
+baseline. Candidate experiments and full verification continue to require their
+configured commands to pass.
 
 ```bash
 uv run autobugfix operator guide
@@ -235,11 +292,124 @@ uv run autobugfix operator audit --request-id op-eval-diff
 uv run autobugfix operator promotion-prepare --request-id op-eval-diff
 ```
 
+Named experiment lines wrap that same Request lifecycle with frozen study,
+budget, integration, and checkpoint authority. The manifest, success contract,
+and metric receipts are Guard-owned, never candidate-authored score claims.
+For a service-owned benchmark profile, the trusted harness derives H0 from the
+committed `capture_baseline` receipt and derives the candidate metric from the
+matching completed shadow experiment after integration. Those service APIs take
+no caller-supplied numeric metrics. Official external adapters such as
+SWE-bench instead import an independently produced Guard receipt.
+
+Study creation copies the visible Optimization manifest and active Memory into
+separate read-only H0 snapshots under the trusted checkpoint root. Operator
+projections expose their digests but not snapshot paths. Sealed Holdout
+manifests, gold data, and case-level results must remain outside all Operator
+roots under an external Guard; only an aggregate metric receipt may enter the
+Operator store after final evaluation.
+
+A service-derived study contract is explicit and machine-checkable:
+
+```yaml
+observed_guard:
+  require_all_commands_pass: true
+  metrics:
+    pass_rate: {operator: eq, value: 1.0}
+    artifact_completeness: {operator: eq, value: 1.0}
+  protected_ref: main
+```
+
+The Guard verifies every measured command, evaluates the declared numeric
+rules, and proves `protected_ref` still resolves to the frozen H0 SHA before it
+can create a candidate metric. This path has no generic Operator CLI because
+the service/benchmark harness, rather than an Operator role, owns measurement.
+
+```bash
+uv run autobugfix operator study create \
+  --study-id defects4j-bugfix \
+  --cohort-id autobugfix-h0-v1 \
+  --purpose "Improve the bugfix harness" \
+  --manifest .autobugfix/benchmark-manifests/defects4j-bugfix.yaml \
+  --success-contract .autobugfix/benchmark-manifests/bugfix-success.yaml \
+  --base-ref <frozen-h0-sha> \
+  --model gpt-5.4-mini \
+  --target-checkpoint H_bug
+
+uv run autobugfix operator line init \
+  --study-id defects4j-bugfix \
+  --metric-receipt-id <registered-h0-metric-id>
+
+uv run autobugfix operator budget request \
+  --study-id defects4j-bugfix --wave 3 \
+  --case <case-1> --case <case-2> --case <case-3> \
+  --reason "Run the first Optimization wave"
+
+uv run autobugfix operator budget approve \
+  --budget-request-id <budget-request-id> \
+  --approver <human-identity> \
+  --confirm-request-digest <displayed-request-digest>
+
+uv run autobugfix operator request \
+  --triage-id <triage-id> \
+  --summary "repair diagnosed harness layer" \
+  --primary-layer execution \
+  --planned-path src/autobugfix/runner.py \
+  --risk medium \
+  --validation-profile full \
+  --experiment-line defects4j-bugfix \
+  --budget-grant <grant-id>
+
+# Run start/Writer/check/commit/experiment/full-check as above.
+uv run autobugfix operator integrate \
+  --request-id <verified-request-id> --grant-id <grant-id>
+
+uv run autobugfix operator checkpoint create \
+  --line-id defects4j-bugfix --name H_bug \
+  --metric-receipt-id <registered-study-metric-id>
+
+uv run autobugfix operator line rollback \
+  --line-id defects4j-bugfix --checkpoint-id defects4j-bugfix-H0 \
+  --reason "validated regression against the frozen baseline"
+```
+
+`budget approve` refuses non-interactive stdin and asks the human to type
+`APPROVE <request-digest>` exactly. Supplying an `--approver` label from an
+agent or CI process is not sufficient authority.
+
+The trusted benchmark adapter registers external H0 and candidate receipts
+through the Guard service API. For service-owned profiles, the same service
+derives receipts only from committed baseline and matching shadow-experiment
+evidence. Both paths copy content into content-addressed storage and write
+immutable `StudyMetricRecord` rows. There is intentionally no generic Operator
+CLI for importing a score claim. Line/checkpoint commands accept only those
+registered IDs and recheck the artifact hash and every frozen binding.
+
+Budget waves are exactly `3 -> 8 -> 16`, run at case concurrency one, and use
+only `gpt-5.4-mini`; quota, expiry, or model mismatch stops before the SDK call.
+Integration reruns trusted policy and validation in a separate worktree and
+advances the Git ref plus SQLite generation with compare-and-swap. Rollback
+creates a new commit whose tree equals the selected checkpoint; it never resets
+or force-pushes history.
+
+The planned studies use the same `--cohort-id` and therefore must match frozen
+H0 Git, harness, policy, role-config, config, model, skills, and Memory digests.
+They otherwise share only frozen `H0`. Experiment 1 uses 10 visible
+Defects4J Optimization cases and 6 sealed unseen-repository Holdout cases to
+produce `H_bug`. Experiment 2 independently uses 10 SWE-bench Verified
+Optimization cases and 6 SWE-bench-Live sealed unseen-repository Holdout cases
+to produce `H_general`. Experiment 2 must not inherit `H_bug` code, skills,
+Memory, artifacts, results, or case-level feedback. These are experiment
+protocols, not changes to the four-loop project constitution.
+
 `operator advance` performs one legal scheduler action at a time: start,
 Writer, fast check, candidate commit, matching experiment, full check, or stop
 for intervention.
 Writer has only the filtered read surface `autobugfix writer
 task|context|scope|feedback|check-result`; it cannot call Operator mutations.
+For Operator self-improvement, the Writer's writable CWD is an ephemeral
+staging directory outside the candidate worktree. Direct candidate edits or
+commits fail the service's baseline-to-Writer application-chain checks and
+cannot reach trusted commit/full verification.
 
 Cross-layer scope expansion is versioned. An earlier approval does not grant a
 new revision:
@@ -282,6 +452,22 @@ uv run autobugfix operator approve-signed op-architecture \
   --payload /tmp/op-architecture.json \
   --signature /tmp/op-architecture.json.sig \
   --allowed-signers ~/.config/autobugfix/allowed_signers
+```
+
+For the final merge authorization, generate a patch-bound payload after the
+candidate patch has passed trusted verification. Patch binding is the default
+because the authorization bundle itself is committed after signing; binding
+that payload to the pre-bundle HEAD would make it stale. Use `--merge-binding
+head` only for an external approval that will not be embedded by a later
+candidate commit.
+
+```bash
+uv run autobugfix operator approval-payload op-architecture \
+  --stage merge \
+  --merge-binding patch \
+  --approver human-owner \
+  --reason "authorize the verified candidate patch" \
+  --out /tmp/op-architecture-merge.json
 ```
 
 Promotion is separate from verification:
@@ -362,12 +548,16 @@ uv run python scripts/real_repository_acceptance.py --model gpt-5.4-mini
 ```
 
 The script clones the public upstream commit, commits a reproducible regression
-to a local fixture remote, verifies that Execution changes only its task
-worktree, compiles accepted evidence into a pending Memory proposal, and runs a
-second isolated Eval execution whose generated patch must pass an independent
-real pytest oracle. The committed oracle diff is retained only for diagnosis;
-an equivalent alternative implementation is valid. The configured target main
-checkout must remain byte-for-byte clean.
+to a local fixture remote, and freezes the first Execution result while no
+developer oracle exists in the target repository. It then creates the oracle
+in an independent Git object database, compiles accepted evidence into a
+pending Memory proposal, and runs a second isolated Eval execution whose
+generated patch must pass the real pytest oracle. The local Git adapter builds
+the Eval Execution remote from the frozen base commit only: neither the oracle
+ref nor its commit object is present there. The oracle diff is retained by the
+Eval host only for post-run diagnosis; an equivalent alternative
+implementation is valid. The configured target main checkout must remain
+byte-for-byte clean.
 Official SWE-bench Verified scoring still requires its container harness; a
 local run without that harness must not be labeled as a benchmark result.
 

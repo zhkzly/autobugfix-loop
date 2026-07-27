@@ -7,8 +7,10 @@ import pytest
 import yaml
 
 from autobugfix.dataset import build_raw_dataset
+from autobugfix.eval.adapters import LocalGitAdapter
 from autobugfix.eval.models import EvalCase, EvalCaseError
 from autobugfix.eval.runner import EvalRunnerError, run_eval
+from autobugfix.git_utils import run_git
 from autobugfix.service import AutobugfixService
 from tests.helpers import FakeCodexBackend, make_service_project, run
 
@@ -64,6 +66,29 @@ def test_dataset_and_eval_call_execution_loop_in_isolated_repo(tmp_path):
     assert "evaluator:" in resolved_roles
     assert "autobugfix-writer" in resolved_roles
     assert isolated_config["codex"]["role_runtime"]["codex_bin"] == str(Path("/usr/bin/true").resolve())
+
+
+def test_local_git_adapter_hides_reference_commit_from_execution_remote(tmp_path):
+    _, row, _ = prepare_historical_case(tmp_path)
+    case = EvalCase.from_row(row)
+    adapter = LocalGitAdapter()
+
+    materialized = adapter.materialize(case, tmp_path / "materialized")
+
+    refs = run_git(
+        materialized.remote,
+        ["for-each-ref", "--format=%(refname)"],
+        check=True,
+    ).stdout.splitlines()
+    assert refs == ["refs/heads/main"]
+    assert case.final_commit
+    leaked = run_git(
+        materialized.remote,
+        ["cat-file", "-e", f"{case.final_commit}^{{commit}}"],
+        check=False,
+    )
+    assert leaked.returncode != 0
+    assert adapter.oracle_diff(case)
 
 
 def test_eval_accepts_behaviorally_correct_patch_that_differs_from_oracle(tmp_path):

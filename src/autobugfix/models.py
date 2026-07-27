@@ -197,6 +197,31 @@ class OperatorExperimentConfig:
 
 
 @dataclass(slots=True)
+class OperatorExperimentLineConfig:
+    root: Path = Path(".autobugfix/operator-line-worktrees")
+    checkpoint_root: Path = Path(".autobugfix/operator-checkpoints")
+    active_release_root: Path = Path(".autobugfix/operator-active-experiments")
+    branch_template: str = "experiment/{study_id}-main"
+    remote: str | None = "origin"
+    update_timeout_seconds: int = 300
+
+
+@dataclass(slots=True)
+class OperatorBudgetConfig:
+    allowed_waves: tuple[int, ...] = (3, 8, 16)
+    allowed_primary_models: tuple[str, ...] = ("gpt-5.4-mini",)
+    max_calls_by_wave: dict[int, int] = field(
+        default_factory=lambda: {3: 30, 8: 80, 16: 160}
+    )
+    default_case_concurrency: int = 1
+    max_case_concurrency: int = 1
+    default_max_writer_attempts: int = 2
+    default_max_operator_revisions: int = 3
+    default_wall_time_seconds: int = 7200
+    allow_model_fallback: bool = False
+
+
+@dataclass(slots=True)
 class OperatorPromotionConfig:
     release_root: Path = Path(".autobugfix/releases")
     active_release_link: Path = Path(".autobugfix/active-release")
@@ -214,6 +239,8 @@ class OperatorConfig:
     retry: OperatorRetryConfig = field(default_factory=OperatorRetryConfig)
     verification: OperatorVerificationConfig = field(default_factory=OperatorVerificationConfig)
     experiments: OperatorExperimentConfig = field(default_factory=OperatorExperimentConfig)
+    experiment_lines: OperatorExperimentLineConfig = field(default_factory=OperatorExperimentLineConfig)
+    budgets: OperatorBudgetConfig = field(default_factory=OperatorBudgetConfig)
     promotion: OperatorPromotionConfig = field(default_factory=OperatorPromotionConfig)
 
 

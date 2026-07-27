@@ -4,15 +4,17 @@ import getpass
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import yaml
 
@@ -45,30 +47,49 @@ from autobugfix.operator.metrics import (
     portable_profile_values,
     read_baseline,
     record_baseline,
+    verify_metric_receipt,
+)
+from autobugfix.operator.metering import (
+    CallbackCodexBackend,
+    MeteredCodexBackend,
+    StudyCallContext,
 )
 from autobugfix.operator.models import (
+    BudgetGrantRecord,
+    BudgetRequestRecord,
+    CheckpointRecord,
     CheckRun,
+    ExperimentLineRecord,
     FeedbackPacket,
     GateSnapshot,
+    IntegrationRecord,
     OperatorApproval,
     OperatorRequest,
     OperatorTriage,
     PromotionRecord,
     ScopeRevision,
+    StudyMetricRecord,
+    StudyRecord,
+    UsageEntryRecord,
     WriterRun,
     digest_payload,
     is_expired,
 )
 from autobugfix.operator.policy import (
     PolicyDecision,
+    _match_path,
     collect_candidate_snapshot,
     evaluate_policy,
     layers_for_file,
 )
 from autobugfix.operator.projection import project_request
 from autobugfix.operator.prompts import semantic_verifier_prompt, supervisor_prompt, writer_prompt
-from autobugfix.operator.store import OperatorStore, OperatorStoreError
-from autobugfix.operator.trusted import TrustedPolicy, load_trusted_policy
+from autobugfix.operator.store import OperatorStore, OperatorStoreError, safe_id
+from autobugfix.operator.trusted import (
+    TrustedPolicy,
+    experiment_governance_contract,
+    load_trusted_policy,
+)
 from autobugfix.operator.validator import run_command_specs, run_validation_profiles
 from autobugfix.operator.workspace import create_operator_workspace, recover_operator_workspace
 from autobugfix.role_config import resolve_role
@@ -80,6 +101,89 @@ class OperatorGovernanceError(RuntimeError):
 
 def _default_expiry(hours: int = 24) -> str:
     return (datetime.now(UTC) + timedelta(hours=hours)).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _path_digest(path: Path) -> str:
+    resolved = path.expanduser().resolve()
+    digest = hashlib.sha256()
+    if not resolved.exists():
+        digest.update(b"missing")
+        return digest.hexdigest()
+    if resolved.is_file():
+        digest.update(b"file\0")
+        digest.update(resolved.read_bytes())
+        return digest.hexdigest()
+    digest.update(b"directory\0")
+    for item in sorted(resolved.rglob("*"), key=lambda candidate: candidate.relative_to(resolved).as_posix()):
+        relative = item.relative_to(resolved).as_posix()
+        if item.is_symlink():
+            digest.update(f"symlink\0{relative}\0{os.readlink(item)}\0".encode("utf-8"))
+        elif item.is_file():
+            digest.update(f"file\0{relative}\0".encode("utf-8"))
+            digest.update(item.read_bytes())
+            digest.update(b"\0")
+        elif item.is_dir():
+            digest.update(f"directory\0{relative}\0".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _is_ephemeral_worktree_path(relative: Path) -> bool:
+    """Return whether a path is generated runtime state, not candidate code."""
+
+    parts = relative.parts
+    if not parts:
+        return False
+    top = parts[0]
+    name = parts[-1]
+    if top in {
+        ".git",
+        ".autobugfix",
+        ".autobugfix-evals",
+        ".autobugfix-experiments",
+        ".autobugfix-governance",
+        ".venv",
+    }:
+        return True
+    return (
+        "__pycache__" in parts
+        or ".pytest_cache" in parts
+        or ".mypy_cache" in parts
+        or ".ruff_cache" in parts
+        or name.endswith((".pyc", ".pyo"))
+        or name == ".coverage"
+    )
+
+
+def _worktree_content_digest(
+    path: Path,
+    *,
+    ignored_patterns: Iterable[str] = (),
+    ignored_path: Callable[[Path], bool] | None = None,
+) -> str:
+    resolved = path.expanduser().resolve()
+    digest = hashlib.sha256(b"worktree-content\0")
+    for item in sorted(
+        resolved.rglob("*"),
+        key=lambda candidate: candidate.relative_to(resolved).as_posix(),
+    ):
+        relative = item.relative_to(resolved).as_posix()
+        if relative == ".git" or relative.startswith(".git/"):
+            continue
+        relative_path = Path(relative)
+        if (
+            any(_match_path(pattern, relative) for pattern in ignored_patterns)
+            or (ignored_path is not None and ignored_path(relative_path))
+        ):
+            continue
+        if item.is_symlink():
+            digest.update(f"symlink\0{relative}\0{os.readlink(item)}\0".encode("utf-8"))
+        elif item.is_file():
+            digest.update(f"file\0{relative}\0".encode("utf-8"))
+            digest.update(item.read_bytes())
+            digest.update(b"\0")
+        elif item.is_dir():
+            digest.update(f"directory\0{relative}\0".encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _leased_request(method):
@@ -129,7 +233,14 @@ class OperatorGovernanceService:
         self.trusted_ref = trusted_ref if trusted_ref is not None else operator.experiments.trusted_ref
         self.trusted_file = trusted_file
         self.bootstrap_policy = bootstrap_policy
-        self.allowed_signers = allowed_signers
+        configured_signers = self.project_root / ".github/autobugfix-allowed-signers"
+        self.allowed_signers = (
+            allowed_signers.expanduser().resolve()
+            if allowed_signers is not None
+            else configured_signers.resolve()
+            if configured_signers.is_file()
+            else None
+        )
         self.backend = backend or CodexSDKBackend()
         self.guard = TransitionGuard()
 
@@ -141,10 +252,17 @@ class OperatorGovernanceService:
             bootstrap=self.bootstrap_policy,
         )
 
+    def _experiment_governance(self, policy: TrustedPolicy | None = None) -> dict[str, Any]:
+        contract, _ = experiment_governance_contract((policy or self.policy()).data)
+        return contract
+
     def governance_context(self) -> dict[str, Any]:
         policy = self.policy()
+        experiment_governance, experiment_governance_source = experiment_governance_contract(
+            policy.data
+        )
         return {
-            "schema": "autobugfix-machine-constitution-v3",
+            "schema": f"autobugfix-machine-constitution-v{int(policy.data['version'])}",
             "trusted": policy.trusted,
             "source": policy.source,
             "digest": digest_payload(policy.data),
@@ -154,7 +272,2052 @@ class OperatorGovernanceService:
             "operator_roles": policy.data.get("operator_roles") or {},
             "hook_assignments": policy.data.get("hook_assignments") or {},
             "transition_contract": policy.data.get("transition_contract") or {},
+            "experiment_governance": experiment_governance,
+            "experiment_governance_source": experiment_governance_source,
+            "experiment_governance_digest": digest_payload(experiment_governance),
         }
+
+    def _experiment_role_snapshots(self) -> dict[str, dict[str, Any]]:
+        role_names = (
+            "writer",
+            "evaluator",
+            "eval_judge",
+            "operator_supervisor",
+            "operator_writer",
+            "operator_verifier",
+        )
+        return {
+            name: resolve_role(self.config, name).to_dict(self.project_root)
+            for name in role_names
+        }
+
+    def _experiment_config_digests(
+        self,
+        primary_model: str,
+        *,
+        subject_root: Path | None = None,
+    ) -> dict[str, str]:
+        roles = self._experiment_role_snapshots()
+        source_root = subject_root or self.project_root
+        skill_files = {
+            skill
+            for role in roles.values()
+            for skill in role.get("skill_paths") or []
+        }
+        skill_digests: dict[str, str] = {}
+        for value in sorted(str(item) for item in skill_files):
+            path = Path(value)
+            if not path.is_absolute():
+                path = source_root / path
+            skill_digests[value] = _path_digest(path)
+        config_snapshot = {
+            "roles": roles,
+            "config_implementation_digest": _path_digest(
+                source_root / "src/autobugfix/config.py"
+            ),
+            "experiment_lines": {
+                "branch_template": self.config.operator.experiment_lines.branch_template,
+                "remote": self.config.operator.experiment_lines.remote,
+                "update_timeout_seconds": self.config.operator.experiment_lines.update_timeout_seconds,
+            },
+            "budgets": {
+                "allowed_waves": list(self.config.operator.budgets.allowed_waves),
+                "allowed_primary_models": list(
+                    self.config.operator.budgets.allowed_primary_models
+                ),
+                "max_calls_by_wave": self.config.operator.budgets.max_calls_by_wave,
+                "default_case_concurrency": self.config.operator.budgets.default_case_concurrency,
+                "max_case_concurrency": self.config.operator.budgets.max_case_concurrency,
+                "allow_model_fallback": self.config.operator.budgets.allow_model_fallback,
+            },
+        }
+        return {
+            "role_config_digest": digest_payload({"roles": roles}),
+            "config_digest": digest_payload(config_snapshot),
+            "model_digest": digest_payload({"primary_model": primary_model}),
+            "skills_digest": digest_payload({"skills": skill_digests}),
+        }
+
+    def _experiment_digests_at_subject(
+        self,
+        *,
+        study_id: str,
+        subject_sha: str,
+        primary_model: str,
+    ) -> dict[str, str]:
+        worktree = (
+            self.config.operator.experiment_lines.root
+            / ".study-digests"
+            / f"{study_id}-{self.store.next_id('digest')}"
+        ).resolve()
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            run_git(
+                self.project_root,
+                ["worktree", "add", "--detach", str(worktree), subject_sha],
+            )
+            return self._experiment_config_digests(
+                primary_model,
+                subject_root=worktree,
+            )
+        finally:
+            if worktree.exists():
+                run_git(
+                    self.project_root,
+                    ["worktree", "remove", "--force", str(worktree)],
+                    check=False,
+                )
+            if worktree.exists():
+                shutil.rmtree(worktree)
+                run_git(self.project_root, ["worktree", "prune"], check=False)
+
+    @staticmethod
+    def _remove_release_tree(path: Path) -> None:
+        if not path.exists() and not path.is_symlink():
+            return
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+            return
+        for item in sorted(path.rglob("*"), key=lambda value: len(value.parts), reverse=True):
+            if item.is_symlink():
+                continue
+            item.chmod(0o700 if item.is_dir() else 0o600)
+        path.chmod(0o700)
+        shutil.rmtree(path)
+
+    def _materialize_checkpoint_release(
+        self,
+        *,
+        study_id: str,
+        checkpoint_name: str,
+        subject_sha: str,
+    ) -> Path:
+        release = (
+            self.config.operator.experiment_lines.checkpoint_root
+            / study_id
+            / checkpoint_name
+        ).resolve()
+        if release.exists() or release.is_symlink():
+            raise OperatorGovernanceError(f"checkpoint release already exists: {release}")
+        staging = (
+            self.config.operator.experiment_lines.root
+            / ".checkpoint-staging"
+            / study_id
+            / f"{checkpoint_name}-{self.store.next_id('materialize')}"
+        ).resolve()
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            run_git(
+                self.project_root,
+                ["worktree", "add", "--detach", str(staging), subject_sha],
+            )
+            release.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(staging, release, ignore=shutil.ignore_patterns(".git"))
+        except Exception:
+            self._remove_release_tree(release)
+            raise
+        finally:
+            if staging.exists():
+                run_git(
+                    self.project_root,
+                    ["worktree", "remove", "--force", str(staging)],
+                    check=False,
+                )
+        for item in sorted(release.rglob("*"), key=lambda value: len(value.parts), reverse=True):
+            if not item.is_symlink():
+                item.chmod(0o555 if item.is_dir() else 0o444)
+        release.chmod(0o555)
+        return release
+
+    def _materialize_study_memory_snapshot(
+        self,
+        *,
+        study_id: str,
+        source: Path,
+    ) -> Path:
+        snapshot = (
+            self.config.operator.experiment_lines.checkpoint_root
+            / study_id
+            / "memory-H0"
+        ).resolve()
+        if snapshot.exists() or snapshot.is_symlink():
+            raise OperatorGovernanceError(
+                f"study memory snapshot already exists: {snapshot}"
+            )
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        if source.exists():
+            if not source.is_dir():
+                raise OperatorGovernanceError(
+                    f"study memory root must be a directory: {source}"
+                )
+            shutil.copytree(source, snapshot)
+        else:
+            snapshot.mkdir()
+        for item in sorted(
+            snapshot.rglob("*"),
+            key=lambda value: len(value.parts),
+            reverse=True,
+        ):
+            if not item.is_symlink():
+                item.chmod(0o555 if item.is_dir() else 0o444)
+        snapshot.chmod(0o555)
+        return snapshot
+
+    def _materialize_study_manifest_snapshot(
+        self,
+        *,
+        study_id: str,
+        source: Path,
+    ) -> Path:
+        suffix = source.suffix if source.suffix else ".data"
+        snapshot = (
+            self.config.operator.experiment_lines.checkpoint_root
+            / study_id
+            / f"manifest-H0{suffix}"
+        ).resolve()
+        if snapshot.exists() or snapshot.is_symlink():
+            raise OperatorGovernanceError(
+                f"study manifest snapshot already exists: {snapshot}"
+            )
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        temporary = snapshot.with_name(f".{snapshot.name}.{self.store.next_id('manifest')}.tmp")
+        temporary.write_bytes(source.read_bytes())
+        temporary.replace(snapshot)
+        snapshot.chmod(0o444)
+        return snapshot
+
+    def _activate_experiment_release(self, study_id: str, release: Path) -> Path:
+        active = (
+            self.config.operator.experiment_lines.active_release_root.resolve() / study_id
+        )
+        active.parent.mkdir(parents=True, exist_ok=True)
+        if active.exists() and not active.is_symlink():
+            raise OperatorGovernanceError(
+                f"active experiment release is not a symlink: {active}"
+            )
+        temporary = active.with_name(f".{active.name}.{self.store.next_id('activate')}.tmp")
+        relative_target = os.path.relpath(release, active.parent)
+        temporary.symlink_to(relative_target)
+        temporary.replace(active)
+        return active
+
+    def _validated_study_memory_snapshot(self, study: StudyRecord) -> Path:
+        if not study.memory_snapshot_path:
+            raise OperatorGovernanceError(
+                "study predates required frozen Memory snapshot authority"
+            )
+        snapshot = Path(study.memory_snapshot_path).resolve()
+        expected_root = (
+            self.config.operator.experiment_lines.checkpoint_root
+            / study.study_id
+        ).resolve()
+        try:
+            snapshot.relative_to(expected_root)
+        except ValueError as exc:
+            raise OperatorGovernanceError(
+                "study Memory snapshot escaped the trusted checkpoint root"
+            ) from exc
+        if not snapshot.is_dir():
+            raise OperatorGovernanceError("study Memory snapshot is missing")
+        if _path_digest(snapshot) != study.memory_digest:
+            raise OperatorGovernanceError("study Memory snapshot digest mismatch")
+        return snapshot
+
+    def _validated_study_manifest_snapshot(self, study: StudyRecord) -> Path:
+        if not study.manifest_snapshot_path:
+            raise OperatorGovernanceError(
+                "study predates required frozen benchmark manifest authority"
+            )
+        snapshot = Path(study.manifest_snapshot_path).resolve()
+        expected_root = (
+            self.config.operator.experiment_lines.checkpoint_root
+            / study.study_id
+        ).resolve()
+        try:
+            snapshot.relative_to(expected_root)
+        except ValueError as exc:
+            raise OperatorGovernanceError(
+                "study manifest snapshot escaped the trusted checkpoint root"
+            ) from exc
+        if not snapshot.is_file():
+            raise OperatorGovernanceError("study manifest snapshot is missing")
+        if _path_digest(snapshot) != study.manifest_digest:
+            raise OperatorGovernanceError("study manifest snapshot digest mismatch")
+        return snapshot
+
+    @staticmethod
+    def _study_projection(study: StudyRecord) -> dict[str, Any]:
+        data = study.to_dict()
+        data.pop("memory_snapshot_path", None)
+        data.pop("manifest_snapshot_path", None)
+        return data
+
+    @staticmethod
+    def _metric_projection(metric: StudyMetricRecord) -> dict[str, Any]:
+        data = metric.to_dict()
+        data.pop("artifact_path", None)
+        return data
+
+    @staticmethod
+    def _load_study_metric_receipt(content: bytes) -> dict[str, Any]:
+        try:
+            data = yaml.safe_load(content.decode("utf-8")) or {}
+        except (UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise OperatorGovernanceError("study metric receipt is not valid YAML") from exc
+        if not isinstance(data, dict):
+            raise OperatorGovernanceError("study metric receipt must be a mapping")
+        stored = data.get("receipt_digest")
+        payload = {key: value for key, value in data.items() if key != "receipt_digest"}
+        if not stored or stored != digest_payload(payload):
+            raise OperatorGovernanceError("study metric receipt digest mismatch")
+        metrics = data.get("metrics")
+        if not isinstance(metrics, Mapping) or not metrics:
+            raise OperatorGovernanceError(
+                "study metric receipt requires non-empty aggregate metrics"
+            )
+        if any(
+            not str(key).strip()
+            or isinstance(value, (dict, list, tuple, set))
+            or not isinstance(value, (bool, int, float, type(None)))
+            for key, value in metrics.items()
+        ):
+            raise OperatorGovernanceError(
+                "study metric receipt metrics must be aggregate scalar values"
+            )
+        return data
+
+    @staticmethod
+    def _baseline_metric_receipt(
+        data: Mapping[str, Any],
+        *,
+        study: StudyRecord,
+    ) -> None:
+        allowed = {
+            "schema",
+            "study_id",
+            "line_id",
+            "subject_sha",
+            "manifest_digest",
+            "success_contract_digest",
+            "metrics",
+            "receipt_digest",
+            "guard_run_id",
+            "evidence_digest",
+        }
+        if unexpected := set(data) - allowed:
+            raise OperatorGovernanceError(
+                "H0 metric receipt contains non-aggregate fields: "
+                + ", ".join(sorted(str(item) for item in unexpected))
+            )
+        expected = {
+            "schema": "autobugfix-study-baseline-v1",
+            "study_id": study.study_id,
+            "line_id": study.line_id,
+            "subject_sha": study.base_subject_sha,
+            "manifest_digest": study.manifest_digest,
+            "success_contract_digest": digest_payload(study.success_contract),
+        }
+        for key, value in expected.items():
+            if data.get(key) != value:
+                raise OperatorGovernanceError(
+                    f"H0 metric receipt {key} does not match trusted study"
+                )
+
+    @staticmethod
+    def _study_metric_receipt(
+        data: Mapping[str, Any],
+        *,
+        study: StudyRecord,
+        line: ExperimentLineRecord,
+        grant: BudgetGrantRecord,
+    ) -> dict[str, Any]:
+        allowed = {
+            "schema",
+            "study_id",
+            "line_id",
+            "subject_sha",
+            "wave",
+            "manifest_digest",
+            "success_contract_digest",
+            "budget_grant_id",
+            "budget_digest",
+            "success_contract_passed",
+            "metrics",
+            "receipt_digest",
+            "guard_run_id",
+            "evidence_digest",
+        }
+        if unexpected := set(data) - allowed:
+            raise OperatorGovernanceError(
+                "study metric receipt contains non-aggregate fields: "
+                + ", ".join(sorted(str(item) for item in unexpected))
+            )
+        expected = {
+            "schema": "autobugfix-study-metric-v1",
+            "study_id": study.study_id,
+            "line_id": line.line_id,
+            "subject_sha": line.head_sha,
+            "wave": grant.wave,
+            "manifest_digest": study.manifest_digest,
+            "success_contract_digest": digest_payload(study.success_contract),
+            "budget_grant_id": grant.grant_id,
+            "budget_digest": grant.grant_digest,
+        }
+        for key, value in expected.items():
+            if data.get(key) != value:
+                raise OperatorGovernanceError(
+                    f"study metric receipt {key} does not match trusted state"
+                )
+        if data.get("success_contract_passed") is not True:
+            raise OperatorGovernanceError("study metric receipt did not pass the success contract")
+        return dict(data)
+
+    def _register_study_metric_content(
+        self,
+        study_id: str,
+        *,
+        kind: str,
+        content: bytes,
+        filename: str,
+    ) -> StudyMetricRecord:
+        """Validate and persist a metric receipt after its producer has been fixed."""
+
+        if kind not in {"BASELINE", "CANDIDATE"}:
+            raise OperatorGovernanceError("study metric kind must be BASELINE or CANDIDATE")
+        study = self.store.read_study(study_id)
+        self._validated_study_memory_snapshot(study)
+        self._validated_study_manifest_snapshot(study)
+        data = self._load_study_metric_receipt(content)
+        line_id = study.line_id
+        subject_sha = study.base_subject_sha
+        grant_id: str | None = None
+        budget_digest: str | None = None
+        wave: int | None = None
+        success_contract_passed: bool | None = None
+        if kind == "BASELINE":
+            if self.store.read_experiment_lines(study.study_id):
+                raise OperatorGovernanceError("H0 metric must be registered before line initialization")
+            self._baseline_metric_receipt(data, study=study)
+        else:
+            line = self.store.read_experiment_line(study.line_id)
+            integrations = self.store.read_integrations(line.line_id)
+            if (
+                not integrations
+                or integrations[-1].kind != "CANDIDATE"
+                or integrations[-1].result_head_sha != line.head_sha
+            ):
+                raise OperatorGovernanceError(
+                    "candidate metric requires the current candidate integration"
+                )
+            grants = self.store.read_budget_grants(study.study_id)
+            if not grants:
+                raise OperatorGovernanceError("candidate metric requires a study budget grant")
+            grant = grants[-1]
+            self._study_metric_receipt(data, study=study, line=line, grant=grant)
+            line_id = line.line_id
+            subject_sha = line.head_sha
+            grant_id = grant.grant_id
+            budget_digest = grant.grant_digest
+            wave = grant.wave
+            success_contract_passed = True
+        artifact_path, artifact_sha = self.store.write_study_metric_artifact(
+            content,
+            filename=filename,
+        )
+        metric = StudyMetricRecord(
+            metric_id=self.store.next_id("study-metric"),
+            study_id=study.study_id,
+            line_id=line_id,
+            kind=kind,
+            subject_sha=subject_sha,
+            manifest_digest=study.manifest_digest,
+            success_contract_digest=digest_payload(study.success_contract),
+            producer="benchmark_guard",
+            artifact_path=str(artifact_path),
+            artifact_sha256=artifact_sha,
+            receipt_digest=str(data["receipt_digest"]),
+            budget_grant_id=grant_id,
+            budget_digest=budget_digest,
+            wave=wave,
+            success_contract_passed=success_contract_passed,
+        )
+        self.store.write_study_metric(metric)
+        return metric
+
+    def register_guard_metric_receipt(
+        self,
+        study_id: str,
+        *,
+        receipt_path: Path | str,
+        kind: str,
+    ) -> StudyMetricRecord:
+        """Import a receipt from an independently operated benchmark Guard.
+
+        This deliberately remains outside the Operator CLI because an official
+        scorer or CI Guard, not an Operator role, is its trust boundary. Local
+        Operator acceptance must use the receipt-derived methods below rather
+        than construct numeric metrics in a script.
+        """
+
+        source = Path(receipt_path)
+        if not source.is_absolute():
+            source = self.project_root / source
+        source = source.resolve()
+        if not source.is_file():
+            raise OperatorGovernanceError(f"study metric receipt does not exist: {source}")
+        return self._register_study_metric_content(
+            study_id,
+            kind=kind,
+            content=source.read_bytes(),
+            filename=source.name,
+        )
+
+    def _evaluate_observed_study_contract(
+        self,
+        study: StudyRecord,
+        receipt: Mapping[str, Any],
+    ) -> None:
+        """Evaluate the deterministic contract used by service-derived study metrics."""
+
+        contract = study.success_contract
+        guard = contract.get("observed_guard") if isinstance(contract, Mapping) else None
+        if not isinstance(guard, Mapping) or set(contract) != {"observed_guard"}:
+            raise OperatorGovernanceError(
+                "service-derived study metric requires an observed_guard-only success contract"
+            )
+        allowed = {"require_all_commands_pass", "metrics", "protected_ref"}
+        unknown = sorted(str(item) for item in set(guard) - allowed)
+        if unknown:
+            raise OperatorGovernanceError(
+                "observed_guard has unsupported fields: " + ", ".join(unknown)
+            )
+        if guard.get("require_all_commands_pass") is not True:
+            raise OperatorGovernanceError(
+                "observed_guard must require all observed commands to pass"
+            )
+        commands = receipt.get("commands")
+        if not isinstance(commands, list) or not commands or not all(
+            isinstance(item, Mapping) and item.get("passed") is True for item in commands
+        ):
+            raise OperatorGovernanceError(
+                "observed study contract failed because not every measured command passed"
+            )
+        metric_rules = guard.get("metrics")
+        metrics = receipt.get("metrics")
+        if not isinstance(metric_rules, Mapping) or not metric_rules:
+            raise OperatorGovernanceError("observed_guard requires non-empty metric rules")
+        if not isinstance(metrics, Mapping):
+            raise OperatorGovernanceError("observed metric receipt has no aggregate metrics")
+        failures: list[str] = []
+        for name, raw_rule in metric_rules.items():
+            if not isinstance(raw_rule, Mapping):
+                failures.append(f"metric rule {name} must be a mapping")
+                continue
+            operator = raw_rule.get("operator")
+            expected = raw_rule.get("value")
+            actual = metrics.get(str(name))
+            if operator not in {"eq", "gte", "lte"}:
+                failures.append(f"metric rule {name} has invalid operator")
+                continue
+            if isinstance(expected, bool) or not isinstance(expected, (int, float)):
+                failures.append(f"metric rule {name} has non-numeric value")
+                continue
+            if isinstance(actual, bool) or not isinstance(actual, (int, float)):
+                failures.append(f"observed metric {name} is missing or non-numeric")
+                continue
+            actual_value = float(actual)
+            expected_value = float(expected)
+            passed = (
+                abs(actual_value - expected_value) <= 1e-12
+                if operator == "eq"
+                else actual_value >= expected_value
+                if operator == "gte"
+                else actual_value <= expected_value
+            )
+            if not passed:
+                failures.append(
+                    f"observed metric {name}={actual_value} does not satisfy "
+                    f"{operator} {expected_value}"
+                )
+        protected_ref = guard.get("protected_ref")
+        if not isinstance(protected_ref, str) or not protected_ref.strip():
+            failures.append("observed_guard requires a protected_ref")
+        else:
+            try:
+                observed_ref = rev_parse(self.project_root, protected_ref)
+            except GitError as exc:
+                failures.append(f"cannot resolve observed_guard protected_ref: {exc}")
+            else:
+                if observed_ref != study.base_subject_sha:
+                    failures.append(
+                        "observed_guard protected_ref changed from the frozen H0 subject"
+                    )
+        if failures:
+            raise OperatorGovernanceError("observed study contract failed: " + "; ".join(failures))
+
+    def record_observed_baseline_metric(
+        self,
+        study_id: str,
+        *,
+        baseline_name: str,
+    ) -> StudyMetricRecord:
+        """Derive H0 metric authority from a committed service-captured baseline."""
+
+        study = self.store.read_study(study_id)
+        baseline = baseline_for_request(
+            self.project_root,
+            baseline_name,
+            study.base_subject_sha,
+        )
+        evidence_digest = digest_payload(
+            {
+                "source": "committed_service_baseline",
+                "baseline_name": baseline_name,
+                "baseline_digest": baseline["baseline_digest"],
+                "source_receipt_digest": baseline["receipt_digest"],
+                "profile_digest": baseline["profile_digest"],
+                "input_digest": baseline["input_digest"],
+                "commands": baseline["commands"],
+            }
+        )
+        payload: dict[str, Any] = {
+            "schema": "autobugfix-study-baseline-v1",
+            "study_id": study.study_id,
+            "line_id": study.line_id,
+            "subject_sha": study.base_subject_sha,
+            "manifest_digest": study.manifest_digest,
+            "success_contract_digest": digest_payload(study.success_contract),
+            "metrics": dict(baseline["metrics"]),
+            "guard_run_id": f"baseline:{baseline['baseline_digest']}",
+            "evidence_digest": evidence_digest,
+        }
+        receipt = {**payload, "receipt_digest": digest_payload(payload)}
+        return self._register_study_metric_content(
+            study_id,
+            kind="BASELINE",
+            content=yaml.safe_dump(receipt, sort_keys=False).encode("utf-8"),
+            filename=f"{safe_id(study_id)}-observed-baseline.yaml",
+        )
+
+    def record_observed_candidate_metric(self, study_id: str) -> StudyMetricRecord:
+        """Derive candidate metric authority from the integrated request's experiment receipt."""
+
+        study = self.store.read_study(study_id)
+        line = self.store.read_experiment_line(study.line_id)
+        integrations = self.store.read_integrations(line.line_id)
+        if (
+            not integrations
+            or integrations[-1].kind != "CANDIDATE"
+            or integrations[-1].result_head_sha != line.head_sha
+            or not integrations[-1].request_id
+        ):
+            raise OperatorGovernanceError(
+                "observed candidate metric requires the current candidate integration"
+            )
+        integration = integrations[-1]
+        matches = [
+            item
+            for item in self.store.read_experiments(str(integration.request_id))
+            if item.get("status") == "COMPLETED"
+            and item.get("passed") is True
+            and item.get("candidate_head_sha") == integration.candidate_head_sha
+            and item.get("patch_digest") == integration.patch_digest
+            and isinstance(item.get("metric_receipt"), Mapping)
+        ]
+        if not matches:
+            raise OperatorGovernanceError(
+                "observed candidate metric requires a completed matching experiment receipt"
+            )
+        experiment = matches[-1]
+        observed = verify_metric_receipt(dict(experiment["metric_receipt"]))
+        if (
+            observed.get("head_sha") != integration.candidate_head_sha
+            or observed.get("patch_digest") != integration.patch_digest
+        ):
+            raise OperatorGovernanceError(
+                "observed candidate experiment receipt is not bound to the integrated patch"
+            )
+        self._evaluate_observed_study_contract(study, observed)
+        grants = self.store.read_budget_grants(study.study_id)
+        if not grants:
+            raise OperatorGovernanceError("observed candidate metric requires a study budget grant")
+        grant = grants[-1]
+        evidence_digest = digest_payload(
+            {
+                "source": "trusted_candidate_experiment",
+                "experiment_id": experiment["experiment_id"],
+                "source_receipt_digest": observed["receipt_digest"],
+                "profile_digest": observed["profile_digest"],
+                "input_digest": observed["input_digest"],
+                "commands": observed["commands"],
+                "integration_id": integration.integration_id,
+            }
+        )
+        payload: dict[str, Any] = {
+            "schema": "autobugfix-study-metric-v1",
+            "study_id": study.study_id,
+            "line_id": line.line_id,
+            "subject_sha": line.head_sha,
+            "wave": grant.wave,
+            "manifest_digest": study.manifest_digest,
+            "success_contract_digest": digest_payload(study.success_contract),
+            "budget_grant_id": grant.grant_id,
+            "budget_digest": grant.grant_digest,
+            "success_contract_passed": True,
+            "metrics": dict(observed["metrics"]),
+            "guard_run_id": f"experiment:{experiment['experiment_id']}",
+            "evidence_digest": evidence_digest,
+        }
+        receipt = {**payload, "receipt_digest": digest_payload(payload)}
+        return self._register_study_metric_content(
+            study_id,
+            kind="CANDIDATE",
+            content=yaml.safe_dump(receipt, sort_keys=False).encode("utf-8"),
+            filename=f"{safe_id(study_id)}-observed-candidate.yaml",
+        )
+
+    def _registered_metric_receipt(
+        self,
+        metric_id: str,
+    ) -> tuple[StudyMetricRecord, dict[str, Any]]:
+        metric = self.store.read_study_metric(metric_id)
+        data = self._load_study_metric_receipt(Path(metric.artifact_path).read_bytes())
+        if data.get("receipt_digest") != metric.receipt_digest:
+            raise OperatorGovernanceError(
+                "registered study metric record disagrees with its artifact"
+            )
+        return metric, data
+
+    def create_study(
+        self,
+        *,
+        study_id: str,
+        purpose: str,
+        manifest_path: Path | str,
+        success_contract: Mapping[str, Any],
+        base_ref: str | None = None,
+        harness_ref: str | None = None,
+        line_id: str | None = None,
+        cohort_id: str | None = None,
+        primary_model: str = "gpt-5.4-mini",
+        target_checkpoint_name: str = "H_bug",
+        memory_root: Path | str | None = None,
+    ) -> StudyRecord:
+        policy = self.policy()
+        if not policy.trusted:
+            raise OperatorGovernanceError("a study requires a trusted machine constitution")
+        experiment_governance = self._experiment_governance(policy)
+        trusted_models = {
+            str(item)
+            for item in (experiment_governance.get("budgets") or {}).get(
+                "allowed_primary_models", ()
+            )
+        }
+        if primary_model not in self.config.operator.budgets.allowed_primary_models:
+            raise OperatorGovernanceError(
+                f"study model is outside configured allowlist: {primary_model}"
+            )
+        if trusted_models and primary_model not in trusted_models:
+            raise OperatorGovernanceError(
+                f"study model is outside trusted constitution allowlist: {primary_model}"
+            )
+        manifest = Path(manifest_path)
+        if not manifest.is_absolute():
+            manifest = self.project_root / manifest
+        manifest = manifest.resolve()
+        if not manifest.is_file():
+            raise OperatorGovernanceError(f"study manifest does not exist: {manifest}")
+        resolved_base_ref = base_ref or self.trusted_ref or "HEAD"
+        base_sha = rev_parse(self.project_root, resolved_base_ref)
+        harness_sha = rev_parse(self.project_root, harness_ref or resolved_base_ref)
+        if harness_sha != base_sha:
+            raise OperatorGovernanceError(
+                "experiment line H0 and harness ref must resolve to the same commit"
+            )
+        identifier = safe_id(str(study_id))
+        designated_line = safe_id(str(line_id or identifier))
+        cohort = safe_id(str(cohort_id or identifier))
+        digests = self._experiment_digests_at_subject(
+            study_id=identifier,
+            subject_sha=base_sha,
+            primary_model=primary_model,
+        )
+        memory = Path(memory_root) if memory_root is not None else (
+            self.project_root / ".autobugfix-memory/active"
+        )
+        if not memory.is_absolute():
+            memory = self.project_root / memory
+        memory = memory.resolve()
+        memory_snapshot: Path | None = None
+        manifest_snapshot: Path | None = None
+        try:
+            memory_snapshot = self._materialize_study_memory_snapshot(
+                study_id=identifier,
+                source=memory,
+            )
+            manifest_snapshot = self._materialize_study_manifest_snapshot(
+                study_id=identifier,
+                source=manifest,
+            )
+            memory_digest = _path_digest(memory_snapshot)
+            cohort_fields = {
+                "base_subject_sha": base_sha,
+                "harness_sha": harness_sha,
+                "policy_digest": digest_payload(policy.data),
+                "primary_model": primary_model,
+                "role_config_digest": digests["role_config_digest"],
+                "base_config_digest": digests["config_digest"],
+                "base_model_digest": digests["model_digest"],
+                "base_skills_digest": digests["skills_digest"],
+                "memory_digest": memory_digest,
+            }
+            for existing in self.store.read_studies():
+                if existing.cohort_id != cohort:
+                    continue
+                if existing.target_checkpoint_name == target_checkpoint_name:
+                    raise OperatorGovernanceError(
+                        "experiment cohort already has a study for "
+                        f"{target_checkpoint_name}"
+                    )
+                for field, value in cohort_fields.items():
+                    if getattr(existing, field) != value:
+                        raise OperatorGovernanceError(
+                            f"experiment cohort frozen H0 mismatch: {field}"
+                        )
+            study = StudyRecord(
+                study_id=identifier,
+                purpose=purpose,
+                base_checkpoint_id=f"{identifier}-H0",
+                base_subject_sha=base_sha,
+                harness_sha=harness_sha,
+                policy_digest=digest_payload(policy.data),
+                line_id=designated_line,
+                primary_model=primary_model,
+                target_checkpoint_name=target_checkpoint_name,
+                manifest_digest=_path_digest(manifest_snapshot),
+                role_config_digest=digests["role_config_digest"],
+                memory_digest=memory_digest,
+                success_contract=dict(success_contract),
+                cohort_id=cohort,
+                base_config_digest=digests["config_digest"],
+                base_model_digest=digests["model_digest"],
+                base_skills_digest=digests["skills_digest"],
+                memory_snapshot_path=str(memory_snapshot),
+                manifest_snapshot_path=str(manifest_snapshot),
+            )
+            self.store.write_study(study)
+        except Exception:
+            if manifest_snapshot is not None:
+                self._remove_release_tree(manifest_snapshot)
+            if memory_snapshot is not None:
+                self._remove_release_tree(memory_snapshot)
+            raise
+        return study
+
+    def initialize_experiment_line(
+        self,
+        study_id: str,
+        *,
+        metric_receipt_id: str,
+    ) -> dict[str, Any]:
+        study = self.store.read_study(study_id)
+        self._validated_study_memory_snapshot(study)
+        self._validated_study_manifest_snapshot(study)
+        policy = self.policy()
+        if study.policy_digest != digest_payload(policy.data):
+            raise OperatorGovernanceError("study machine constitution changed before line initialization")
+        metric_record, metric_receipt = self._registered_metric_receipt(metric_receipt_id)
+        if (
+            metric_record.kind != "BASELINE"
+            or metric_record.study_id != study.study_id
+            or metric_record.line_id != study.line_id
+            or metric_record.subject_sha != study.base_subject_sha
+            or metric_record.manifest_digest != study.manifest_digest
+            or metric_record.success_contract_digest != digest_payload(study.success_contract)
+            or metric_record.producer != "benchmark_guard"
+        ):
+            raise OperatorGovernanceError("H0 metric authority does not match the trusted study")
+        self._baseline_metric_receipt(metric_receipt, study=study)
+        branch = self.config.operator.experiment_lines.branch_template.format(
+            study_id=study.study_id
+        )
+        check_ref = run_git(self.project_root, ["check-ref-format", "--branch", branch], check=False)
+        if check_ref.returncode != 0:
+            raise OperatorGovernanceError(f"invalid experiment line branch: {branch}")
+        protected = {str(item) for item in policy.data.get("protected_branches") or []}
+        if branch in protected:
+            raise OperatorGovernanceError(f"experiment line branch is protected: {branch}")
+        reference = f"refs/heads/{branch}"
+        if run_git(
+            self.project_root,
+            ["show-ref", "--verify", "--quiet", reference],
+            check=False,
+        ).returncode == 0:
+            raise OperatorGovernanceError(f"experiment line branch already exists: {branch}")
+        if rev_parse(self.project_root, study.base_subject_sha) != study.base_subject_sha:
+            raise OperatorGovernanceError("study H0 SHA is not canonical")
+        control_head = rev_parse(self.project_root, "HEAD")
+        tree_sha = rev_parse(self.project_root, f"{study.base_subject_sha}^{{tree}}")
+        if not all(
+            (
+                study.cohort_id,
+                study.base_config_digest,
+                study.base_model_digest,
+                study.base_skills_digest,
+            )
+        ):
+            raise OperatorGovernanceError("study lacks frozen H0 cohort digests")
+        line = ExperimentLineRecord(
+            line_id=study.line_id,
+            study_id=study.study_id,
+            branch=branch,
+            base_sha=study.base_subject_sha,
+            head_sha=study.base_subject_sha,
+            generation=0,
+            active_checkpoint_id=study.base_checkpoint_id,
+            status="OPEN",
+            remote=self.config.operator.experiment_lines.remote,
+        )
+        release = self._materialize_checkpoint_release(
+            study_id=study.study_id,
+            checkpoint_name="H0",
+            subject_sha=study.base_subject_sha,
+        )
+        active: Path | None = None
+        reference_created = False
+        try:
+            digests = self._experiment_config_digests(
+                study.primary_model,
+                subject_root=release,
+            )
+            expected_digests = {
+                "role_config_digest": study.role_config_digest,
+                "config_digest": study.base_config_digest,
+                "model_digest": study.base_model_digest,
+                "skills_digest": study.base_skills_digest,
+            }
+            for field, expected in expected_digests.items():
+                if digests[field] != expected:
+                    raise OperatorGovernanceError(
+                        f"frozen H0 {field} changed before line initialization"
+                    )
+            checkpoint = CheckpointRecord(
+                checkpoint_id=study.base_checkpoint_id,
+                study_id=study.study_id,
+                line_id=study.line_id,
+                name="H0",
+                subject_sha=study.base_subject_sha,
+                tree_sha=tree_sha,
+                harness_sha=study.harness_sha,
+                policy_digest=study.policy_digest,
+                config_digest=digests["config_digest"],
+                model_digest=digests["model_digest"],
+                skills_digest=digests["skills_digest"],
+                memory_digest=study.memory_digest,
+                manifest_digest=study.manifest_digest,
+                budget_digest=digest_payload(
+                    {"study_id": study.study_id, "state": "UNGRANTED"}
+                ),
+                metric_digest=metric_record.receipt_digest,
+                release_path=str(release),
+            )
+            run_git(
+                self.project_root,
+                ["update-ref", reference, study.base_subject_sha, "0" * 40],
+            )
+            reference_created = True
+            active = self._activate_experiment_release(study.study_id, release)
+            self.store.initialize_experiment_line(line, checkpoint)
+        except Exception:
+            if reference_created:
+                run_git(
+                    self.project_root,
+                    ["update-ref", "-d", reference, study.base_subject_sha],
+                    check=False,
+                )
+            if active is not None and active.is_symlink() and active.resolve() == release:
+                active.unlink()
+            self._remove_release_tree(release)
+            raise
+        if rev_parse(self.project_root, "HEAD") != control_head:
+            raise OperatorGovernanceError("experiment line initialization changed the control checkout")
+        return {
+            "study": self._study_projection(study),
+            "line": line.to_dict(),
+            "checkpoint": checkpoint.to_dict(),
+        }
+
+    def list_studies(self) -> list[dict[str, Any]]:
+        return [self._study_projection(study) for study in self.store.read_studies()]
+
+    def study_status(self, study_id: str) -> dict[str, Any]:
+        study = self.store.read_study(study_id)
+        lines = self.store.read_experiment_lines(study.study_id)
+        checkpoints = self.store.read_checkpoints(study.study_id) if lines else []
+        grants = self.store.read_budget_grants(study.study_id)
+        return {
+            "study": self._study_projection(study),
+            "lines": [line.to_dict() for line in lines],
+            "checkpoints": [checkpoint.to_dict() for checkpoint in checkpoints],
+            "metrics": [
+                self._metric_projection(metric)
+                for metric in self.store.read_study_metrics(study.study_id)
+            ],
+            "budget_grants": [grant.to_dict() for grant in grants],
+        }
+
+    def list_experiment_lines(self, study_id: str | None = None) -> list[dict[str, Any]]:
+        return [
+            line.to_dict()
+            for line in self.store.read_experiment_lines(study_id)
+        ]
+
+    def experiment_line_status(self, line_id: str) -> dict[str, Any]:
+        line = self.store.read_experiment_line(line_id)
+        return {
+            "line": line.to_dict(),
+            "study": self._study_projection(self.store.read_study(line.study_id)),
+            "checkpoints": [
+                checkpoint.to_dict()
+                for checkpoint in self.store.read_checkpoints(line.study_id)
+            ],
+            "integrations": [
+                integration.to_dict()
+                for integration in self.store.read_integrations(line.line_id)
+            ],
+            "metrics": [
+                self._metric_projection(metric)
+                for metric in self.store.read_study_metrics(line.study_id)
+            ],
+        }
+
+    def create_budget_request(
+        self,
+        study_id: str,
+        *,
+        wave: int,
+        case_ids: Iterable[str],
+        reason: str,
+        requester: str | None = None,
+        model: str | None = None,
+        max_calls: int | None = None,
+        max_writer_attempts: int | None = None,
+        max_operator_revisions: int | None = None,
+        wall_time_seconds: int | None = None,
+        case_concurrency: int | None = None,
+    ) -> BudgetRequestRecord:
+        study = self.store.read_study(study_id)
+        line = self.store.read_experiment_line(study.line_id)
+        if line.status != "OPEN":
+            raise OperatorGovernanceError("budget cannot be requested for a closed experiment line")
+        if study.policy_digest != digest_payload(self.policy().data):
+            raise OperatorGovernanceError("study machine constitution is stale")
+        grants = self.store.read_budget_grants(study.study_id)
+        expected_wave = 3 if not grants else {3: 8, 8: 16}.get(grants[-1].wave)
+        if expected_wave is None:
+            raise OperatorGovernanceError("study already has its final wave-16 budget")
+        if wave != expected_wave:
+            raise OperatorGovernanceError(
+                f"budget wave must advance to {expected_wave}, got {wave}"
+            )
+        selected_cases = tuple(dict.fromkeys(str(item) for item in case_ids))
+        if grants and not set(grants[-1].case_ids).issubset(selected_cases):
+            raise OperatorGovernanceError("expanded budget must retain every previously granted case")
+        selected_model = model or study.primary_model
+        if selected_model != study.primary_model:
+            raise OperatorGovernanceError("budget model must match the frozen study model")
+        budget = self.config.operator.budgets
+        if selected_model not in budget.allowed_primary_models:
+            raise OperatorGovernanceError("budget model is outside configured allowlist")
+        requested_calls = max_calls if max_calls is not None else budget.max_calls_by_wave[wave]
+        requested_attempts = (
+            max_writer_attempts
+            if max_writer_attempts is not None
+            else budget.default_max_writer_attempts
+        )
+        requested_revisions = (
+            max_operator_revisions
+            if max_operator_revisions is not None
+            else budget.default_max_operator_revisions
+        )
+        requested_wall_time = (
+            wall_time_seconds
+            if wall_time_seconds is not None
+            else budget.default_wall_time_seconds
+        )
+        requested_concurrency = (
+            case_concurrency
+            if case_concurrency is not None
+            else budget.default_case_concurrency
+        )
+        ceilings = (
+            (requested_calls, budget.max_calls_by_wave[wave], "max_calls"),
+            (requested_attempts, budget.default_max_writer_attempts, "max_writer_attempts"),
+            (
+                requested_revisions,
+                budget.default_max_operator_revisions,
+                "max_operator_revisions",
+            ),
+            (requested_wall_time, budget.default_wall_time_seconds, "wall_time_seconds"),
+            (requested_concurrency, budget.max_case_concurrency, "case_concurrency"),
+        )
+        for value, ceiling, field in ceilings:
+            if value < 1 or value > ceiling:
+                raise OperatorGovernanceError(
+                    f"budget {field} must be between 1 and configured ceiling {ceiling}"
+                )
+        request = BudgetRequestRecord(
+            budget_request_id=self.store.next_id("budget-request"),
+            study_id=study.study_id,
+            wave=wave,
+            case_ids=selected_cases,
+            model=selected_model,
+            max_calls=requested_calls,
+            max_writer_attempts=requested_attempts,
+            max_operator_revisions=requested_revisions,
+            wall_time_seconds=requested_wall_time,
+            case_concurrency=requested_concurrency,
+            reason=reason,
+            requester=self._actor(requester),
+            previous_grant_id=grants[-1].grant_id if grants else None,
+        )
+        self.store.write_budget_request(request)
+        return request
+
+    def approve_budget_grant(
+        self,
+        budget_request_id: str,
+        *,
+        approver: str,
+        confirm_request_digest: str,
+        approval_kind: str = "interactive",
+    ) -> BudgetGrantRecord:
+        request = self.store.read_budget_request(budget_request_id)
+        if confirm_request_digest != request.budget_request_digest:
+            raise OperatorGovernanceError("budget approval does not confirm the request digest")
+        if approval_kind != "interactive":
+            raise OperatorGovernanceError(
+                "budget grants currently accept only digest-bound interactive human attestation"
+            )
+        study = self.store.read_study(request.study_id)
+        if study.policy_digest != digest_payload(self.policy().data):
+            raise OperatorGovernanceError("study machine constitution is stale")
+        requests = [
+            item
+            for item in self.store.read_budget_requests(study.study_id)
+            if item.wave == request.wave
+        ]
+        if not requests or requests[-1].budget_request_id != request.budget_request_id:
+            raise OperatorGovernanceError("budget request was superseded by a newer request")
+        grants = self.store.read_budget_grants(study.study_id)
+        expected_wave = 3 if not grants else {3: 8, 8: 16}.get(grants[-1].wave)
+        if request.wave != expected_wave:
+            raise OperatorGovernanceError("budget request is stale for the current study wave")
+        if request.previous_grant_id != (grants[-1].grant_id if grants else None):
+            raise OperatorGovernanceError("budget request previous grant binding is stale")
+        if grants and not set(grants[-1].case_ids).issubset(request.case_ids):
+            raise OperatorGovernanceError("budget request dropped a previously granted case")
+        expires_at = (
+            datetime.now(UTC) + timedelta(seconds=request.wall_time_seconds)
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        grant = BudgetGrantRecord(
+            grant_id=self.store.next_id("budget-grant"),
+            budget_request_id=request.budget_request_id,
+            budget_request_digest=request.budget_request_digest,
+            study_id=request.study_id,
+            wave=request.wave,
+            case_ids=request.case_ids,
+            model=request.model,
+            max_calls=request.max_calls,
+            max_writer_attempts=request.max_writer_attempts,
+            max_operator_revisions=request.max_operator_revisions,
+            wall_time_seconds=request.wall_time_seconds,
+            case_concurrency=request.case_concurrency,
+            approved_by=approver,
+            approval_kind=approval_kind,
+            previous_grant_id=request.previous_grant_id,
+            expires_at=expires_at,
+        )
+        self.store.write_budget_grant(grant)
+        return grant
+
+    def reserve_usage(
+        self,
+        grant_id: str,
+        *,
+        call_key: str,
+        execution_id: str,
+        role: str,
+        model: str,
+        case_id: str | None = None,
+        attempt: int = 0,
+        revision: int = 0,
+    ) -> UsageEntryRecord:
+        grant = self.store.read_budget_grant(grant_id)
+        entry = UsageEntryRecord(
+            usage_id=self.store.next_id("usage"),
+            grant_id=grant.grant_id,
+            study_id=grant.study_id,
+            call_key=call_key,
+            execution_id=execution_id,
+            case_id=case_id,
+            role=role,
+            model=model,
+            status="RESERVED",
+            attempt=attempt,
+            revision=revision,
+        )
+        return self.store.reserve_usage_entry(entry)
+
+    def _retain_usage_log(self, entry: UsageEntryRecord, source: Path | None, name: str) -> str | None:
+        if source is None or not source.is_file():
+            return None
+        raw = source.read_bytes()
+        sha = hashlib.sha256(raw).hexdigest()
+        target = (
+            self.store.artifact_root
+            / "studies"
+            / entry.study_id
+            / "usage"
+            / entry.usage_id
+            / f"{sha}-{name}"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(raw)
+        temporary.replace(target)
+        return str(target)
+
+    def finalize_usage(
+        self,
+        usage_id: str,
+        *,
+        status: str,
+        raw_log_path: Path | None = None,
+        stderr_log_path: Path | None = None,
+        result_id: str | None = None,
+        input_tokens: int | None = None,
+        cached_input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        duration_seconds: float | None = None,
+        error: str | None = None,
+    ) -> UsageEntryRecord:
+        if status not in {"COMPLETED", "INDETERMINATE"}:
+            raise OperatorGovernanceError("usage finalization status must be terminal")
+        current = self.store.read_usage_entry(usage_id)
+        updated = replace(
+            current,
+            status=status,
+            raw_log_path=self._retain_usage_log(current, raw_log_path, "raw.jsonl"),
+            stderr_log_path=self._retain_usage_log(current, stderr_log_path, "stderr.log"),
+            result_id=result_id,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            output_tokens=output_tokens,
+            duration_seconds=duration_seconds,
+            error=error,
+            finished_at=utc_now(),
+        )
+        return self.store.finalize_usage_entry(updated)
+
+    def budget_status(self, study_id: str) -> dict[str, Any]:
+        requests = self.store.read_budget_requests(study_id)
+        grants = self.store.read_budget_grants(study_id)
+        usage = [
+            entry
+            for grant in grants
+            for entry in self.store.read_usage_entries(grant.grant_id)
+        ]
+        return {
+            "study_id": study_id,
+            "requests": [request.to_dict() for request in requests],
+            "grants": [grant.to_dict() for grant in grants],
+            "usage": [entry.to_dict() for entry in usage],
+            "consumed_calls": len(usage),
+            "running_calls": sum(entry.status == "RESERVED" for entry in usage),
+        }
+
+    def metered_codex_backend(
+        self,
+        *,
+        grant_id: str,
+        call_key: str,
+        execution_id: str,
+        case_id: str | None = None,
+        attempt: int = 0,
+        revision: int = 0,
+        backend: CodexBackend | None = None,
+    ) -> MeteredCodexBackend:
+        return MeteredCodexBackend(
+            backend or self.backend,
+            self,
+            StudyCallContext(
+                grant_id=grant_id,
+                call_key=call_key,
+                execution_id=execution_id,
+                case_id=case_id,
+                attempt=attempt,
+                revision=revision,
+            ),
+        )
+
+    def create_checkpoint(
+        self,
+        line_id: str,
+        *,
+        metric_receipt_id: str,
+        checkpoint_name: str | None = None,
+    ) -> dict[str, Any]:
+        with self.store.experiment_line_lease(line_id):
+            line = self.store.read_experiment_line(line_id)
+            study = self.store.read_study(line.study_id)
+            self._validated_study_memory_snapshot(study)
+            self._validated_study_manifest_snapshot(study)
+            name = checkpoint_name or study.target_checkpoint_name
+            if name != study.target_checkpoint_name:
+                raise OperatorGovernanceError(
+                    f"study target checkpoint is {study.target_checkpoint_name}, not {name}"
+                )
+            if line.status != "OPEN":
+                raise OperatorGovernanceError("checkpoint requires an open experiment line")
+            if study.policy_digest != digest_payload(self.policy().data):
+                raise OperatorGovernanceError("study machine constitution is stale")
+            checkpoints = self.store.read_checkpoints(study.study_id)
+            if any(item.name == name for item in checkpoints):
+                raise OperatorGovernanceError(f"checkpoint already exists: {name}")
+            h0 = next((item for item in checkpoints if item.name == "H0"), None)
+            if h0 is None or h0.subject_sha != study.base_subject_sha:
+                raise OperatorGovernanceError("study has no valid H0 parent checkpoint")
+            integrations = self.store.read_integrations(line.line_id)
+            if (
+                not integrations
+                or integrations[-1].kind != "CANDIDATE"
+                or integrations[-1].result_head_sha != line.head_sha
+            ):
+                raise OperatorGovernanceError(
+                    "checkpoint requires the current line head to come from a candidate integration"
+                )
+            grants = self.store.read_budget_grants(study.study_id)
+            if not grants:
+                raise OperatorGovernanceError("checkpoint requires a completed budget wave")
+            grant = grants[-1]
+            usage = [
+                entry
+                for item in grants
+                for entry in self.store.read_usage_entries(item.grant_id)
+            ]
+            if not usage or any(entry.status == "RESERVED" for entry in usage):
+                raise OperatorGovernanceError(
+                    "checkpoint requires terminal host-observed study usage"
+                )
+            metric_record, metric_receipt = self._registered_metric_receipt(
+                metric_receipt_id
+            )
+            if (
+                metric_record.kind != "CANDIDATE"
+                or metric_record.study_id != study.study_id
+                or metric_record.line_id != line.line_id
+                or metric_record.subject_sha != line.head_sha
+                or metric_record.manifest_digest != study.manifest_digest
+                or metric_record.success_contract_digest
+                != digest_payload(study.success_contract)
+                or metric_record.budget_grant_id != grant.grant_id
+                or metric_record.budget_digest != grant.grant_digest
+                or metric_record.wave != grant.wave
+                or metric_record.success_contract_passed is not True
+                or metric_record.producer != "benchmark_guard"
+            ):
+                raise OperatorGovernanceError(
+                    "study metric authority does not match the current line and grant"
+                )
+            self._study_metric_receipt(
+                metric_receipt,
+                study=study,
+                line=line,
+                grant=grant,
+            )
+            release = self._materialize_checkpoint_release(
+                study_id=study.study_id,
+                checkpoint_name=name,
+                subject_sha=line.head_sha,
+            )
+            active = (
+                self.config.operator.experiment_lines.active_release_root.resolve()
+                / study.study_id
+            )
+            previous_release = active.resolve() if active.is_symlink() else None
+            release_activated = False
+            try:
+                digests = self._experiment_config_digests(
+                    study.primary_model,
+                    subject_root=release,
+                )
+                checkpoint = CheckpointRecord(
+                    checkpoint_id=f"{study.study_id}-{name}",
+                    study_id=study.study_id,
+                    line_id=line.line_id,
+                    name=name,
+                    subject_sha=line.head_sha,
+                    tree_sha=rev_parse(self.project_root, f"{line.head_sha}^{{tree}}"),
+                    harness_sha=study.harness_sha,
+                    policy_digest=study.policy_digest,
+                    config_digest=digests["config_digest"],
+                    model_digest=digests["model_digest"],
+                    skills_digest=digests["skills_digest"],
+                    memory_digest=study.memory_digest,
+                    manifest_digest=study.manifest_digest,
+                    budget_digest=grant.grant_digest,
+                    metric_digest=metric_record.receipt_digest,
+                    release_path=str(release),
+                    parent_checkpoint_id=h0.checkpoint_id,
+                    parent_subject_sha=h0.subject_sha,
+                )
+                updated_line = replace(
+                    line,
+                    generation=line.generation + 1,
+                    active_checkpoint_id=checkpoint.checkpoint_id,
+                )
+                self._activate_experiment_release(study.study_id, release)
+                release_activated = True
+                self.store.write_checkpoint_and_activate(
+                    updated_line,
+                    checkpoint,
+                    expected_head_sha=line.head_sha,
+                    expected_generation=line.generation,
+                )
+            except Exception:
+                if release_activated:
+                    if previous_release is not None:
+                        self._activate_experiment_release(study.study_id, previous_release)
+                    elif active.is_symlink():
+                        active.unlink()
+                self._remove_release_tree(release)
+                raise
+            return {
+                "checkpoint": checkpoint.to_dict(),
+                "line": updated_line.to_dict(),
+                "active_release": str(active),
+            }
+
+    def rollback_experiment_line(
+        self,
+        line_id: str,
+        checkpoint_id: str,
+        *,
+        reason: str,
+        push_remote: bool = False,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        if not reason.strip():
+            raise OperatorGovernanceError("rollback reason is required")
+        with self.store.experiment_line_lease(line_id):
+            line = self.store.read_experiment_line(line_id)
+            checkpoint = self.store.read_checkpoint(checkpoint_id)
+            if checkpoint.line_id != line.line_id or checkpoint.study_id != line.study_id:
+                raise OperatorGovernanceError("rollback checkpoint belongs to another line")
+            if line.status != "OPEN":
+                raise OperatorGovernanceError("rollback requires an open experiment line")
+            current_tree = rev_parse(self.project_root, f"{line.head_sha}^{{tree}}")
+            if current_tree == checkpoint.tree_sha:
+                raise OperatorGovernanceError("experiment line already has the checkpoint tree")
+            release = Path(checkpoint.release_path).resolve()
+            expected_release_root = (
+                self.config.operator.experiment_lines.checkpoint_root
+                / line.study_id
+            ).resolve()
+            try:
+                release.relative_to(expected_release_root)
+            except ValueError as exc:
+                raise OperatorGovernanceError(
+                    "rollback checkpoint release escaped the trusted checkpoint root"
+                ) from exc
+            if not release.is_dir():
+                raise OperatorGovernanceError("rollback checkpoint release is missing")
+            study = self.store.read_study(line.study_id)
+            policy = self.policy()
+            if study.policy_digest != digest_payload(policy.data):
+                raise OperatorGovernanceError("study machine constitution is stale")
+            integrations = self.store.read_integrations(line.line_id)
+            request_id = next(
+                (
+                    item.request_id
+                    for item in reversed(integrations)
+                    if item.request_id is not None
+                ),
+                None,
+            )
+            if request_id is None:
+                raise OperatorGovernanceError("rollback has no request-bound integration evidence")
+            grants = self.store.read_budget_grants(study.study_id)
+            if not grants:
+                raise OperatorGovernanceError("rollback has no study budget evidence")
+            grant = grants[-1]
+            if any(
+                entry.status == "RESERVED"
+                for item in grants
+                for entry in self.store.read_usage_entries(item.grant_id)
+            ):
+                raise OperatorGovernanceError("rollback cannot run with active study calls")
+            rollback_id = self.store.next_id("rollback")
+            worktree = (
+                self.config.operator.experiment_lines.root
+                / line.line_id
+                / rollback_id
+            ).resolve()
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+            artifact_ids: list[str] = []
+            try:
+                run_git(
+                    self.project_root,
+                    ["worktree", "add", "--detach", str(worktree), line.head_sha],
+                )
+                run_git(
+                    worktree,
+                    [
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "restore",
+                        f"--source={checkpoint.subject_sha}",
+                        "--staged",
+                        "--worktree",
+                        "--",
+                        ".",
+                    ],
+                )
+                restored_tree = run_git(worktree, ["write-tree"]).stdout.strip()
+                if restored_tree != checkpoint.tree_sha:
+                    raise OperatorGovernanceError(
+                        "rollback staging tree does not match checkpoint tree"
+                    )
+                if _worktree_content_digest(worktree) != _worktree_content_digest(release):
+                    raise OperatorGovernanceError(
+                        "rollback checkpoint release content does not match its Git tree"
+                    )
+                if run_git(worktree, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
+                    raise OperatorGovernanceError("rollback produced no tree change")
+                commit_message = (
+                    f"Restore experiment line to {checkpoint.name}\n\n"
+                    f"Autobugfix-Rollback: {rollback_id}\n"
+                    f"Autobugfix-Checkpoint: {checkpoint.checkpoint_id}\n"
+                    f"Reason: {reason}"
+                )
+                run_git(
+                    worktree,
+                    [
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "-c",
+                        "user.name=Autobugfix Guard",
+                        "-c",
+                        "user.email=autobugfix-guard@localhost",
+                        "commit",
+                        "-m",
+                        commit_message,
+                    ],
+                )
+                result_head = rev_parse(worktree, "HEAD")
+                result_tree = rev_parse(worktree, "HEAD^{tree}")
+                if result_tree != checkpoint.tree_sha:
+                    raise OperatorGovernanceError(
+                        "rollback commit tree does not match checkpoint tree"
+                    )
+                profile = (policy.data.get("validation_profiles") or {}).get("full")
+                if not isinstance(profile, dict) or not profile.get("commands"):
+                    raise OperatorGovernanceError("trusted full validation profile is missing")
+                results = run_command_specs(
+                    worktree,
+                    self.store.artifact_root
+                    / request_id
+                    / "rollbacks"
+                    / rollback_id,
+                    list(profile["commands"]),
+                    values={
+                        "base_sha": line.head_sha,
+                        "head_sha": result_head,
+                        "request_id": request_id,
+                        "candidate_root": str(worktree),
+                    },
+                    default_timeout_seconds=int(profile.get("timeout_seconds", 300)),
+                    name_prefix="rollback-full",
+                    process_sandbox=self.config.operator.verification.process_sandbox,
+                    require_process_sandbox=self.config.operator.verification.require_process_sandbox,
+                    network_access=self.config.operator.verification.network_access,
+                    hidden_roots=(self.store.root, self.store.artifact_root),
+                    read_only_binds=self._runtime_binds(worktree),
+                )
+                for item in results:
+                    for stream in ("stdout_path", "stderr_path"):
+                        reference = self.store.register_artifact_file(
+                            request_id,
+                            producer="rollback_guard",
+                            trust_class="authoritative",
+                            kind="rollback-check-log",
+                            path=Path(item[stream]),
+                        )
+                        artifact_ids.append(reference.artifact_id)
+                failed = [item for item in results if not item["passed"]]
+                if failed:
+                    raise OperatorGovernanceError(
+                        "trusted rollback validation failed: "
+                        + ", ".join(str(item["name"]) for item in failed)
+                    )
+                snapshot = collect_candidate_snapshot(worktree, line.head_sha)
+                updated_line = replace(
+                    line,
+                    head_sha=result_head,
+                    generation=line.generation + 1,
+                    active_checkpoint_id=checkpoint.checkpoint_id,
+                )
+                integration = IntegrationRecord(
+                    integration_id=rollback_id,
+                    study_id=study.study_id,
+                    line_id=line.line_id,
+                    kind="ROLLBACK",
+                    expected_head_sha=line.head_sha,
+                    expected_generation=line.generation,
+                    candidate_head_sha=checkpoint.subject_sha,
+                    result_head_sha=result_head,
+                    result_tree_sha=result_tree,
+                    patch_digest=snapshot.patch_digest,
+                    policy_digest=digest_payload(policy.data),
+                    actor=self._actor(actor),
+                    request_id=request_id,
+                    check_run_id=integrations[-1].check_run_id,
+                    budget_grant_id=grant.grant_id,
+                    budget_digest=grant.grant_digest,
+                    artifact_ids=tuple(artifact_ids),
+                )
+                active = (
+                    self.config.operator.experiment_lines.active_release_root.resolve()
+                    / study.study_id
+                )
+                previous_release = active.resolve() if active.is_symlink() else None
+                self._activate_experiment_release(study.study_id, release)
+                reference = f"refs/heads/{line.branch}"
+                reference_updated = False
+                try:
+                    run_git(
+                        self.project_root,
+                        ["update-ref", reference, result_head, line.head_sha],
+                    )
+                    reference_updated = True
+                    self.store.advance_experiment_line(updated_line, integration)
+                except Exception:
+                    if reference_updated:
+                        run_git(
+                            self.project_root,
+                            ["update-ref", reference, line.head_sha, result_head],
+                            check=False,
+                        )
+                    if previous_release is not None:
+                        self._activate_experiment_release(study.study_id, previous_release)
+                    elif active.is_symlink():
+                        active.unlink()
+                    raise
+                remote_result: dict[str, Any] = {"requested": push_remote, "pushed": False}
+                if push_remote:
+                    if not line.remote:
+                        raise OperatorGovernanceError(
+                            "remote push requested but experiment line has no configured remote"
+                        )
+                    pushed = run_git(
+                        self.project_root,
+                        ["push", "--atomic", line.remote, f"{result_head}:{reference}"],
+                        check=False,
+                        timeout_seconds=(
+                            self.config.operator.experiment_lines.update_timeout_seconds
+                        ),
+                    )
+                    remote_result = {
+                        "requested": True,
+                        "pushed": pushed.returncode == 0,
+                        "remote": line.remote,
+                        "stderr": pushed.stderr.strip(),
+                    }
+                    if pushed.returncode != 0:
+                        reconciliation = replace(
+                            integration,
+                            integration_id=self.store.next_id("reconciliation"),
+                            kind="RECONCILIATION",
+                            expected_head_sha=result_head,
+                            expected_generation=updated_line.generation,
+                        )
+                        self.store.write_integration(reconciliation)
+                        raise OperatorGovernanceError(
+                            "local rollback succeeded but remote synchronization requires reconciliation"
+                        )
+                self.store.append_event(
+                    request_id,
+                    "experiment_line_rolled_back",
+                    self._actor(actor),
+                    {
+                        "rollback_id": rollback_id,
+                        "checkpoint_id": checkpoint.checkpoint_id,
+                        "line_generation": updated_line.generation,
+                        "reason": reason,
+                    },
+                )
+                return {
+                    "integration": integration.to_dict(),
+                    "line": updated_line.to_dict(),
+                    "checkpoint": checkpoint.to_dict(),
+                    "validation": results,
+                    "active_release": str(active),
+                    "remote": remote_result,
+                }
+            finally:
+                if worktree.exists():
+                    run_git(
+                        self.project_root,
+                        ["worktree", "remove", "--force", str(worktree)],
+                        check=False,
+                    )
+
+    @_leased_request
+    def integrate_candidate(
+        self,
+        request_id: str,
+        *,
+        grant_id: str,
+        push_remote: bool = False,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        projection = self.projection(request_id)
+        self.guard.require_phase(projection.state, "VERIFIED")
+        self.guard.require_no_active_run(
+            projection.active_writer_run_id,
+            projection.active_check_run_id,
+        )
+        request, scope_version = self._effective_request(request_id)
+        if not request.experiment_line_id:
+            raise OperatorGovernanceError("candidate integration requires a line-bound request")
+        workspace = Path(self.store.read_workspace(request_id)["path"])
+        if run_git(workspace, ["status", "--porcelain"]).stdout.strip():
+            raise OperatorGovernanceError("candidate integration requires a clean worktree")
+        snapshot = self._snapshot(request_id, request)
+        if snapshot.patch_digest != projection.patch_digest or snapshot.head_sha != projection.head_sha:
+            self.store.append_event(
+                request_id,
+                "request_reopened",
+                "trusted-guard",
+                {"reason": "patch_changed_before_integration"},
+            )
+            raise OperatorGovernanceError(
+                "candidate changed after verification; request returned to ACTIVE"
+            )
+        full_checks = [
+            check
+            for check in self.store.read_check_runs(request_id)
+            if check.mode == "full" and check.status == "PASSED"
+        ]
+        if not full_checks:
+            raise OperatorGovernanceError("candidate integration requires a passing full CheckRun")
+        check = full_checks[-1]
+        if check.head_sha != snapshot.head_sha or check.patch_digest != snapshot.patch_digest:
+            raise OperatorGovernanceError("latest full CheckRun is stale for candidate integration")
+        validation = self.store.read_validation(request_id, check.check_id)
+        if request.performance_baseline and not (validation.get("regression") or {}).get("ok"):
+            raise OperatorGovernanceError("candidate integration lacks a passing experiment receipt")
+        grant = self.store.read_budget_grant(grant_id)
+        if (
+            request.budget_grant_id != grant.grant_id
+            or request.budget_grant_digest != grant.grant_digest
+        ):
+            raise OperatorGovernanceError(
+                "candidate integration grant does not match the frozen request budget"
+            )
+        line = self.store.read_experiment_line(request.experiment_line_id)
+        study = self.store.read_study(line.study_id)
+        self._validated_study_memory_snapshot(study)
+        self._validated_study_manifest_snapshot(study)
+        grants = self.store.read_budget_grants(study.study_id)
+        if not grants or grants[-1].grant_id != grant.grant_id:
+            raise OperatorGovernanceError("candidate integration requires the current study budget grant")
+        if grant.study_id != study.study_id or grant.model != study.primary_model:
+            raise OperatorGovernanceError("candidate integration budget belongs to another study")
+        if is_expired(grant.expires_at):
+            raise OperatorGovernanceError("candidate integration budget grant has expired")
+        usage = [
+            entry
+            for item in grants
+            for entry in self.store.read_usage_entries(item.grant_id)
+        ]
+        if not usage:
+            raise OperatorGovernanceError("candidate integration requires host-observed study usage")
+        if any(entry.status == "RESERVED" for entry in usage):
+            raise OperatorGovernanceError("candidate integration has running study SDK calls")
+        if line.status != "OPEN":
+            raise OperatorGovernanceError("candidate integration line is closed")
+        if (
+            request.base_sha != line.head_sha
+            or request.experiment_line_generation != line.generation
+        ):
+            raise OperatorGovernanceError("candidate integration request is stale for the line")
+        line_reference = f"refs/heads/{line.branch}"
+        if rev_parse(self.project_root, line_reference) != line.head_sha:
+            raise OperatorGovernanceError("experiment line Git ref disagrees with authority store")
+        policy = self.policy()
+        if study.policy_digest != digest_payload(policy.data):
+            raise OperatorGovernanceError("study machine constitution is stale")
+        integration_id = self.store.next_id("integration")
+        integration_root = (
+            self.config.operator.experiment_lines.root
+            / line.line_id
+            / integration_id
+        ).resolve()
+        integration_root.parent.mkdir(parents=True, exist_ok=True)
+        artifact_ids: list[str] = []
+        result_head: str | None = None
+        result_tree: str | None = None
+        decision: PolicyDecision | None = None
+        results: list[dict[str, Any]] = []
+        with self.store.experiment_line_lease(line.line_id):
+            try:
+                current_line = self.store.read_experiment_line(line.line_id)
+                if (
+                    current_line.head_sha != line.head_sha
+                    or current_line.generation != line.generation
+                ):
+                    raise OperatorGovernanceError(
+                        "experiment line advanced before integration lease acquisition"
+                    )
+                run_git(
+                    self.project_root,
+                    ["worktree", "add", "--detach", str(integration_root), line.head_sha],
+                )
+                run_git(
+                    integration_root,
+                    [
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "merge",
+                        "--no-ff",
+                        "--no-commit",
+                        snapshot.head_sha,
+                    ],
+                )
+                commit_message = (
+                    f"Integrate Autobugfix candidate {request_id}\n\n"
+                    f"Autobugfix-Integration: {integration_id}\n"
+                    f"Autobugfix-Request: {request_id}"
+                )
+                run_git(
+                    integration_root,
+                    [
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "-c",
+                        "user.name=Autobugfix Guard",
+                        "-c",
+                        "user.email=autobugfix-guard@localhost",
+                        "commit",
+                        "-m",
+                        commit_message,
+                    ],
+                )
+                result_head = rev_parse(integration_root, "HEAD")
+                result_tree = rev_parse(integration_root, "HEAD^{tree}")
+                decision = evaluate_policy(
+                    workspace,
+                    request,
+                    self.store.read_approvals(request_id),
+                    constitution=policy.data,
+                    trusted_policy_source=policy.source,
+                    trusted_policy=policy.trusted,
+                    phase="merge",
+                    allowed_signers=self.allowed_signers,
+                    scope_version=scope_version,
+                )
+                decision.required_profiles = list(check.profile_names)
+                if not decision.allowed:
+                    raise OperatorGovernanceError(
+                        f"trusted integration policy rejected candidate: {decision.violations}"
+                    )
+                merge_snapshot = collect_candidate_snapshot(
+                    integration_root,
+                    request.base_sha,
+                    [
+                        str(item)
+                        for item in policy.data.get("governance_metadata_paths") or []
+                    ],
+                )
+                if (
+                    decision.patch_digest != snapshot.patch_digest
+                    or merge_snapshot.patch_digest != snapshot.patch_digest
+                    or merge_snapshot.changed_files != snapshot.changed_files
+                ):
+                    raise OperatorGovernanceError(
+                        "integration merge changed the verified candidate patch"
+                    )
+                results = run_validation_profiles(
+                    integration_root,
+                    self.project_root,
+                    request_id,
+                    integration_id,
+                    decision,
+                    policy.data,
+                    log_root_override=(
+                        self.store.artifact_root
+                        / request_id
+                        / "integrations"
+                        / integration_id
+                    ),
+                    process_sandbox=self.config.operator.verification.process_sandbox,
+                    require_process_sandbox=self.config.operator.verification.require_process_sandbox,
+                    network_access=self.config.operator.verification.network_access,
+                    hidden_roots=(self.store.root, self.store.artifact_root),
+                    read_only_binds=self._runtime_binds(integration_root),
+                )
+                failed = [item for item in results if not item["passed"]]
+                for item in results:
+                    for stream in ("stdout_path", "stderr_path"):
+                        reference = self.store.register_artifact_file(
+                            request_id,
+                            producer="integration_guard",
+                            trust_class="authoritative",
+                            kind="integration-check-log",
+                            path=Path(item[stream]),
+                            check_run_id=check.check_id,
+                            patch_digest=snapshot.patch_digest,
+                        )
+                        artifact_ids.append(reference.artifact_id)
+                if failed:
+                    raise OperatorGovernanceError(
+                        "trusted integration validation failed: "
+                        + ", ".join(str(item["name"]) for item in failed)
+                    )
+                if run_git(integration_root, ["status", "--porcelain"]).stdout.strip():
+                    raise OperatorGovernanceError("integration validation changed the merge worktree")
+                if rev_parse(integration_root, "HEAD") != result_head:
+                    raise OperatorGovernanceError("integration HEAD changed during validation")
+                updated_line = replace(
+                    line,
+                    head_sha=result_head,
+                    generation=line.generation + 1,
+                )
+                integration = IntegrationRecord(
+                    integration_id=integration_id,
+                    study_id=study.study_id,
+                    line_id=line.line_id,
+                    kind="CANDIDATE",
+                    expected_head_sha=line.head_sha,
+                    expected_generation=line.generation,
+                    candidate_head_sha=snapshot.head_sha,
+                    result_head_sha=result_head,
+                    result_tree_sha=result_tree,
+                    patch_digest=snapshot.patch_digest,
+                    policy_digest=digest_payload(policy.data),
+                    actor=self._actor(actor),
+                    request_id=request_id,
+                    check_run_id=check.check_id,
+                    budget_grant_id=grant.grant_id,
+                    budget_digest=grant.grant_digest,
+                    artifact_ids=tuple(artifact_ids),
+                )
+                observed_candidate = self._snapshot(request_id, request)
+                if (
+                    observed_candidate.head_sha != snapshot.head_sha
+                    or observed_candidate.patch_digest != snapshot.patch_digest
+                ):
+                    raise OperatorGovernanceError(
+                        "candidate changed while trusted integration was running"
+                    )
+                run_git(
+                    self.project_root,
+                    ["update-ref", line_reference, result_head, line.head_sha],
+                )
+                try:
+                    self.store.advance_experiment_line(updated_line, integration)
+                except Exception:
+                    reverted = run_git(
+                        self.project_root,
+                        ["update-ref", line_reference, line.head_sha, result_head],
+                        check=False,
+                    )
+                    if reverted.returncode != 0:
+                        reconciliation = replace(
+                            integration,
+                            integration_id=self.store.next_id("reconciliation"),
+                            kind="RECONCILIATION",
+                        )
+                        self.store.write_integration(reconciliation)
+                    raise
+                remote_result: dict[str, Any] = {"requested": push_remote, "pushed": False}
+                if push_remote:
+                    if not line.remote:
+                        raise OperatorGovernanceError(
+                            "remote push requested but experiment line has no configured remote"
+                        )
+                    pushed = run_git(
+                        self.project_root,
+                        ["push", "--atomic", line.remote, f"{result_head}:{line_reference}"],
+                        check=False,
+                        timeout_seconds=(
+                            self.config.operator.experiment_lines.update_timeout_seconds
+                        ),
+                    )
+                    remote_result = {
+                        "requested": True,
+                        "pushed": pushed.returncode == 0,
+                        "remote": line.remote,
+                        "stderr": pushed.stderr.strip(),
+                    }
+                    if pushed.returncode != 0:
+                        reconciliation = replace(
+                            integration,
+                            integration_id=self.store.next_id("reconciliation"),
+                            kind="RECONCILIATION",
+                            expected_head_sha=result_head,
+                            expected_generation=updated_line.generation,
+                        )
+                        self.store.write_integration(reconciliation)
+                        raise OperatorGovernanceError(
+                            "local integration succeeded but remote synchronization requires reconciliation"
+                        )
+                receipt = None
+                try:
+                    receipt = self.store.write_artifact(
+                        request_id,
+                        producer="integration_guard",
+                        trust_class="authoritative",
+                        kind="integration-receipt",
+                        content=yaml.safe_dump(integration.to_dict(), sort_keys=False),
+                        filename="integration-receipt.yaml",
+                        check_run_id=check.check_id,
+                        patch_digest=snapshot.patch_digest,
+                    )
+                except Exception as exc:
+                    self.store.append_event(
+                        request_id,
+                        "integration_receipt_artifact_failed",
+                        "trusted-guard",
+                        {"integration_id": integration.integration_id, "error": str(exc)},
+                    )
+                self.store.append_event(
+                    request_id,
+                    "request_closed",
+                    self._actor(actor),
+                    {
+                        "outcome": "integrated",
+                        "integration_id": integration.integration_id,
+                        "line_id": line.line_id,
+                        "line_generation": updated_line.generation,
+                    },
+                )
+                return {
+                    "integration": integration.to_dict(),
+                    "line": updated_line.to_dict(),
+                    "receipt": receipt.to_dict() if receipt else None,
+                    "validation": results,
+                    "remote": remote_result,
+                }
+            finally:
+                if integration_root.exists():
+                    run_git(
+                        self.project_root,
+                        ["worktree", "remove", "--force", str(integration_root)],
+                        check=False,
+                    )
 
     def _actor(self, actor: str | None) -> str:
         return actor or getpass.getuser()
@@ -234,14 +2397,53 @@ class OperatorGovernanceService:
         creator: str | None = None,
         request_id: str | None = None,
         branch: str | None = None,
+        experiment_line_id: str | None = None,
+        budget_grant_id: str | None = None,
+        base_ref: str | None = None,
         expires_at: str | None = None,
     ) -> OperatorRequest:
+        if experiment_line_id and base_ref:
+            raise OperatorGovernanceError("experiment_line_id and base_ref are mutually exclusive")
         triage = self.store.read_triage(triage_id)
         policy = self.policy()
         actor = self._actor(creator)
         identifier = request_id or self.store.next_id("request")
         branch_name = branch or self.config.operator.worktrees.branch_template.format(request_id=identifier)
         profiles = tuple(dict.fromkeys(validation_profiles or self.config.operator.verification.fast_profiles))
+        line_generation: int | None = None
+        budget_grant_digest: str | None = None
+        if experiment_line_id:
+            if not budget_grant_id:
+                raise OperatorGovernanceError(
+                    "experiment line binding requires a budget grant"
+                )
+            line = self.store.read_experiment_line(experiment_line_id)
+            if line.status != "OPEN":
+                raise OperatorGovernanceError(f"experiment line is not open: {experiment_line_id}")
+            study = self.store.read_study(line.study_id)
+            self._validated_study_memory_snapshot(study)
+            self._validated_study_manifest_snapshot(study)
+            if study.policy_digest != digest_payload(policy.data):
+                raise OperatorGovernanceError("experiment line machine constitution is stale")
+            git_head = rev_parse(self.project_root, f"refs/heads/{line.branch}")
+            if git_head != line.head_sha:
+                raise OperatorGovernanceError("experiment line Git ref disagrees with authority store")
+            base_sha = line.head_sha
+            line_generation = line.generation
+            if budget_grant_id:
+                grant = self.store.read_budget_grant(budget_grant_id)
+                grants = self.store.read_budget_grants(study.study_id)
+                if grant.study_id != study.study_id:
+                    raise OperatorGovernanceError("budget grant belongs to another study")
+                if not grants or grants[-1].grant_id != grant.grant_id:
+                    raise OperatorGovernanceError("budget grant is not current for the study")
+                if is_expired(grant.expires_at):
+                    raise OperatorGovernanceError("budget grant has expired")
+                budget_grant_digest = grant.grant_digest
+        elif budget_grant_id:
+            raise OperatorGovernanceError("budget grant binding requires experiment_line_id")
+        else:
+            base_sha = rev_parse(self.project_root, base_ref or "HEAD")
         request = OperatorRequest(
             request_id=identifier,
             summary=summary,
@@ -255,9 +2457,13 @@ class OperatorGovernanceService:
             validation_profiles=profiles,
             performance_baseline=performance_baseline,
             branch=branch_name,
-            base_sha=rev_parse(self.project_root, "HEAD"),
+            base_sha=base_sha,
             creator=actor,
             constitution_digest=digest_payload(policy.data),
+            experiment_line_id=experiment_line_id,
+            experiment_line_generation=line_generation,
+            budget_grant_id=budget_grant_id,
+            budget_grant_digest=budget_grant_digest,
             expires_at=expires_at or _default_expiry(),
         )
         self.store.write_request(request)
@@ -269,6 +2475,10 @@ class OperatorGovernanceService:
                 "request_digest": request.request_digest,
                 "base_sha": request.base_sha,
                 "constitution_digest": request.constitution_digest,
+                "experiment_line_id": request.experiment_line_id,
+                "experiment_line_generation": request.experiment_line_generation,
+                "budget_grant_id": request.budget_grant_id,
+                "budget_grant_digest": request.budget_grant_digest,
             },
         )
         return request
@@ -325,14 +2535,25 @@ class OperatorGovernanceService:
         allowed_paths: Iterable[str] = (),
         expires_at: str | None = None,
         scope_revision_id: str | None = None,
+        merge_binding: str = "patch",
     ) -> Path:
         effective, scope_version = self._approval_target(request_id, scope_revision_id)
         patch_digest: str | None = None
         head_sha: str | None = None
+        if merge_binding not in {"patch", "head", "both"}:
+            raise OperatorGovernanceError(
+                "merge_binding must be one of patch, head, or both"
+            )
         if stage == "merge":
             snapshot = self._snapshot(request_id, effective)
-            patch_digest = snapshot.patch_digest
-            head_sha = snapshot.head_sha
+            if merge_binding in {"patch", "both"}:
+                patch_digest = snapshot.patch_digest
+            if merge_binding in {"head", "both"}:
+                head_sha = snapshot.head_sha
+        elif merge_binding != "patch":
+            raise OperatorGovernanceError(
+                "merge_binding is only configurable for merge approvals"
+            )
         payload = approval_signing_payload(
             effective,
             approver=approver,
@@ -461,11 +2682,72 @@ class OperatorGovernanceService:
             violations.append("operator request base SHA is not canonical")
         if request.branch in {str(item) for item in policy.data.get("protected_branches") or []}:
             violations.append(f"operator request branch is protected: {request.branch}")
+        if request.experiment_line_id:
+            line: ExperimentLineRecord | None = None
+            try:
+                line = self.store.read_experiment_line(request.experiment_line_id)
+            except OperatorStoreError as exc:
+                violations.append(str(exc))
+            else:
+                if line.status != "OPEN":
+                    violations.append("operator request experiment line is closed")
+                if (
+                    line.head_sha != request.base_sha
+                    or line.generation != request.experiment_line_generation
+                ):
+                    violations.append("operator request experiment line advanced after request creation")
+                else:
+                    try:
+                        line_head = rev_parse(self.project_root, f"refs/heads/{line.branch}")
+                    except GitError as exc:
+                        violations.append(str(exc))
+                    else:
+                        if line_head != line.head_sha:
+                            violations.append("experiment line Git ref disagrees with authority store")
+            if not request.budget_grant_id:
+                violations.append("line-bound operator request requires a frozen budget grant")
+            elif line is not None:
+                try:
+                    grant = self.store.read_budget_grant(request.budget_grant_id)
+                    study = self.store.read_study(line.study_id)
+                    self._validated_study_memory_snapshot(study)
+                    self._validated_study_manifest_snapshot(study)
+                    grants = self.store.read_budget_grants(study.study_id)
+                except (OperatorStoreError, OperatorGovernanceError) as exc:
+                    violations.append(str(exc))
+                else:
+                    if grant.grant_digest != request.budget_grant_digest:
+                        violations.append("operator request budget grant digest is stale")
+                    if grant.study_id != study.study_id:
+                        violations.append("operator request budget belongs to another study")
+                    if not grants or grants[-1].grant_id != grant.grant_id:
+                        violations.append("operator request budget grant is superseded")
+                    if is_expired(grant.expires_at):
+                        violations.append("operator request budget grant has expired")
         minimums = policy.data.get("operator_runtime_minimums") or {}
         if bool(minimums.get("require_process_sandbox", True)) and not self.config.operator.verification.require_process_sandbox:
             violations.append("project config cannot disable the authoritative process sandbox")
         if not bool(minimums.get("verification_network_access", False)) and self.config.operator.verification.network_access:
             violations.append("project config cannot enable network for authoritative verification")
+        experiment_governance = self._experiment_governance(policy)
+        budget_minimums = experiment_governance.get("budgets") or {}
+        configured_budget = self.config.operator.budgets
+        required_waves = tuple(int(item) for item in budget_minimums.get("waves") or ())
+        if required_waves and configured_budget.allowed_waves != required_waves:
+            violations.append("project config cannot change trusted experiment budget waves")
+        allowed_models = {str(item) for item in budget_minimums.get("allowed_primary_models") or []}
+        if allowed_models and not set(configured_budget.allowed_primary_models).issubset(allowed_models):
+            violations.append("project config enables a model outside the trusted experiment allowlist")
+        maximum_concurrency = budget_minimums.get("max_case_concurrency")
+        if maximum_concurrency is not None and (
+            configured_budget.max_case_concurrency > int(maximum_concurrency)
+            or configured_budget.default_case_concurrency > int(maximum_concurrency)
+        ):
+            violations.append("project config exceeds trusted experiment case concurrency")
+        if str(budget_minimums.get("model_fallback", "forbidden")) == "forbidden" and (
+            configured_budget.allow_model_fallback
+        ):
+            violations.append("project config cannot enable experiment model fallback")
         baseline_layers = {
             str(item) for item in policy.data.get("baseline_required_layers") or []
         }
@@ -518,8 +2800,10 @@ class OperatorGovernanceService:
             raise OperatorGovernanceError(f"operator start rejected: {report['violations']}")
         request, scope_version = self._effective_request(request_id)
         policy = self.policy()
+        workspace_persisted = False
         try:
             workspace = self.store.read_workspace(request_id)
+            workspace_persisted = True
             recovered = recover_operator_workspace(
                 self.project_root,
                 request,
@@ -542,6 +2826,9 @@ class OperatorGovernanceService:
         for name, trusted_root in (
             ("state", self.store.root),
             ("artifact", self.store.artifact_root),
+            ("integration", self.config.operator.experiment_lines.root),
+            ("checkpoint", self.config.operator.experiment_lines.checkpoint_root),
+            ("active experiment release", self.config.operator.experiment_lines.active_release_root),
         ):
             try:
                 trusted_root.resolve().relative_to(candidate_root)
@@ -550,9 +2837,15 @@ class OperatorGovernanceService:
             raise OperatorGovernanceError(
                 f"configured Operator {name} root must be outside the candidate worktree"
             )
-        try:
-            self.store.read_workspace(request_id)
-        except OperatorStoreError:
+        if workspace_persisted:
+            self._read_writer_admission_baseline(request_id, request)
+        else:
+            baseline = self._write_writer_admission_baseline(
+                request_id,
+                request,
+                candidate_root,
+            )
+            workspace = {**workspace, "writer_admission_baseline": baseline}
             self.store.write_workspace(request_id, workspace)
         experiment = {
             "experiment_id": self.store.next_id("experiment"),
@@ -580,6 +2873,7 @@ class OperatorGovernanceService:
                 "branch": workspace["branch"],
                 "scope_version": scope_version,
                 "experiment_id": experiment["experiment_id"],
+                "writer_admission_baseline": workspace["writer_admission_baseline"]["artifact_id"],
             },
         )
         return {"request": request.to_dict(), "workspace": workspace, "experiment": experiment}
@@ -602,6 +2896,11 @@ class OperatorGovernanceService:
         commands = profile_data.get("commands") or []
         if not isinstance(commands, list) or not commands:
             raise OperatorGovernanceError(f"experiment profile has no commands: {profile_name}")
+        baseline_mode = profile_data.get("baseline_mode", "strict")
+        if not isinstance(baseline_mode, str) or baseline_mode not in {"strict", "measure"}:
+            raise OperatorGovernanceError(
+                f"experiment profile {profile_name} has invalid baseline_mode"
+            )
         try:
             supplied = portable_profile_values(
                 {str(key): str(value) for key, value in (values or {}).items()}
@@ -680,11 +2979,40 @@ class OperatorGovernanceService:
                 for item in results
                 if not item.get("passed")
             ]
-            if not results or failed:
-                detail = ", ".join(failed) if failed else "no commands executed"
+            baseline_mode = str(profile_data.get("baseline_mode", "strict"))
+            if not results:
+                raise OperatorGovernanceError("trusted baseline profile did not pass: no commands executed")
+            if baseline_mode == "strict" and failed:
+                detail = ", ".join(failed)
                 raise OperatorGovernanceError(
                     "trusted baseline profile did not pass: " + detail
                 )
+            if baseline_mode == "measure":
+                incomplete_logs = [
+                    str(item.get("name") or "command")
+                    for item in results
+                    if not all(
+                        isinstance(item.get(stream), str)
+                        and Path(str(item[stream])).is_file()
+                        for stream in ("stdout_path", "stderr_path")
+                    )
+                ]
+                harness_failures = [
+                    str(item.get("name") or "command")
+                    for item in results
+                    if bool(item.get("timed_out"))
+                    or not isinstance(item.get("exit_code"), int)
+                    or int(item["exit_code"]) in {124, 125, 126, 127}
+                ]
+                if incomplete_logs or harness_failures:
+                    details = []
+                    if incomplete_logs:
+                        details.append("missing raw logs: " + ", ".join(incomplete_logs))
+                    if harness_failures:
+                        details.append("harness failure: " + ", ".join(harness_failures))
+                    raise OperatorGovernanceError(
+                        "trusted baseline measurement did not complete: " + "; ".join(details)
+                    )
             receipt = derive_metric_receipt(
                 source="trusted_baseline_experiment",
                 profile=profile_name,
@@ -898,6 +3226,348 @@ class OperatorGovernanceService:
             [str(item) for item in constitution.get("governance_metadata_paths") or []],
         )
 
+    def _governance_metadata_patterns(self) -> tuple[str, ...]:
+        return tuple(
+            str(item)
+            for item in self.policy().data.get("governance_metadata_paths") or []
+        )
+
+    def _candidate_code_content_digest(self, workspace: Path) -> str:
+        """Digest release-relevant candidate content, excluding generated runtime state."""
+
+        return _worktree_content_digest(
+            workspace,
+            ignored_patterns=self._governance_metadata_patterns(),
+            ignored_path=_is_ephemeral_worktree_path,
+        )
+
+    def _verification_workspace_path(self, check_id: str) -> Path:
+        root = self.config.operator.worktrees.root.resolve()
+        workspace = root / ".verification" / safe_id(check_id)
+        try:
+            workspace.resolve().relative_to(root)
+        except ValueError as exc:
+            raise OperatorGovernanceError(
+                "verification worktree path escaped the configured worktree root"
+            ) from exc
+        return workspace
+
+    def _prepare_verification_workspace(
+        self,
+        *,
+        check_id: str,
+        request: OperatorRequest,
+        decision: PolicyDecision,
+        candidate_workspace: Path,
+        candidate_content_digest: str,
+        mode: str,
+    ) -> Path:
+        """Materialize the exact candidate patch in a disposable verification worktree.
+
+        Fast checks run before the service creates the candidate commit, so they
+        start at the frozen base and receive the already policy-derived working
+        tree patch. Full checks start at the trusted candidate commit. Neither
+        verifier is allowed to write into the actual candidate worktree.
+        """
+
+        source = candidate_workspace.resolve()
+        source_snapshot = self._snapshot(request.request_id, request)
+        if (
+            source_snapshot.head_sha != decision.head_sha
+            or source_snapshot.patch_digest != decision.patch_digest
+            or self._candidate_code_content_digest(source) != candidate_content_digest
+        ):
+            raise OperatorGovernanceError(
+                "candidate changed before the detached verification workspace was created"
+            )
+        verification = self._verification_workspace_path(check_id)
+        if verification.exists() or verification.is_symlink():
+            raise OperatorGovernanceError(
+                f"verification worktree path already exists: {verification}"
+            )
+        verification.parent.mkdir(parents=True, exist_ok=True)
+        run_git(
+            self.project_root,
+            ["worktree", "add", "--detach", str(verification), decision.head_sha],
+            check=True,
+        )
+        try:
+            if mode == "fast":
+                self._apply_writer_staging_changes(
+                    verification,
+                    source,
+                    decision.changed_files,
+                )
+            materialized = collect_candidate_snapshot(
+                verification,
+                request.base_sha,
+                self._governance_metadata_patterns(),
+            )
+            if (
+                materialized.patch_digest != decision.patch_digest
+                or materialized.changed_files != decision.changed_files
+                or self._candidate_code_content_digest(verification)
+                != candidate_content_digest
+            ):
+                raise OperatorGovernanceError(
+                    "detached verification workspace does not match the trusted candidate snapshot"
+                )
+            return verification
+        except Exception:
+            run_git(
+                self.project_root,
+                ["worktree", "remove", "--force", str(verification)],
+                check=False,
+            )
+            raise
+
+    def _write_writer_admission_baseline(
+        self,
+        request_id: str,
+        request: OperatorRequest,
+        workspace: Path,
+    ) -> dict[str, str]:
+        """Freeze the clean candidate state that every Writer application must extend."""
+
+        snapshot = collect_candidate_snapshot(
+            workspace,
+            request.base_sha,
+            self._governance_metadata_patterns(),
+        )
+        status = run_git(
+            workspace,
+            ["status", "--porcelain", "--untracked-files=all"],
+            check=True,
+        ).stdout
+        violations: list[str] = []
+        if snapshot.branch != request.branch:
+            violations.append("candidate branch does not match the frozen request")
+        if snapshot.head_sha != request.base_sha:
+            violations.append("candidate HEAD does not match the frozen request base")
+        if not snapshot.base_is_ancestor:
+            violations.append("candidate base is not an ancestor of the candidate HEAD")
+        if snapshot.changed_files or snapshot.metadata_files or status.strip():
+            violations.append("candidate is not clean while recording the Writer admission baseline")
+        if violations:
+            raise OperatorGovernanceError("; ".join(violations))
+        payload: dict[str, Any] = {
+            "schema": "autobugfix-writer-admission-baseline-v1",
+            "request_id": request_id,
+            "base_sha": request.base_sha,
+            "head_sha": snapshot.head_sha,
+            "patch_digest": snapshot.patch_digest,
+            "content_digest": self._candidate_code_content_digest(workspace),
+        }
+        payload["baseline_digest"] = digest_payload(payload)
+        artifact = self.store.write_artifact(
+            request_id,
+            producer="trusted_writer_admission",
+            trust_class="authoritative",
+            kind="writer-admission-baseline",
+            content=yaml.safe_dump(payload, sort_keys=False),
+            filename="baseline.yaml",
+            patch_digest=snapshot.patch_digest,
+        )
+        return {
+            "artifact_id": artifact.artifact_id,
+            "artifact_sha256": artifact.sha256,
+            "baseline_digest": str(payload["baseline_digest"]),
+        }
+
+    def _read_authoritative_writer_artifact(
+        self,
+        request_id: str,
+        artifact_id: str,
+        *,
+        kind: str,
+        writer_run_id: str | None,
+    ) -> dict[str, Any]:
+        references = [
+            item
+            for item in self.store.read_artifacts(request_id)
+            if item.get("artifact_id") == artifact_id
+        ]
+        if len(references) != 1:
+            raise OperatorGovernanceError(
+                f"trusted Writer artifact is missing or ambiguous: {artifact_id}"
+            )
+        reference = references[0]
+        if (
+            reference.get("producer") != "trusted_writer_admission"
+            or reference.get("trust_class") != "authoritative"
+            or reference.get("kind") != kind
+            or reference.get("writer_run_id") != writer_run_id
+        ):
+            raise OperatorGovernanceError(
+                f"Writer artifact has an invalid trusted identity: {artifact_id}"
+            )
+        path = Path(str(reference["path"])).resolve()
+        try:
+            path.relative_to(self.store.artifact_root.resolve())
+        except ValueError as exc:
+            raise OperatorGovernanceError(
+                f"Writer artifact escaped the trusted artifact root: {artifact_id}"
+            ) from exc
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != reference.get("sha256"):
+            raise OperatorGovernanceError(
+                f"Writer artifact content is missing or tampered: {artifact_id}"
+            )
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise OperatorGovernanceError(f"Writer artifact is not a mapping: {artifact_id}")
+        return data
+
+    def _read_writer_admission_baseline(
+        self,
+        request_id: str,
+        request: OperatorRequest,
+    ) -> dict[str, Any]:
+        workspace = self.store.read_workspace(request_id)
+        reference = workspace.get("writer_admission_baseline")
+        if not isinstance(reference, dict):
+            raise OperatorGovernanceError(
+                "candidate workspace has no trusted Writer admission baseline; recreate the request from its frozen base"
+            )
+        artifact_id = reference.get("artifact_id")
+        artifact_sha = reference.get("artifact_sha256")
+        baseline_digest = reference.get("baseline_digest")
+        if not all(isinstance(item, str) and item for item in (artifact_id, artifact_sha, baseline_digest)):
+            raise OperatorGovernanceError("candidate Writer admission baseline reference is malformed")
+        data = self._read_authoritative_writer_artifact(
+            request_id,
+            artifact_id,
+            kind="writer-admission-baseline",
+            writer_run_id=None,
+        )
+        raw_digest = data.get("baseline_digest")
+        payload = {key: value for key, value in data.items() if key != "baseline_digest"}
+        if (
+            data.get("schema") != "autobugfix-writer-admission-baseline-v1"
+            or data.get("request_id") != request_id
+            or data.get("base_sha") != request.base_sha
+            or not isinstance(raw_digest, str)
+            or raw_digest != digest_payload(payload)
+            or raw_digest != baseline_digest
+        ):
+            raise OperatorGovernanceError("candidate Writer admission baseline is invalid")
+        references = [
+            item
+            for item in self.store.read_artifacts(request_id)
+            if item.get("artifact_id") == artifact_id
+        ]
+        if references[0].get("sha256") != artifact_sha:
+            raise OperatorGovernanceError("candidate Writer admission baseline digest is stale")
+        for key in ("head_sha", "patch_digest", "content_digest"):
+            if not isinstance(data.get(key), str) or not data[key]:
+                raise OperatorGovernanceError(
+                    f"candidate Writer admission baseline is missing {key}"
+                )
+        return data
+
+    def _read_writer_application(
+        self,
+        request_id: str,
+        run: WriterRun,
+    ) -> dict[str, Any]:
+        if not run.application_artifact_id:
+            raise OperatorGovernanceError(
+                f"WriterRun {run.run_id} has no trusted application artifact"
+            )
+        data = self._read_authoritative_writer_artifact(
+            request_id,
+            run.application_artifact_id,
+            kind="writer-application",
+            writer_run_id=run.run_id,
+        )
+        before = data.get("candidate_before")
+        after = data.get("candidate_after")
+        if (
+            data.get("schema") != "autobugfix-writer-application-v2"
+            or data.get("request_id") != request_id
+            or data.get("run_id") != run.run_id
+            or not isinstance(before, dict)
+            or not isinstance(after, dict)
+            or before.get("head_sha") != run.candidate_before_head_sha
+            or before.get("patch_digest") != run.candidate_before_patch_digest
+            or before.get("content_digest") != run.candidate_before_content_digest
+            or after.get("head_sha") != run.head_sha
+            or after.get("patch_digest") != run.patch_digest
+            or after.get("content_digest") != run.candidate_after_content_digest
+        ):
+            raise OperatorGovernanceError(
+                f"WriterRun {run.run_id} does not match its trusted application artifact"
+            )
+        return data
+
+    def _assert_writer_admission_chain(
+        self,
+        request_id: str,
+        request: OperatorRequest,
+        snapshot: Any,
+        content_digest: str,
+        *,
+        require_completed_run: bool,
+        require_uncommitted_candidate: bool,
+    ) -> WriterRun | None:
+        """Prove the candidate is exactly the service-applied Writer history."""
+
+        baseline = self._read_writer_admission_baseline(request_id, request)
+        expected_head = str(baseline["head_sha"])
+        expected_patch = str(baseline["patch_digest"])
+        expected_content = str(baseline["content_digest"])
+        if expected_head != request.base_sha:
+            raise OperatorGovernanceError(
+                "Writer admission baseline does not originate at the frozen request base"
+            )
+        completed = [
+            run
+            for run in self.store.read_writer_runs(request_id)
+            if run.status == "COMPLETED"
+        ]
+        for run in completed:
+            if (
+                run.base_sha != request.base_sha
+                or run.candidate_before_head_sha != expected_head
+                or run.candidate_before_patch_digest != expected_patch
+                or run.candidate_before_content_digest != expected_content
+                or run.head_sha != request.base_sha
+                or not run.patch_digest
+                or not run.candidate_after_content_digest
+            ):
+                raise OperatorGovernanceError(
+                    f"WriterRun {run.run_id} breaks the trusted candidate application chain"
+                )
+            self._read_writer_application(request_id, run)
+            if not self._matching_event(
+                request_id,
+                "writer_applied",
+                run_id=run.run_id,
+                application_artifact_id=run.application_artifact_id,
+                candidate_before_head_sha=run.candidate_before_head_sha,
+                candidate_before_patch_digest=run.candidate_before_patch_digest,
+                candidate_before_content_digest=run.candidate_before_content_digest,
+                head_sha=run.head_sha,
+                patch_digest=run.patch_digest,
+                candidate_after_content_digest=run.candidate_after_content_digest,
+            ):
+                raise OperatorGovernanceError(
+                    f"WriterRun {run.run_id} is missing its trusted writer_applied event"
+                )
+            expected_head = run.head_sha
+            expected_patch = run.patch_digest
+            expected_content = run.candidate_after_content_digest
+        if require_completed_run and not completed:
+            raise OperatorGovernanceError("candidate has no completed trusted WriterRun")
+        if snapshot.patch_digest != expected_patch or content_digest != expected_content:
+            raise OperatorGovernanceError(
+                "candidate state is not the latest service-applied Writer snapshot"
+            )
+        if require_uncommitted_candidate and snapshot.head_sha != expected_head:
+            raise OperatorGovernanceError(
+                "candidate HEAD changed outside the trusted Writer application chain"
+            )
+        return completed[-1] if completed else None
+
     def _evidence_view(self, request: OperatorRequest) -> list[dict[str, Any]]:
         values: list[dict[str, Any]] = []
         for reference in request.evidence:
@@ -906,18 +3576,58 @@ class OperatorGovernanceService:
                 path = Path(reference)
                 if not path.is_absolute():
                     path = self.project_root / path
-                if path.is_file() and path.stat().st_size <= 65536:
+                if path.is_file() and path.stat().st_size <= 8192:
                     try:
                         item["content"] = path.read_text(encoding="utf-8")
                     except UnicodeDecodeError:
                         item["content"] = "<binary evidence>"
+                elif path.is_file():
+                    item["content"] = "<evidence omitted from Writer prompt because it exceeds 8192 bytes>"
+                    item["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
             values.append(item)
         return values
+
+    def _run_operator_role_backend(
+        self,
+        request_id: str,
+        codex_request: CodexRequest,
+        *,
+        call_key: str,
+        revision: int,
+        backend: CodexBackend,
+    ) -> CodexResult:
+        request, _ = self._effective_request(request_id)
+        if not request.experiment_line_id:
+            return backend.run(codex_request)
+        if not request.budget_grant_id:
+            raise OperatorGovernanceError(
+                "line-bound Operator role call requires a frozen budget grant"
+            )
+        line = self.store.read_experiment_line(request.experiment_line_id)
+        study = self.store.read_study(line.study_id)
+        explicit_request = replace(codex_request, model=study.primary_model)
+        metered = self.metered_codex_backend(
+            grant_id=request.budget_grant_id,
+            call_key=call_key,
+            execution_id=request_id,
+            revision=revision,
+            backend=backend,
+        )
+        return metered.run(explicit_request)
+
+    def _next_operator_role_revision(self, request_id: str, role: str) -> int:
+        request, _ = self._effective_request(request_id)
+        if not request.budget_grant_id:
+            return 1
+        usage = self.store.read_usage_entries(request.budget_grant_id)
+        return 1 + sum(
+            entry.execution_id == request_id and entry.role == role
+            for entry in usage
+        )
 
     def writer_view(self, request_id: str) -> dict[str, Any]:
         request, scope_version = self._effective_request(request_id)
         projection = self.projection(request_id)
-        workspace = self.store.read_workspace(request_id)
         checks = self.store.read_check_runs(request_id)
         constitution = self.governance_context()
         latest_check = None
@@ -954,7 +3664,11 @@ class OperatorGovernanceService:
             },
             "feedback": [item.to_dict() for item in self.store.read_feedback(request_id)],
             "latest_check": latest_check,
-            "candidate": {"worktree": workspace["path"], "base_sha": request.base_sha, "branch": request.branch},
+            "candidate": {
+                "workspace": "service-owned writable staging directory supplied as the current working directory",
+                "base_sha": request.base_sha,
+                "branch": request.branch,
+            },
             "constitution": {
                 "digest": constitution["digest"],
                 "project": constitution["project"],
@@ -1020,7 +3734,16 @@ class OperatorGovernanceService:
             stderr_log,
             resolved_role=role,
         )
-        result = self.backend.run(codex_request)
+        result = self._run_operator_role_backend(
+            request_id,
+            codex_request,
+            call_key=f"{request_id}:supervisor:{diagnosis_id}",
+            revision=self._next_operator_role_revision(
+                request_id,
+                "operator_supervisor",
+            ),
+            backend=self.backend,
+        )
         artifact = self.store.write_artifact(
             request_id,
             producer="operator_supervisor",
@@ -1053,6 +3776,246 @@ class OperatorGovernanceService:
             "recommendation": result.text,
             "artifact": artifact.to_dict(),
         }
+
+    @staticmethod
+    def _writer_staging_ignored(relative: Path) -> bool:
+        return _is_ephemeral_worktree_path(relative)
+
+    def _assert_writer_tree_safe(self, root: Path) -> None:
+        """Reject links and special files before they can escape Writer staging."""
+
+        resolved = root.resolve()
+        for current, directories, files in os.walk(resolved, topdown=True, followlinks=False):
+            current_path = Path(current)
+            kept_directories: list[str] = []
+            for name in directories:
+                entry = current_path / name
+                relative = entry.relative_to(resolved)
+                if self._writer_staging_ignored(relative):
+                    continue
+                if entry.is_symlink() or not entry.is_dir():
+                    raise OperatorGovernanceError(
+                        f"Writer staging tree contains an unsafe directory entry: {relative.as_posix()}"
+                    )
+                kept_directories.append(name)
+            directories[:] = kept_directories
+            for name in files:
+                entry = current_path / name
+                relative = entry.relative_to(resolved)
+                if self._writer_staging_ignored(relative):
+                    continue
+                if entry.is_symlink() or not entry.is_file():
+                    raise OperatorGovernanceError(
+                        f"Writer staging tree contains an unsafe file entry: {relative.as_posix()}"
+                    )
+
+    def _writer_staging_path(self, request_id: str, run_id: str) -> Path:
+        root = self.store.root.resolve()
+        staging = root / "writer-staging" / safe_id(request_id) / safe_id(run_id)
+        try:
+            staging.resolve().relative_to(root)
+        except ValueError as exc:
+            raise OperatorGovernanceError("Writer staging path escaped the trusted state root") from exc
+        return staging
+
+    def _prepare_writer_staging(
+        self,
+        request_id: str,
+        run_id: str,
+        workspace: Path,
+    ) -> tuple[Path, str]:
+        workspace = workspace.resolve()
+        staging = self._writer_staging_path(request_id, run_id)
+        if staging.exists() or staging.is_symlink():
+            raise OperatorGovernanceError(f"Writer staging path already exists: {staging}")
+        self._assert_writer_tree_safe(workspace)
+
+        def ignore(directory: str, names: list[str]) -> set[str]:
+            source = Path(directory).resolve()
+            relative = source.relative_to(workspace)
+            return {
+                name
+                for name in names
+                if self._writer_staging_ignored(relative / name)
+            }
+
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(workspace, staging, ignore=ignore)
+        self._assert_writer_tree_safe(staging)
+        run_git(staging, ["init", "--initial-branch", "writer-staging"], check=True)
+        run_git(staging, ["config", "user.email", "autobugfix-writer@local"], check=True)
+        run_git(staging, ["config", "user.name", "Autobugfix Writer Staging"], check=True)
+        run_git(staging, ["add", "--all"], check=True)
+        run_git(staging, ["commit", "-m", "Writer staging baseline"], check=True)
+        return staging, rev_parse(staging, "HEAD")
+
+    def _writer_candidate_backup_path(self, request_id: str, run_id: str) -> Path:
+        root = self.store.root.resolve()
+        backup = root / "writer-backups" / safe_id(request_id) / safe_id(run_id)
+        try:
+            backup.resolve().relative_to(root)
+        except ValueError as exc:
+            raise OperatorGovernanceError("Writer backup path escaped the trusted state root") from exc
+        return backup
+
+    def _capture_writer_candidate_backup(
+        self,
+        request_id: str,
+        run_id: str,
+        workspace: Path,
+    ) -> Path:
+        backup = self._writer_candidate_backup_path(request_id, run_id)
+        if backup.exists() or backup.is_symlink():
+            raise OperatorGovernanceError(f"Writer backup path already exists: {backup}")
+        self._assert_writer_tree_safe(workspace)
+
+        def ignore(directory: str, names: list[str]) -> set[str]:
+            source = Path(directory).resolve()
+            relative = source.relative_to(workspace.resolve())
+            return {name for name in names if relative / name == Path(".git")}
+
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(workspace, backup, ignore=ignore)
+        return backup
+
+    def _restore_writer_candidate_backup(self, workspace: Path, backup: Path, head_sha: str) -> None:
+        """Restore a candidate after a Writer bypass attempt without touching main."""
+
+        workspace = workspace.resolve()
+        backup = backup.resolve()
+        try:
+            backup.relative_to(self.store.root.resolve())
+        except ValueError as exc:
+            raise OperatorGovernanceError("Writer backup is outside the trusted state root") from exc
+        run_git(workspace, ["reset", "--mixed", head_sha], check=True)
+        for entry in workspace.iterdir():
+            if entry.name == ".git":
+                continue
+            if entry.is_symlink() or entry.is_file():
+                entry.unlink()
+            else:
+                shutil.rmtree(entry)
+        for entry in backup.iterdir():
+            target = workspace / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, target)
+            else:
+                shutil.copy2(entry, target)
+
+    def _validate_writer_staging_scope(
+        self,
+        request: OperatorRequest,
+        changed_files: Iterable[str],
+    ) -> None:
+        policy = self.policy().data
+        violations: list[str] = []
+        for path in sorted(set(changed_files)):
+            if not any(_match_path(pattern, path) for pattern in request.planned_paths):
+                violations.append(f"Writer staging change is outside declared scope: {path}")
+                continue
+            owners = layers_for_file(policy, path)
+            if len(owners) != 1:
+                violations.append(f"Writer staging change has ambiguous or missing layer owner: {path}")
+            elif owners[0] not in request.declared_layers:
+                violations.append(
+                    f"Writer staging change belongs to undeclared layer {owners[0]}: {path}"
+                )
+        if violations:
+            raise OperatorGovernanceError("; ".join(violations))
+
+    def _apply_writer_staging_changes(
+        self,
+        workspace: Path,
+        staging: Path,
+        changed_files: Iterable[str],
+    ) -> list[dict[str, str]]:
+        """Copy an already-audited staging diff into the real candidate atomically per file."""
+
+        workspace = workspace.resolve()
+        staging = staging.resolve()
+        paths = sorted(set(str(item) for item in changed_files))
+        backups: dict[str, tuple[bool, bytes | None, int | None]] = {}
+        created_directories: list[Path] = []
+        operations: list[dict[str, str]] = []
+        for relative_text in paths:
+            relative = Path(relative_text)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise OperatorGovernanceError(f"invalid Writer staging path: {relative_text}")
+            source = staging / relative
+            target = workspace / relative
+            try:
+                source.relative_to(staging)
+                target.relative_to(workspace)
+            except ValueError as exc:
+                raise OperatorGovernanceError(f"Writer staging path escaped its root: {relative_text}") from exc
+            if source.is_symlink() or (source.exists() and not source.is_file()):
+                raise OperatorGovernanceError(f"Writer staging path is not a regular file: {relative_text}")
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                raise OperatorGovernanceError(f"candidate path is not a regular file: {relative_text}")
+            if target.exists():
+                backups[relative_text] = (
+                    True,
+                    target.read_bytes(),
+                    target.stat().st_mode & 0o777,
+                )
+            else:
+                backups[relative_text] = (False, None, None)
+        try:
+            for relative_text in paths:
+                relative = Path(relative_text)
+                source = staging / relative
+                target = workspace / relative
+                if source.exists():
+                    missing: list[Path] = []
+                    parent = target.parent
+                    while parent != workspace and not parent.exists():
+                        missing.append(parent)
+                        parent = parent.parent
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    created_directories.extend(missing)
+                    temporary = target.with_name(f".{target.name}.writer-{uuid.uuid4().hex}.tmp")
+                    shutil.copyfile(source, temporary)
+                    os.chmod(temporary, source.stat().st_mode & 0o777)
+                    temporary.replace(target)
+                    operations.append(
+                        {
+                            "path": relative_text,
+                            "operation": "write",
+                            "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                        }
+                    )
+                elif target.exists():
+                    target.unlink()
+                    operations.append({"path": relative_text, "operation": "delete", "sha256": ""})
+                else:
+                    raise OperatorGovernanceError(
+                        f"Writer staging deletion does not exist in candidate: {relative_text}"
+                    )
+        except Exception:
+            for relative_text in reversed(paths):
+                target = workspace / relative_text
+                existed, content, mode = backups[relative_text]
+                if existed:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content or b"")
+                    os.chmod(target, mode or 0o644)
+                elif target.exists() or target.is_symlink():
+                    target.unlink()
+            for directory in reversed(created_directories):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            raise
+        return operations
+
+    def _matching_event(self, request_id: str, kind: str, **expected: object) -> bool:
+        for event in reversed(self.store.read_events(request_id)):
+            if event.kind != kind:
+                continue
+            if all(event.payload.get(key) == value for key, value in expected.items()):
+                return True
+        return False
 
     def _writer_log_paths(self, request_id: str, run_id: str) -> tuple[Path, Path]:
         root = self.store.artifact_root / request_id / "writer-runs" / run_id
@@ -1160,64 +4123,106 @@ class OperatorGovernanceService:
         )
 
     def start_writer(self, request_id: str, *, actor: str | None = None) -> dict[str, Any]:
-        with self.store.request_lease(request_id):
-            projection = self.projection(request_id)
-            self.guard.require_phase(projection.state, "ACTIVE")
-            self.guard.require_no_active_run(
-                projection.active_writer_run_id, projection.active_check_run_id
-            )
-            request, scope_version = self._effective_request(request_id)
-            attempts = self.store.read_writer_runs(request_id)
-            if len(attempts) >= self.config.operator.retry.max_attempts:
-                raise OperatorGovernanceError("writer attempt budget exhausted")
-            role = resolve_role(self.config, "operator_writer")
-            self._validate_operator_role("operator_writer", role)
-            view = self.writer_view(request_id)
-            run_id = self.store.next_id("writer")
-            raw_log, stderr_log = self._writer_log_paths(request_id, run_id)
-            role_digest = digest_payload(role.to_dict(self.project_root))
-            run = WriterRun(
-                run_id=run_id,
-                request_id=request_id,
-                attempt=len(attempts) + 1,
-                status="QUEUED",
-                role_digest=role_digest,
-                scope_version=scope_version,
-                input_digest=digest_payload(view),
-                base_sha=request.base_sha,
-                feedback_ids=tuple(
-                    item.feedback_id for item in self.store.read_feedback(request_id)
+        run_id: str | None = None
+        raw_log: Path | None = None
+        stderr_log: Path | None = None
+        running: WriterRun | None = None
+        staging: Path | None = None
+        backup: Path | None = None
+        try:
+            with self.store.request_lease(request_id):
+                projection = self.projection(request_id)
+                self.guard.require_phase(projection.state, "ACTIVE")
+                self.guard.require_no_active_run(
+                    projection.active_writer_run_id, projection.active_check_run_id
+                )
+                request, scope_version = self._effective_request(request_id)
+                attempts = self.store.read_writer_runs(request_id)
+                if len(attempts) >= self.config.operator.retry.max_attempts:
+                    raise OperatorGovernanceError("writer attempt budget exhausted")
+                role = resolve_role(self.config, "operator_writer")
+                self._validate_operator_role("operator_writer", role)
+                workspace = Path(self.store.read_workspace(request_id)["path"]).resolve()
+                candidate_before = self._snapshot(request_id, request)
+                candidate_content_before = self._candidate_code_content_digest(workspace)
+                self._assert_writer_admission_chain(
+                    request_id,
+                    request,
+                    candidate_before,
+                    candidate_content_before,
+                    require_completed_run=False,
+                    require_uncommitted_candidate=True,
+                )
+                trusted_head_before = rev_parse(self.project_root, "HEAD")
+                trusted_status_before = run_git(
+                    self.project_root, ["status", "--porcelain"], check=True
+                ).stdout
+                view = self.writer_view(request_id)
+                run_id = self.store.next_id("writer")
+                raw_log, stderr_log = self._writer_log_paths(request_id, run_id)
+                role_digest = digest_payload(role.to_dict(self.project_root))
+                run = WriterRun(
+                    run_id=run_id,
+                    request_id=request_id,
+                    attempt=len(attempts) + 1,
+                    status="QUEUED",
+                    role_digest=role_digest,
+                    scope_version=scope_version,
+                    input_digest=digest_payload(view),
+                    base_sha=request.base_sha,
+                    candidate_before_head_sha=candidate_before.head_sha,
+                    candidate_before_patch_digest=candidate_before.patch_digest,
+                    candidate_before_content_digest=candidate_content_before,
+                    feedback_ids=tuple(
+                        item.feedback_id for item in self.store.read_feedback(request_id)
+                    ),
+                )
+                self.store.write_writer_run(run)
+                running = replace(run, status="RUNNING", started_at=utc_now())
+                self.store.update_writer_run(running)
+                self.store.append_event(
+                    request_id,
+                    "writer_started",
+                    self._actor(actor),
+                    {"run_id": run_id, "attempt": run.attempt},
+                )
+                backup = self._capture_writer_candidate_backup(request_id, run_id, workspace)
+                staging, staging_base_sha = self._prepare_writer_staging(request_id, run_id, workspace)
+                self.store.append_event(
+                    request_id,
+                    "writer_staging_prepared",
+                    "trusted-host",
+                    {"run_id": run_id, "staging_base_sha": staging_base_sha},
+                )
+                codex_request = build_codex_request(
+                    self.project_root,
+                    "operator_writer",
+                    writer_prompt(view),
+                    staging,
+                    None,
+                    None,
+                    None,
+                    raw_log,
+                    stderr_log,
+                    resolved_role=role,
+                )
+            result = self._run_operator_role_backend(
+                request_id,
+                codex_request,
+                call_key=f"{request_id}:writer:{run_id}",
+                revision=self._next_operator_role_revision(
+                    request_id,
+                    "operator_writer",
+                ),
+                backend=CallbackCodexBackend(
+                    lambda item: self._run_writer_backend(request_id, run_id or "", item)
                 ),
             )
-            self.store.write_writer_run(run)
-            running = replace(run, status="RUNNING", started_at=utc_now())
-            self.store.update_writer_run(running)
-            self.store.append_event(
-                request_id,
-                "writer_started",
-                self._actor(actor),
-                {"run_id": run_id, "attempt": run.attempt},
-            )
-            workspace = Path(self.store.read_workspace(request_id)["path"])
-            codex_request = build_codex_request(
-                self.project_root,
-                "operator_writer",
-                writer_prompt(view),
-                workspace,
-                None,
-                None,
-                None,
-                raw_log,
-                stderr_log,
-                resolved_role=role,
-            )
-        try:
-            result = self._run_writer_backend(request_id, run_id, codex_request)
             with self.store.request_lease(request_id):
-                current = self.store.read_writer_run(run_id)
+                current = self.store.read_writer_run(run_id or "")
                 if current.status == "CANCELLED":
                     for kind, path in (("writer-raw", raw_log), ("writer-stderr", stderr_log)):
-                        if path.is_file():
+                        if path is not None and path.is_file():
                             self.store.register_artifact_file(
                                 request_id,
                                 producer="codex_host",
@@ -1227,12 +4232,142 @@ class OperatorGovernanceService:
                                 writer_run_id=run_id,
                             )
                     return current.to_dict()
+                if staging is None or backup is None:
+                    raise OperatorGovernanceError("trusted Writer admission staging was not created")
+                candidate_after_backend = self._snapshot(request_id, request)
+                candidate_content_after_backend = self._candidate_code_content_digest(workspace)
+                candidate_mutated = (
+                    candidate_after_backend.head_sha != candidate_before.head_sha
+                    or candidate_after_backend.patch_digest != candidate_before.patch_digest
+                    or candidate_content_after_backend != candidate_content_before
+                )
+                if candidate_mutated:
+                    self._restore_writer_candidate_backup(
+                        workspace, backup, candidate_before.head_sha
+                    )
+                    restored = self._snapshot(request_id, request)
+                    restored_content = self._candidate_code_content_digest(workspace)
+                    restored_ok = (
+                        restored.head_sha == candidate_before.head_sha
+                        and restored.patch_digest == candidate_before.patch_digest
+                        and restored_content == candidate_content_before
+                    )
+                    rejection = self.store.write_artifact(
+                        request_id,
+                        producer="trusted_writer_admission",
+                        trust_class="authoritative",
+                        kind="writer-admission-rejection",
+                        content=yaml.safe_dump(
+                            {
+                                "run_id": run_id,
+                                "reason": "Writer mutated the real candidate outside service-owned staging",
+                                "candidate_before": {
+                                    "head_sha": candidate_before.head_sha,
+                                    "patch_digest": candidate_before.patch_digest,
+                                    "content_digest": candidate_content_before,
+                                },
+                                "candidate_after_backend": {
+                                    "head_sha": candidate_after_backend.head_sha,
+                                    "patch_digest": candidate_after_backend.patch_digest,
+                                    "content_digest": candidate_content_after_backend,
+                                },
+                                "restored": restored_ok,
+                            },
+                            sort_keys=False,
+                        ),
+                        filename="admission-rejection.yaml",
+                        writer_run_id=run_id,
+                    )
+                    self.store.append_event(
+                        request_id,
+                        "writer_candidate_mutation_reverted",
+                        "trusted-host",
+                        {"run_id": run_id, "artifact_id": rejection.artifact_id, "restored": restored_ok},
+                    )
+                    if not restored_ok:
+                        raise OperatorGovernanceError(
+                            "Writer mutated the real candidate and trusted restoration failed"
+                        )
+                    raise OperatorGovernanceError(
+                        "Writer mutated the real candidate outside service-owned staging"
+                    )
+                trusted_head_after = rev_parse(self.project_root, "HEAD")
+                trusted_status_after = run_git(
+                    self.project_root, ["status", "--porcelain"], check=True
+                ).stdout
+                if (
+                    trusted_head_after != trusted_head_before
+                    or trusted_status_after != trusted_status_before
+                ):
+                    raise OperatorGovernanceError(
+                        "Writer mutated the trusted control checkout outside the service boundary"
+                    )
+                self._assert_writer_tree_safe(staging)
+                staging_snapshot = collect_candidate_snapshot(staging, staging_base_sha)
+                self._validate_writer_staging_scope(request, staging_snapshot.changed_files)
+                staging_diff = run_git(
+                    staging, ["diff", "--binary", staging_base_sha, "--"], check=True
+                ).stdout
+                staging_artifact = self.store.write_artifact(
+                    request_id,
+                    producer="trusted_writer_admission",
+                    trust_class="authoritative",
+                    kind="writer-staging-diff",
+                    content=staging_diff,
+                    filename="staging.diff",
+                    writer_run_id=run_id,
+                    patch_digest=staging_snapshot.patch_digest,
+                )
+                operations = self._apply_writer_staging_changes(
+                    workspace, staging, staging_snapshot.changed_files
+                )
                 snapshot = self._snapshot(request_id, request)
+                candidate_content_after = self._candidate_code_content_digest(workspace)
+                application = self.store.write_artifact(
+                    request_id,
+                    producer="trusted_writer_admission",
+                    trust_class="authoritative",
+                    kind="writer-application",
+                    content=yaml.safe_dump(
+                        {
+                            "schema": "autobugfix-writer-application-v2",
+                            "request_id": request_id,
+                            "run_id": run_id,
+                            "scope_version": scope_version,
+                            "candidate_before": {
+                                "head_sha": candidate_before.head_sha,
+                                "patch_digest": candidate_before.patch_digest,
+                                "content_digest": candidate_content_before,
+                            },
+                            "staging": {
+                                "base_sha": staging_base_sha,
+                                "head_sha": staging_snapshot.head_sha,
+                                "patch_digest": staging_snapshot.patch_digest,
+                                "changed_files": staging_snapshot.changed_files,
+                                "diff_artifact_id": staging_artifact.artifact_id,
+                            },
+                            "candidate_after": {
+                                "head_sha": snapshot.head_sha,
+                                "patch_digest": snapshot.patch_digest,
+                                "content_digest": candidate_content_after,
+                                "changed_files": snapshot.changed_files,
+                            },
+                            "operations": operations,
+                        },
+                        sort_keys=False,
+                    ),
+                    filename="application.yaml",
+                    writer_run_id=run_id,
+                    patch_digest=snapshot.patch_digest,
+                )
                 completed = replace(
                     running,
                     status="COMPLETED",
                     head_sha=snapshot.head_sha,
                     patch_digest=snapshot.patch_digest,
+                    candidate_after_content_digest=candidate_content_after,
+                    staging_patch_digest=staging_snapshot.patch_digest,
+                    application_artifact_id=application.artifact_id,
                     finished_at=utc_now(),
                 )
                 self.store.update_writer_run(completed)
@@ -1247,7 +4382,7 @@ class OperatorGovernanceService:
                     patch_digest=snapshot.patch_digest,
                 )
                 for kind, path in (("writer-raw", raw_log), ("writer-stderr", stderr_log)):
-                    if path.is_file():
+                    if path is not None and path.is_file():
                         self.store.register_artifact_file(
                             request_id,
                             producer="codex_host",
@@ -1257,6 +4392,21 @@ class OperatorGovernanceService:
                             writer_run_id=run_id,
                             patch_digest=snapshot.patch_digest,
                         )
+                self.store.append_event(
+                    request_id,
+                    "writer_applied",
+                    "trusted-host",
+                    {
+                        "run_id": run_id,
+                        "application_artifact_id": application.artifact_id,
+                        "candidate_before_head_sha": candidate_before.head_sha,
+                        "candidate_before_patch_digest": candidate_before.patch_digest,
+                        "candidate_before_content_digest": candidate_content_before,
+                        "head_sha": snapshot.head_sha,
+                        "patch_digest": snapshot.patch_digest,
+                        "candidate_after_content_digest": candidate_content_after,
+                    },
+                )
                 self.store.append_event(
                     request_id,
                     "patch_observed",
@@ -1272,11 +4422,13 @@ class OperatorGovernanceService:
                 )
                 return completed.to_dict()
         except Exception as exc:
+            if run_id is None or running is None:
+                raise
             with self.store.request_lease(request_id):
                 current = self.store.read_writer_run(run_id)
                 if current.status == "CANCELLED":
                     for kind, path in (("writer-raw", raw_log), ("writer-stderr", stderr_log)):
-                        if path.is_file():
+                        if path is not None and path.is_file():
                             self.store.register_artifact_file(
                                 request_id,
                                 producer="codex_host",
@@ -1318,6 +4470,10 @@ class OperatorGovernanceService:
                     {"feedback_id": feedback.feedback_id},
                 )
             raise OperatorGovernanceError(f"operator writer failed: {exc}") from exc
+        finally:
+            for path in (staging, backup):
+                if path is not None and (path.exists() or path.is_symlink()):
+                    self._remove_release_tree(path)
 
     def retry_writer(self, request_id: str, *, actor: str | None = None) -> dict[str, Any]:
         with self.store.request_lease(request_id):
@@ -1340,14 +4496,71 @@ class OperatorGovernanceService:
         request, _ = self._effective_request(request_id)
         workspace = Path(self.store.read_workspace(request_id)["path"])
         before = self._snapshot(request_id, request)
+        writer_runs = self.store.read_writer_runs(request_id)
+        latest_writer = writer_runs[-1] if writer_runs else None
+        if before.head_sha != request.base_sha:
+            raise OperatorGovernanceError(
+                "candidate HEAD changed before trusted candidate-commit; direct candidate commits are forbidden"
+            )
+        trusted_writer = self._assert_writer_admission_chain(
+            request_id,
+            request,
+            before,
+            self._candidate_code_content_digest(workspace),
+            require_completed_run=True,
+            require_uncommitted_candidate=True,
+        )
+        if latest_writer is None or latest_writer.status != "COMPLETED":
+            raise OperatorGovernanceError("candidate-commit requires a completed trusted WriterRun")
+        if trusted_writer is None or latest_writer.run_id != trusted_writer.run_id:
+            raise OperatorGovernanceError(
+                "candidate-commit requires the latest WriterRun to be the trusted application-chain head"
+            )
+        if not latest_writer.application_artifact_id:
+            raise OperatorGovernanceError(
+                "candidate-commit requires a trusted Writer application artifact"
+            )
+        if latest_writer.patch_digest != before.patch_digest:
+            raise OperatorGovernanceError(
+                "candidate patch changed outside the latest trusted Writer application"
+            )
+        if not self._matching_event(
+            request_id,
+            "writer_applied",
+            run_id=latest_writer.run_id,
+            application_artifact_id=latest_writer.application_artifact_id,
+            head_sha=before.head_sha,
+            patch_digest=before.patch_digest,
+        ):
+            raise OperatorGovernanceError(
+                "candidate-commit requires a matching trusted writer_applied event"
+            )
         if not before.changed_files:
             raise OperatorGovernanceError("candidate has no code changes to commit")
         manifest = self.export_bundle(request_id) if include_manifest else None
-        run_git(workspace, ["add", "--all"], check=True)
-        staged = run_git(workspace, ["diff", "--cached", "--quiet"], check=False)
+        git_guard = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
+        run_git(workspace, [*git_guard, "add", "--all"], check=True)
+        staged = run_git(
+            workspace,
+            [*git_guard, "diff", "--cached", "--quiet", "--no-ext-diff"],
+            check=False,
+        )
         if staged.returncode == 0:
             raise OperatorGovernanceError("candidate has no staged changes to commit")
-        run_git(workspace, ["commit", "-m", message], check=True)
+        run_git(
+            workspace,
+            [
+                *git_guard,
+                "-c",
+                "user.name=Autobugfix Guard",
+                "-c",
+                "user.email=autobugfix-guard@localhost",
+                "commit",
+                "-m",
+                message,
+            ],
+            check=True,
+        )
         after = self._snapshot(request_id, request)
         if after.patch_digest != before.patch_digest:
             raise OperatorGovernanceError("candidate code patch changed while creating the trusted transport commit")
@@ -1359,6 +4572,8 @@ class OperatorGovernanceService:
                 "head_sha": after.head_sha,
                 "patch_digest": after.patch_digest,
                 "manifest": str(manifest) if manifest else None,
+                "writer_run_id": latest_writer.run_id,
+                "application_artifact_id": latest_writer.application_artifact_id,
             },
         )
         self.store.append_event(
@@ -1372,6 +4587,8 @@ class OperatorGovernanceService:
             "head_sha": after.head_sha,
             "patch_digest": after.patch_digest,
             "manifest": str(manifest) if manifest else None,
+            "writer_run_id": latest_writer.run_id,
+            "application_artifact_id": latest_writer.application_artifact_id,
         }
 
     @_leased_request
@@ -1430,7 +4647,16 @@ class OperatorGovernanceService:
             stderr_log,
             resolved_role=role,
         )
-        result = self.backend.run(codex_request)
+        result = self._run_operator_role_backend(
+            request_id,
+            codex_request,
+            call_key=f"{request_id}:verifier:{check_id}",
+            revision=self._next_operator_role_revision(
+                request_id,
+                "operator_verifier",
+            ),
+            backend=self.backend,
+        )
         decision = parse_evaluator_decision(result.text)
         reference = self.store.write_artifact(
             request_id,
@@ -1493,12 +4719,43 @@ class OperatorGovernanceService:
         decision.required_profiles = sorted(set(decision.required_profiles) | set(extra_profiles))
         writer_runs = self.store.read_writer_runs(request_id)
         latest_writer = writer_runs[-1] if writer_runs else None
+        candidate_content_before = self._candidate_code_content_digest(workspace)
+        if decision.changed_files or mode == "full":
+            try:
+                self._assert_writer_admission_chain(
+                    request_id,
+                    request,
+                    self._snapshot(request_id, request),
+                    candidate_content_before,
+                    require_completed_run=True,
+                    require_uncommitted_candidate=mode != "full",
+                )
+            except OperatorGovernanceError as exc:
+                decision.violations.append(str(exc))
+                decision.allowed = False
         if mode == "full":
             if latest_writer is None or latest_writer.status != "COMPLETED":
                 decision.violations.append("full verification requires a completed trusted WriterRun")
                 decision.allowed = False
+            elif not latest_writer.application_artifact_id:
+                decision.violations.append(
+                    "full verification requires a trusted Writer application artifact"
+                )
+                decision.allowed = False
             elif latest_writer.patch_digest != decision.patch_digest:
                 decision.violations.append("candidate patch changed outside the latest completed WriterRun")
+                decision.allowed = False
+            elif not self._matching_event(
+                request_id,
+                "candidate_committed",
+                head_sha=decision.head_sha,
+                patch_digest=decision.patch_digest,
+                writer_run_id=latest_writer.run_id,
+                application_artifact_id=latest_writer.application_artifact_id,
+            ):
+                decision.violations.append(
+                    "full verification requires a matching trusted candidate_committed event"
+                )
                 decision.allowed = False
             if run_git(workspace, ["status", "--porcelain"], check=True).stdout.strip():
                 decision.violations.append("full verification requires a committed and clean candidate worktree")
@@ -1525,22 +4782,18 @@ class OperatorGovernanceService:
         semantic_status = "PENDING"
         semantic_artifact: str | None = None
         if not failures:
-            validation_workspace = workspace
             temporary_workspace: Path | None = None
             try:
-                if mode == "full":
-                    temporary_workspace = (
-                        self.config.operator.worktrees.root / ".verification" / check_id
-                    ).resolve()
-                    temporary_workspace.parent.mkdir(parents=True, exist_ok=True)
-                    run_git(
-                        self.project_root,
-                        ["worktree", "add", "--detach", str(temporary_workspace), decision.head_sha],
-                        check=True,
-                    )
-                    validation_workspace = temporary_workspace
+                temporary_workspace = self._prepare_verification_workspace(
+                    check_id=check_id,
+                    request=request,
+                    decision=decision,
+                    candidate_workspace=workspace,
+                    candidate_content_digest=candidate_content_before,
+                    mode=mode,
+                )
                 results = run_validation_profiles(
-                    validation_workspace,
+                    temporary_workspace,
                     self.project_root,
                     request_id,
                     check_id,
@@ -1551,7 +4804,7 @@ class OperatorGovernanceService:
                     require_process_sandbox=self.config.operator.verification.require_process_sandbox,
                     network_access=self.config.operator.verification.network_access,
                     hidden_roots=(self.store.root, self.store.artifact_root),
-                    read_only_binds=self._runtime_binds(validation_workspace),
+                    read_only_binds=self._runtime_binds(temporary_workspace),
                 )
                 failures.extend(
                     f"validation command failed: {item['name']} (exit {item['exit_code']})"
@@ -1583,6 +4836,7 @@ class OperatorGovernanceService:
             if (
                 observed_after.patch_digest != decision.patch_digest
                 or observed_after.head_sha != decision.head_sha
+                or self._candidate_code_content_digest(workspace) != candidate_content_before
             ):
                 failures.append("candidate changed while trusted verification was running")
         if not failures and mode == "full" and request.performance_baseline:

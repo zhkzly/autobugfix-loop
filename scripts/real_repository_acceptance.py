@@ -17,10 +17,13 @@ import yaml
 UPSTREAM_URL = "https://github.com/pallets/itsdangerous.git"
 UPSTREAM_COMMIT = "672971d66a2ef9f85151e53283113f33d642dabd"
 REPO_ID = "itsdangerous_real"
+ORACLE_REPO_ID = "itsdangerous_independent_oracle"
 ENCODING_PATH = Path("src/itsdangerous/encoding.py")
 TEST_PATH = Path("tests/test_itsdangerous/test_encoding.py")
 HEALTHY_LINE = 'return base64.urlsafe_b64encode(string).rstrip(b"=")'
 BUGGY_LINE = "return base64.urlsafe_b64encode(string)"
+ORACLE_CASE_ID = "itsdangerous-independent-developer-oracle"
+ORACLE_BRANCH = "oracle/itsdangerous-independent-developer-fix"
 UPSTREAM_CLONE_ATTEMPTS = 3
 UPSTREAM_CLONE_TIMEOUT_SECONDS = 120
 
@@ -228,6 +231,151 @@ def write_control_config(
     write(control_root / ".autobugfix/config.yaml", yaml.safe_dump(config, sort_keys=False))
 
 
+def prepare_independent_oracle(
+    root: Path,
+    main_checkout: Path,
+    fixture_base: str,
+    runtime_python: Path,
+) -> tuple[Path, Path, Path, str]:
+    oracle_remote = root / "oracle-remote.git"
+    oracle_main = root / "oracle-main"
+    oracle_worktree_root = root / "oracle-worktrees"
+    oracle_worktree = oracle_worktree_root / ORACLE_CASE_ID
+    run(["git", "init", "--bare", str(oracle_remote)])
+    run(
+        [
+            "git",
+            "-C",
+            str(oracle_remote),
+            "fetch",
+            "--no-tags",
+            str(main_checkout),
+            f"{fixture_base}:refs/heads/main",
+        ]
+    )
+    run(["git", "-C", str(oracle_remote), "symbolic-ref", "HEAD", "refs/heads/main"])
+    run(["git", "clone", str(oracle_remote), str(oracle_main)])
+    run(["git", "-C", str(oracle_main), "config", "user.email", "oracle@example.invalid"])
+    run(["git", "-C", str(oracle_main), "config", "user.name", "Independent Developer Oracle"])
+    oracle_worktree_root.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "git",
+            "-C",
+            str(oracle_main),
+            "worktree",
+            "add",
+            "-b",
+            ORACLE_BRANCH,
+            str(oracle_worktree),
+            fixture_base,
+        ]
+    )
+    run(["git", "-C", str(oracle_worktree), "config", "user.email", "oracle@example.invalid"])
+    run(
+        [
+            "git",
+            "-C",
+            str(oracle_worktree),
+            "config",
+            "user.name",
+            "Independent Developer Oracle",
+        ]
+    )
+    encoding = oracle_worktree / ENCODING_PATH
+    content = encoding.read_text(encoding="utf-8")
+    if content.count(BUGGY_LINE) != 1:
+        raise RuntimeError("independent oracle expected exactly one injected production regression")
+    encoding.write_text(content.replace(BUGGY_LINE, HEALTHY_LINE), encoding="utf-8")
+    run(
+        [str(runtime_python), "-m", "pytest", "-q", TEST_PATH.as_posix()],
+        cwd=oracle_worktree,
+        env=test_env(oracle_worktree),
+    )
+    run(["git", "-C", str(oracle_worktree), "add", ENCODING_PATH.as_posix()])
+    run(
+        [
+            "git",
+            "-C",
+            str(oracle_worktree),
+            "commit",
+            "-m",
+            "Independent developer fix for URL-safe base64 padding",
+        ]
+    )
+    oracle_commit = run(
+        ["git", "-C", str(oracle_worktree), "rev-parse", "HEAD"]
+    ).stdout.strip()
+    changed = run(
+        [
+            "git",
+            "-C",
+            str(oracle_worktree),
+            "diff",
+            "--name-only",
+            fixture_base,
+            oracle_commit,
+            "--",
+        ]
+    ).stdout.splitlines()
+    if changed != [ENCODING_PATH.as_posix()]:
+        raise RuntimeError(f"independent oracle changed unexpected paths: {changed}")
+    target_ref = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(main_checkout),
+            "show-ref",
+            "--verify",
+            f"refs/heads/{ORACLE_BRANCH}",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if target_ref.returncode == 0:
+        raise RuntimeError("target repository unexpectedly contains the independent oracle ref")
+    target_object = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(main_checkout),
+            "cat-file",
+            "-e",
+            f"{oracle_commit}^{{commit}}",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if target_object.returncode == 0:
+        raise RuntimeError("target repository unexpectedly contains the independent oracle commit")
+    return oracle_main, oracle_worktree_root, oracle_worktree, oracle_commit
+
+
+def register_oracle_repository(
+    control_root: Path,
+    oracle_main: Path,
+    oracle_worktree_root: Path,
+    runtime_python: Path,
+) -> None:
+    path = control_root / ".autobugfix/config.yaml"
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    config["repos"][ORACLE_REPO_ID] = {
+        "main_checkout": str(oracle_main),
+        "worktree_root": str(oracle_worktree_root),
+        "remote": "origin",
+        "main_branch": "main",
+        "branch_template": "oracle/{date}_{slug}",
+        "test_commands": {
+            "targeted": test_command(runtime_python),
+            "full": test_command(runtime_python),
+        },
+        "ppe": {"enabled": False, "command_template": None},
+    }
+    write(path, yaml.safe_dump(config, sort_keys=False))
+
+
 def autobugfix_cmd(source_root: Path, *args: str) -> list[str]:
     return [
         "uv",
@@ -262,16 +410,11 @@ def build_eval_case(
     source_root: Path,
     control_root: Path,
     root: Path,
-    worktree: Path,
-    task_id: str,
+    oracle_worktree: Path,
+    oracle_commit: str,
     issue: str,
     runtime_python: Path,
 ) -> tuple[Path, dict[str, object]]:
-    run(["git", "-C", str(worktree), "config", "user.email", "acceptance@example.invalid"])
-    run(["git", "-C", str(worktree), "config", "user.name", "Autobugfix Acceptance"])
-    run(["git", "-C", str(worktree), "add", ENCODING_PATH.as_posix()])
-    run(["git", "-C", str(worktree), "commit", "-m", "Restore URL-safe base64 padding contract"])
-
     raw_path = root / "raw_commit_pairs.jsonl"
     run(
         autobugfix_cmd(
@@ -279,7 +422,7 @@ def build_eval_case(
             "dataset",
             "build-raw",
             "--repo",
-            REPO_ID,
+            ORACLE_REPO_ID,
             "--base-ref",
             "origin/main",
             "--out",
@@ -288,12 +431,21 @@ def build_eval_case(
         cwd=control_root,
     )
     rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    matching = [row for row in rows if row.get("raw_id") == task_id]
+    matching = [
+        row
+        for row in rows
+        if row.get("raw_id") == ORACLE_CASE_ID
+        and row.get("worktree_path") == str(oracle_worktree)
+        and row.get("final_commit") == oracle_commit
+    ]
     if len(matching) != 1:
-        raise RuntimeError(f"expected one raw dataset row for {task_id}, got {len(matching)}")
+        raise RuntimeError(
+            f"expected one independent oracle dataset row for {ORACLE_CASE_ID}, got {len(matching)}"
+        )
     case = matching[0]
     case.update(
         {
+            "repo": REPO_ID,
             "task_type": "bugfix",
             "benchmark": "autobugfix-real-acceptance",
             "dataset_revision": UPSTREAM_COMMIT,
@@ -302,8 +454,12 @@ def build_eval_case(
             "agent_prompt": issue,
             "expected_behavior": "base64_encode(b'a') returns b'YQ' and the configured pytest command passes",
             "change_summary": "restore unpadded URL-safe base64 output",
-            "evidence": "pinned upstream source plus failing regression test",
+            "evidence": (
+                "pinned upstream source, failing regression test, and an independent "
+                "developer oracle frozen before isolated Eval Execution"
+            ),
             "confidence": 1.0,
+            "oracle_visibility": "hidden",
         }
     )
     dataset_path = root / "real_problem_prompts.jsonl"
@@ -422,6 +578,22 @@ def main() -> int:
     if run(["git", "-C", str(main_checkout), "status", "--porcelain"]).stdout.strip():
         raise RuntimeError("target main checkout is dirty")
 
+    oracle_main, oracle_worktree_root, oracle_worktree, oracle_commit = (
+        prepare_independent_oracle(
+            root,
+            main_checkout,
+            fixture_base,
+            runtime_python,
+        )
+    )
+    register_oracle_repository(
+        control_root,
+        oracle_main,
+        oracle_worktree_root,
+        runtime_python,
+    )
+    run(autobugfix_cmd(source_root, "doctor"), cwd=control_root)
+
     run(autobugfix_cmd(source_root, "gate", task_id, "accepted"), cwd=control_root)
     archive_path = run(
         autobugfix_cmd(source_root, "archive", task_id, "--result", "accepted"),
@@ -449,8 +621,8 @@ def main() -> int:
         source_root,
         control_root,
         root,
-        worktree,
-        task_id,
+        oracle_worktree,
+        oracle_commit,
         issue,
         runtime_python,
     )
@@ -462,6 +634,9 @@ def main() -> int:
                 "upstream": UPSTREAM_URL,
                 "upstream_commit": UPSTREAM_COMMIT,
                 "fixture_base": fixture_base,
+                "oracle_commit": oracle_commit,
+                "oracle_repository": str(oracle_main),
+                "oracle_worktree": str(oracle_worktree),
                 "generated_paths": changed,
                 "archive": str(archived),
                 "memory_proposal": str(proposal_dir),

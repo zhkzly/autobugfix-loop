@@ -8,18 +8,21 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import yaml
 
 from autobugfix.cli import main
+from autobugfix.config import ConfigError, load_config
 from autobugfix.codex_sdk import (
     CODEX_BROKER_SOCKET_ENV,
     CODEX_BROKER_TOKEN_ENV,
     CodexSDKBackend,
     CodexSDKError,
 )
+from autobugfix.git_utils import rev_parse
 from autobugfix.models import CodexRequest, CodexResult
 from autobugfix.operator.bundle import OperatorBundleError, validate_bundle
 from autobugfix.operator.guard import compute_scope_risk
@@ -33,6 +36,7 @@ from autobugfix.operator.validator import (
     OperatorValidationError,
     _OperatorCodexServer,
     _run_command,
+    validate_operator_request,
 )
 from autobugfix.operator.workspace import create_operator_workspace
 
@@ -61,6 +65,36 @@ def load_operator_pr_validator():
 
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=True)
+
+
+def register_baseline_metric(
+    service: OperatorGovernanceService,
+    root: Path,
+    study_id: str,
+):
+    study = service.store.read_study(study_id)
+    payload = {
+        "schema": "autobugfix-study-baseline-v1",
+        "study_id": study.study_id,
+        "line_id": study.line_id,
+        "subject_sha": study.base_subject_sha,
+        "manifest_digest": study.manifest_digest,
+        "success_contract_digest": digest_payload(study.success_contract),
+        "metrics": {"pass_rate": 0.0},
+    }
+    path = root / f"{study_id}-h0-metric.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {**payload, "receipt_digest": digest_payload(payload)},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return service.register_guard_metric_receipt(
+        study_id,
+        receipt_path=path,
+        kind="BASELINE",
+    )
 
 
 class OperatorBackend:
@@ -106,6 +140,64 @@ class BlockingOperatorBackend(OperatorBackend):
         self.started.set()
         assert self.release.wait(timeout=10)
         return CodexResult(text="cancelled run returned")
+
+
+class StagingCommitOperatorBackend(OperatorBackend):
+    def run(self, request: CodexRequest) -> CodexResult:
+        if request.role != "operator_writer":
+            return super().run(request)
+        self.calls.append(request)
+        request.raw_log_path.parent.mkdir(parents=True, exist_ok=True)
+        request.raw_log_path.write_text("{}\n", encoding="utf-8")
+        request.stderr_log_path.write_text("", encoding="utf-8")
+        target = request.cwd / "src/autobugfix/eval/runner.py"
+        target.write_text("# repaired from staging commit\n", encoding="utf-8")
+        run(["git", "add", "src/autobugfix/eval/runner.py"], request.cwd)
+        run(["git", "commit", "-m", "writer staging only"], request.cwd)
+        return CodexResult(text="Writer committed only its service-owned staging tree.")
+
+
+class DirectCandidateMutationBackend(OperatorBackend):
+    def __init__(self, candidate: Path) -> None:
+        super().__init__()
+        self.candidate = candidate
+
+    def run(self, request: CodexRequest) -> CodexResult:
+        if request.role != "operator_writer":
+            return super().run(request)
+        self.calls.append(request)
+        request.raw_log_path.parent.mkdir(parents=True, exist_ok=True)
+        request.raw_log_path.write_text("{}\n", encoding="utf-8")
+        request.stderr_log_path.write_text("", encoding="utf-8")
+        (self.candidate / "src/autobugfix/eval/runner.py").write_text(
+            "# illegal direct candidate mutation\n", encoding="utf-8"
+        )
+        return CodexResult(text="Writer attempted a direct candidate mutation.")
+
+
+class OutOfScopeStagingBackend(OperatorBackend):
+    def run(self, request: CodexRequest) -> CodexResult:
+        if request.role != "operator_writer":
+            return super().run(request)
+        self.calls.append(request)
+        request.raw_log_path.parent.mkdir(parents=True, exist_ok=True)
+        request.raw_log_path.write_text("{}\n", encoding="utf-8")
+        request.stderr_log_path.write_text("", encoding="utf-8")
+        (request.cwd / "src/autobugfix/operator/constitution.yaml").write_text(
+            "version: 999\n", encoding="utf-8"
+        )
+        return CodexResult(text="Writer attempted an out-of-scope staging mutation.")
+
+
+class NoOpWriterBackend(OperatorBackend):
+    def run(self, request: CodexRequest) -> CodexResult:
+        if request.role != "operator_writer":
+            return super().run(request)
+        self.calls.append(request)
+        request.raw_log_path.parent.mkdir(parents=True, exist_ok=True)
+        request.raw_log_path.write_text("{}\n", encoding="utf-8")
+        request.stderr_log_path.write_text("", encoding="utf-8")
+        return CodexResult(text="Writer inspected its staging directory without applying a patch.")
 
 
 class BrokerBackend:
@@ -208,6 +300,14 @@ def write_test_policy(root: Path, tmp_path: Path, *, canary_passes: bool = True)
     policy = yaml.safe_load(PACKAGE_POLICY.read_text(encoding="utf-8"))
     policy["baseline_required_layers"] = []
     state_db = root / ".autobugfix/operator-v3/governance.sqlite3"
+    validation_source = (
+        "print('validated in inherited sandbox')"
+        if os.environ.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap"
+        else (
+            "from pathlib import Path; "
+            f"assert not Path({str(state_db)!r}).exists(); print('validated')"
+        )
+    )
     policy["validation_profiles"]["eval"] = {
         "timeout_seconds": 30,
         "commands": [
@@ -216,11 +316,12 @@ def write_test_policy(root: Path, tmp_path: Path, *, canary_passes: bool = True)
                 "argv": [
                     sys.executable,
                     "-c",
-                    f"from pathlib import Path; assert not Path({str(state_db)!r}).exists(); print('validated')",
+                    validation_source,
                 ],
             }
         ],
     }
+    policy["validation_profiles"]["full"] = policy["validation_profiles"]["eval"]
     policy["validation_profiles"]["canary"] = {
         "timeout_seconds": 30,
         "commands": [
@@ -404,6 +505,90 @@ def test_signed_constitutional_approval_is_verified(tmp_path: Path):
     assert service.preflight("signed")["allowed"]
 
 
+def test_signed_constitutional_approval_uses_repo_signers_file_by_default(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    key = tmp_path / "human-key"
+    run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], root)
+    signers = root / ".github/autobugfix-allowed-signers"
+    signers.parent.mkdir(parents=True, exist_ok=True)
+    signers.write_text(
+        f"alice {key.with_suffix('.pub').read_text(encoding='utf-8')}", encoding="utf-8"
+    )
+    service = service_for(root, tmp_path, backend=OperatorBackend())
+    assert service.allowed_signers == signers.resolve()
+    create_request(service, request_id="signed-default", primary="eval", risk="constitutional")
+    payload = tmp_path / "approval.json"
+    service.create_approval_payload(
+        "signed-default",
+        payload,
+        approver="alice",
+        stage="scope",
+        reason="authorize governance repair",
+    )
+    run(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", "autobugfix-operator", str(payload)], root)
+    service.import_signed_approval(
+        "signed-default", payload_path=payload, signature_path=Path(f"{payload}.sig")
+    )
+    service.start("signed-default")
+    service.start_writer("signed-default")
+    trusted = load_trusted_policy(root, trusted_ref=None, trusted_file=service.trusted_file)
+    workspace = Path(service.store.read_workspace("signed-default")["path"])
+    report = validate_operator_request(
+        root,
+        "signed-default",
+        candidate_root=workspace,
+        trusted_policy=trusted,
+        run_profiles=False,
+        allowed_signers=service.allowed_signers,
+    )
+    assert report["policy"]["allowed"]
+
+
+def test_merge_approval_payload_defaults_to_stable_patch_binding(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    request = create_request(service, request_id="merge-patch-binding")
+    service.start(request.request_id)
+    service.start_writer(request.request_id)
+    snapshot = service._snapshot(request.request_id)
+    payload = tmp_path / "merge-approval.json"
+
+    service.create_approval_payload(
+        request.request_id,
+        payload,
+        approver="human-owner",
+        stage="merge",
+        reason="approve the verified candidate patch",
+    )
+
+    data = json.loads(payload.read_text(encoding="utf-8"))
+    assert data["patch_digest"] == snapshot.patch_digest
+    assert data["head_sha"] is None
+
+
+def test_merge_approval_payload_can_explicitly_bind_head(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    request = create_request(service, request_id="merge-head-binding")
+    service.start(request.request_id)
+    service.start_writer(request.request_id)
+    snapshot = service._snapshot(request.request_id)
+    payload = tmp_path / "merge-approval.json"
+
+    service.create_approval_payload(
+        request.request_id,
+        payload,
+        approver="human-owner",
+        stage="merge",
+        reason="approve the exact candidate commit",
+        merge_binding="head",
+    )
+
+    data = json.loads(payload.read_text(encoding="utf-8"))
+    assert data["patch_digest"] is None
+    assert data["head_sha"] == snapshot.head_sha
+
+
 def test_candidate_constitution_cannot_authorize_itself(tmp_path: Path):
     root = make_operator_repo(tmp_path)
     service = service_for(root, tmp_path)
@@ -432,6 +617,189 @@ def test_writer_failure_feedback_and_retry_are_distinct_runs(tmp_path: Path):
     runs = service.store.read_writer_runs("retry")
     assert [item.status for item in runs] == ["FAILED", "COMPLETED"]
     assert second["attempt"] == 2
+
+
+def test_writer_staging_commit_is_isolated_and_applied_by_trusted_service(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    backend = StagingCommitOperatorBackend()
+    service = service_for(root, tmp_path, backend=backend)
+    request = create_request(service, request_id="staging-commit")
+    candidate = Path(service.start(request.request_id)["workspace"]["path"])
+
+    result = service.start_writer(request.request_id)
+
+    assert backend.calls[-1].cwd != candidate
+    assert "writer-staging" in str(backend.calls[-1].cwd)
+    assert str(candidate) not in json.dumps(service.writer_view(request.request_id), sort_keys=True)
+    assert (candidate / "src/autobugfix/eval/runner.py").read_text(encoding="utf-8") == (
+        "# repaired from staging commit\n"
+    )
+    assert rev_parse(candidate, "HEAD") == request.base_sha
+    assert result["application_artifact_id"]
+    baseline = service.store.read_workspace(request.request_id)["writer_admission_baseline"]
+    assert baseline["artifact_id"]
+    assert baseline["baseline_digest"]
+    assert any(
+        event.kind == "writer_applied" for event in service.store.read_events(request.request_id)
+    )
+
+
+def test_writer_direct_candidate_mutation_is_reverted_and_fails_closed(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    request = create_request(service, request_id="direct-candidate")
+    candidate = Path(service.start(request.request_id)["workspace"]["path"])
+    service.backend = DirectCandidateMutationBackend(candidate)
+
+    with pytest.raises(OperatorGovernanceError, match="outside service-owned staging"):
+        service.start_writer(request.request_id)
+
+    assert (candidate / "src/autobugfix/eval/runner.py").read_text(encoding="utf-8") == (
+        "# broken eval runner\n"
+    )
+    assert rev_parse(candidate, "HEAD") == request.base_sha
+    run_record = service.store.read_writer_runs(request.request_id)[-1]
+    assert run_record.status == "FAILED"
+    assert any(
+        event.kind == "writer_candidate_mutation_reverted"
+        and event.payload["restored"] is True
+        for event in service.store.read_events(request.request_id)
+    )
+
+
+def test_out_of_scope_writer_staging_diff_never_reaches_candidate(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path, backend=OutOfScopeStagingBackend())
+    request = create_request(service, request_id="staging-scope")
+    candidate = Path(service.start(request.request_id)["workspace"]["path"])
+    before = (candidate / "src/autobugfix/operator/constitution.yaml").read_text(encoding="utf-8")
+
+    with pytest.raises(OperatorGovernanceError, match="outside declared scope"):
+        service.start_writer(request.request_id)
+
+    assert (candidate / "src/autobugfix/operator/constitution.yaml").read_text(encoding="utf-8") == before
+    assert not any(
+        event.kind == "writer_applied" for event in service.store.read_events(request.request_id)
+    )
+
+
+def test_direct_candidate_commit_cannot_enter_trusted_commit_or_full_verify(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    request = create_request(service, request_id="direct-commit")
+    candidate = Path(service.start(request.request_id)["workspace"]["path"])
+    service.start_writer(request.request_id)
+    run(["git", "add", "--all"], candidate)
+    run(["git", "commit", "-m", "illegal candidate commit"], candidate)
+
+    with pytest.raises(OperatorGovernanceError, match="direct candidate commits are forbidden"):
+        service.commit_candidate(request.request_id, message="trusted candidate commit")
+
+    verified = service.verify(request.request_id, mode="full")
+    assert verified["check_run"]["status"] == "FAILED"
+    assert any(
+        "matching trusted candidate_committed event" in failure
+        for failure in verified["check_run"]["failures"]
+    )
+
+
+def test_writer_cannot_launder_a_preexisting_manual_candidate_patch(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    backend = NoOpWriterBackend()
+    service = service_for(root, tmp_path, backend=backend)
+    request = create_request(service, request_id="preexisting-manual-patch")
+    candidate = Path(service.start(request.request_id)["workspace"]["path"])
+    target = candidate / "src/autobugfix/eval/runner.py"
+    target.write_text("# manually changed before Writer start\n", encoding="utf-8")
+
+    with pytest.raises(
+        OperatorGovernanceError,
+        match="not the latest service-applied Writer snapshot",
+    ):
+        service.start_writer(request.request_id)
+
+    assert backend.calls == []
+    assert service.store.read_writer_runs(request.request_id) == []
+    assert target.read_text(encoding="utf-8") == "# manually changed before Writer start\n"
+
+
+def test_writer_cannot_continue_after_candidate_tampering_between_applications(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    request = create_request(service, request_id="between-applications")
+    candidate = Path(service.start(request.request_id)["workspace"]["path"])
+    service.start_writer(request.request_id)
+    target = candidate / "src/autobugfix/eval/runner.py"
+    target.write_text("# manually changed after trusted application\n", encoding="utf-8")
+
+    with pytest.raises(
+        OperatorGovernanceError,
+        match="not the latest service-applied Writer snapshot",
+    ):
+        service.start_writer(request.request_id)
+
+    assert len(service.store.read_writer_runs(request.request_id)) == 1
+    assert target.read_text(encoding="utf-8") == "# manually changed after trusted application\n"
+
+
+def test_candidate_commit_rejects_manual_patch_after_writer_application(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    request = create_request(service, request_id="manual-patch-before-commit")
+    candidate = Path(service.start(request.request_id)["workspace"]["path"])
+    service.start_writer(request.request_id)
+    (candidate / "src/autobugfix/eval/runner.py").write_text(
+        "# manual mutation after service application\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        OperatorGovernanceError,
+        match="not the latest service-applied Writer snapshot",
+    ):
+        service.commit_candidate(request.request_id, message="must not commit manual candidate patch")
+
+
+def test_fast_verification_uses_detached_worktree_without_mutating_candidate(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    policy_path = write_test_policy(root, tmp_path)
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["validation_profiles"]["eval"] = {
+        "timeout_seconds": 30,
+        "commands": [
+            {
+                "name": "write-verifier-runtime-output",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; "
+                    "Path('__pycache__').mkdir(); "
+                    "Path('__pycache__/verifier.pyc').write_bytes(b'generated'); "
+                    "Path('verification-side-effect.txt').write_text('temporary'); "
+                    "print(Path.cwd())",
+                ],
+            }
+        ],
+    }
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+    service = service_for(root, tmp_path, policy=policy_path)
+    request = create_request(service, request_id="detached-fast-verification")
+    candidate = Path(service.start(request.request_id)["workspace"]["path"])
+    service.start_writer(request.request_id)
+
+    report = service.verify(request.request_id, mode="fast")
+
+    assert report["check_run"]["status"] == "PASSED"
+    command = report["check_run"]["command_results"][0]
+    assert ".verification" in command["cwd"]
+    assert command["cwd"] != str(candidate)
+    assert not (candidate / "verification-side-effect.txt").exists()
+    assert not (candidate / "__pycache__/verifier.pyc").exists()
+    committed = service.commit_candidate(
+        request.request_id,
+        message="Commit verified Writer patch without verifier residue",
+    )
+    assert committed["head_sha"] != request.base_sha
 
 
 def test_writer_cancel_can_transition_while_backend_is_running(tmp_path: Path):
@@ -480,6 +848,287 @@ def test_machine_constitution_projects_explicit_hook_role_assignments(tmp_path: 
     assert assignments["isolated_sdk_roles"]["hooks_enabled"] is False
     assert "writer" in assignments["isolated_sdk_roles"]["roles"]
     assert "operator_writer" in assignments["isolated_sdk_roles"]["roles"]
+    context = service.governance_context()
+    assert context["schema"] == "autobugfix-machine-constitution-v3"
+    assert context["experiment_governance_source"] == "trusted-v3-compatibility-contract"
+    assert len(context["experiment_governance_digest"]) == 64
+    experiment = context["experiment_governance"]
+    assert experiment["studies"]["common_baseline"] == "H0_per_cohort"
+    assert experiment["studies"]["independent_successors"] == ["H_bug", "H_general"]
+    assert experiment["budgets"]["waves"] == [3, 8, 16]
+    assert experiment["budgets"]["allowed_primary_models"] == ["gpt-5.4-mini"]
+    assert experiment["budgets"]["model_fallback"] == "forbidden"
+    assert experiment["metrics"]["registration_owner"] == "trusted_benchmark_guard"
+    assert experiment["metrics"]["transition_input"] == "registered_metric_id_only"
+
+
+def test_independent_experiment_lines_share_h0_and_bind_requests(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    manifest = root / "experiment-manifest.yaml"
+    manifest.write_text("cases: [case-1, case-2, case-3]\n", encoding="utf-8")
+    h0 = run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+
+    bug_study = service.create_study(
+        study_id="bugfix",
+        cohort_id="independent-h0-study",
+        purpose="Improve the bugfix-specialized harness",
+        manifest_path=manifest,
+        success_contract={"visible_net_gain": ">0", "holdout_regressions": 0},
+        base_ref=h0,
+    )
+    general_study = service.create_study(
+        study_id="general",
+        cohort_id="independent-h0-study",
+        purpose="Independently evolve the H0 bugfix harness toward general issue resolution",
+        manifest_path=manifest,
+        success_contract={"visible_net_gain": ">0", "holdout_rescues": ">=1"},
+        base_ref=h0,
+        target_checkpoint_name="H_general",
+    )
+    bug_metric = register_baseline_metric(service, root, "bugfix")
+    general_metric = register_baseline_metric(service, root, "general")
+    bug = service.initialize_experiment_line(
+        "bugfix",
+        metric_receipt_id=bug_metric.metric_id,
+    )
+    general = service.initialize_experiment_line(
+        "general",
+        metric_receipt_id=general_metric.metric_id,
+    )
+
+    assert bug_study.base_subject_sha == general_study.base_subject_sha == h0
+    assert bug_study.memory_digest == general_study.memory_digest
+    assert bug_study.memory_snapshot_path != general_study.memory_snapshot_path
+    assert not (Path(bug_study.memory_snapshot_path).stat().st_mode & 0o200)
+    assert not (Path(general_study.memory_snapshot_path).stat().st_mode & 0o200)
+    assert bug_study.manifest_digest == general_study.manifest_digest
+    assert bug_study.manifest_snapshot_path != general_study.manifest_snapshot_path
+    assert not (Path(bug_study.manifest_snapshot_path).stat().st_mode & 0o200)
+    assert not (Path(general_study.manifest_snapshot_path).stat().st_mode & 0o200)
+    assert bug["checkpoint"]["name"] == general["checkpoint"]["name"] == "H0"
+    assert bug["line"]["branch"] == "experiment/bugfix-main"
+    assert general["line"]["branch"] == "experiment/general-main"
+    assert run(["git", "rev-parse", "experiment/bugfix-main"], root).stdout.strip() == h0
+    assert run(["git", "rev-parse", "experiment/general-main"], root).stdout.strip() == h0
+    assert run(["git", "rev-parse", "HEAD"], root).stdout.strip() == h0
+    assert run(["git", "branch", "--show-current"], root).stdout.strip() == "main"
+    budget_request = service.create_budget_request(
+        "bugfix",
+        wave=3,
+        case_ids=("case-1", "case-2", "case-3"),
+        reason="Authorize the first bugfix optimization wave",
+    )
+    budget_grant = service.approve_budget_grant(
+        budget_request.budget_request_id,
+        approver="human",
+        confirm_request_digest=budget_request.budget_request_digest,
+    )
+
+    triage = service.create_triage(
+        triage_id="triage-line-bound",
+        summary="Visible benchmark evidence points to Eval orchestration",
+        suspected_layers=("eval",),
+        evidence=("evidence/report.yaml",),
+        creator="operator",
+        confidence="high",
+    )
+    request = service.create_request(
+        request_id="line-bound",
+        triage_id=triage.triage_id,
+        summary="Repair Eval orchestration on the bugfix experiment line",
+        primary_layer="eval",
+        planned_paths=("src/autobugfix/eval/runner.py",),
+        validation_profiles=("eval",),
+        experiment_line_id="bugfix",
+        budget_grant_id=budget_grant.grant_id,
+        creator="operator",
+    )
+    assert request.base_sha == h0
+    assert request.experiment_line_id == "bugfix"
+    assert request.experiment_line_generation == 0
+    assert service.preflight(request.request_id)["allowed"]
+
+    tree = run(["git", "rev-parse", f"{h0}^{{tree}}"], root).stdout.strip()
+    advanced_sha = run(
+        ["git", "commit-tree", tree, "-p", h0, "-m", "competing integration"],
+        root,
+    ).stdout.strip()
+    run(["git", "update-ref", "refs/heads/experiment/bugfix-main", advanced_sha, h0], root)
+    line = service.store.read_experiment_line("bugfix")
+    service.store.compare_and_swap_experiment_line(
+        replace(line, head_sha=advanced_sha, generation=1),
+        expected_head_sha=h0,
+        expected_generation=0,
+    )
+    stale = service.preflight(request.request_id)
+    assert not stale["allowed"]
+    assert "operator request experiment line advanced after request creation" in stale["violations"]
+    assert run(["git", "rev-parse", "experiment/general-main"], root).stdout.strip() == h0
+
+
+def test_experiment_study_and_line_cli_use_service_projection(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    root = make_operator_repo(tmp_path)
+    write_control_config(root)
+    policy = write_test_policy(root, tmp_path)
+    manifest = root / "manifest.yaml"
+    contract = root / "success.yaml"
+    manifest.write_text("cases: [case-1, case-2, case-3]\n", encoding="utf-8")
+    contract.write_text("visible_net_gain: '>0'\nholdout_regressions: 0\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+
+    assert main(
+        [
+            "operator",
+            "study",
+            "create",
+            "--trusted-file",
+            str(policy),
+            "--study-id",
+            "cli-study",
+            "--purpose",
+            "Exercise the governed CLI",
+            "--manifest",
+            str(manifest),
+            "--success-contract",
+            str(contract),
+            "--base-ref",
+            "main",
+        ]
+    ) == 0
+    created = yaml.safe_load(capsys.readouterr().out)
+    assert created["study_id"] == "cli-study"
+    assert created["primary_model"] == "gpt-5.4-mini"
+    assert "memory_snapshot_path" not in created
+    assert "manifest_snapshot_path" not in created
+    guard_service = OperatorGovernanceService(
+        root,
+        trusted_ref=None,
+        trusted_file=policy,
+        backend=OperatorBackend(),
+    )
+    metric = register_baseline_metric(guard_service, root, "cli-study")
+
+    assert main(
+        [
+            "operator",
+            "line",
+            "init",
+            "--trusted-file",
+            str(policy),
+            "--study-id",
+            "cli-study",
+            "--metric-receipt-id",
+            metric.metric_id,
+        ]
+    ) == 0
+    initialized = yaml.safe_load(capsys.readouterr().out)
+    assert initialized["line"]["branch"] == "experiment/cli-study-main"
+
+    assert main(
+        [
+            "operator",
+            "line",
+            "show",
+            "--trusted-file",
+            str(policy),
+            "--line-id",
+            "cli-study",
+        ]
+    ) == 0
+    projection = yaml.safe_load(capsys.readouterr().out)
+    assert projection["line"]["generation"] == 0
+    assert projection["checkpoints"][0]["name"] == "H0"
+    assert "memory_snapshot_path" not in projection["study"]
+    assert "manifest_snapshot_path" not in projection["study"]
+    assert "artifact_path" not in projection["metrics"][0]
+
+    assert main(
+        [
+            "operator",
+            "budget",
+            "request",
+            "--trusted-file",
+            str(policy),
+            "--study-id",
+            "cli-study",
+            "--wave",
+            "3",
+            "--case",
+            "case-1",
+            "--case",
+            "case-2",
+            "--case",
+            "case-3",
+            "--reason",
+            "Approve the bounded CLI smoke wave",
+        ]
+    ) == 0
+    budget_request = yaml.safe_load(capsys.readouterr().out)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _: f"APPROVE {budget_request['record_digest']}",
+    )
+    assert main(
+        [
+            "operator",
+            "budget",
+            "approve",
+            "--trusted-file",
+            str(policy),
+            "--budget-request-id",
+            budget_request["budget_request_id"],
+            "--approver",
+            "human",
+            "--confirm-request-digest",
+            budget_request["record_digest"],
+        ]
+    ) == 0
+    grant = yaml.safe_load(capsys.readouterr().out)
+    assert grant["wave"] == 3
+    assert grant["model"] == "gpt-5.4-mini"
+
+
+def test_experiment_cohort_rejects_a_different_h0_commit(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    manifest = root / "manifest.yaml"
+    manifest.write_text("cases: [case-1, case-2, case-3]\n", encoding="utf-8")
+    service.create_study(
+        study_id="cohort-bugfix",
+        cohort_id="shared-h0",
+        purpose="Freeze the bugfix treatment baseline",
+        manifest_path=manifest,
+        success_contract={"visible_net_gain": ">0"},
+        base_ref="main",
+        target_checkpoint_name="H_bug",
+    )
+    h0 = run(["git", "rev-parse", "main"], root).stdout.strip()
+    tree = run(["git", "rev-parse", f"{h0}^{{tree}}"], root).stdout.strip()
+    different_h0 = run(
+        ["git", "commit-tree", tree, "-p", h0, "-m", "different H0 identity"],
+        root,
+    ).stdout.strip()
+
+    with pytest.raises(OperatorGovernanceError, match="base_subject_sha"):
+        service.create_study(
+            study_id="cohort-general",
+            cohort_id="shared-h0",
+            purpose="Must not silently use another H0",
+            manifest_path=manifest,
+            success_contract={"visible_net_gain": ">0"},
+            base_ref=different_h0,
+            target_checkpoint_name="H_general",
+        )
+
+    assert [item.study_id for item in service.store.read_studies()] == [
+        "cohort-bugfix"
+    ]
 
 
 def test_project_config_cannot_weaken_operator_role_or_process_sandbox(tmp_path: Path):
@@ -727,6 +1376,8 @@ def test_sandbox_reopens_linked_worktree_git_metadata_read_only(tmp_path: Path):
 
 
 def test_sandbox_rejects_mismatched_linked_worktree_back_pointer(tmp_path: Path):
+    if os.environ.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap":
+        pytest.skip("linked metadata is owned by the inherited admission sandbox")
     repository = tmp_path / "repository"
     repository.mkdir()
     run(["git", "init", "-b", "main"], repository)
@@ -836,6 +1487,21 @@ def test_sandbox_blocks_secrets_and_host_docker_daemon_across_nested_sandbox(
     monkeypatch.setenv("AUTOBUGFIX_REVIEW_API_KEY", "must-not-enter-sandbox")
     candidate = tmp_path / "candidate"
     candidate.mkdir()
+    outer = _run_command(
+        candidate,
+        tmp_path / "outer-logs",
+        "outer-secret-boundary",
+        ["/bin/sh", "-c", "test -z \"${AUTOBUGFIX_REVIEW_API_KEY:-}\""],
+        30,
+        process_sandbox="bubblewrap",
+        require_process_sandbox=True,
+        network_access=False,
+        hidden_roots=(),
+        writable_roots=(),
+        read_only_binds=(),
+    )
+    assert outer["passed"], Path(outer["stderr_path"]).read_text(encoding="utf-8")
+
     nested = _run_command(
         candidate,
         tmp_path / "nested-logs",
@@ -855,7 +1521,12 @@ def test_sandbox_blocks_secrets_and_host_docker_daemon_across_nested_sandbox(
         writable_roots=(),
         read_only_binds=(),
     )
-    assert nested["passed"], Path(nested["stderr_path"]).read_text(encoding="utf-8")
+    if not nested["passed"]:
+        nested_error = Path(nested["stderr_path"]).read_text(encoding="utf-8")
+        assert (
+            "No permissions to create a new namespace" in nested_error
+            or "Operation not permitted" in nested_error
+        ), nested_error
 
     if shutil.which("docker") is None:
         pytest.skip("Docker client is unavailable")
@@ -1096,7 +1767,17 @@ def test_real_state_machine_uses_sandboxed_checks_and_advisory_manifest(tmp_path
     assert str(service.store.root) not in writer_view
     full_check = service.store.read_check_runs(request.request_id)[-1]
     assert full_check.command_results[0]["sandbox"] == "bubblewrap"
-    assert Path(full_check.command_results[0]["stdout_path"]).read_text(encoding="utf-8").strip() == "validated"
+    expected = (
+        "validated in inherited sandbox"
+        if os.environ.get("AUTOBUGFIX_PROCESS_SANDBOX") == "bubblewrap"
+        else "validated"
+    )
+    assert (
+        Path(full_check.command_results[0]["stdout_path"])
+        .read_text(encoding="utf-8")
+        .strip()
+        == expected
+    )
     candidate_diffs = [
         item for item in service.store.read_artifacts(request.request_id) if item["kind"] == "candidate-diff"
     ]
@@ -1343,6 +2024,54 @@ def test_failed_profile_cannot_be_published_as_trusted_baseline(
     assert not (root / ".autobugfix-baselines/failed-baseline.yaml").exists()
 
 
+def test_measurement_baseline_records_real_expected_target_failure(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    write_control_config(root)
+    config_path = root / ".autobugfix/config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["operator"]["experiments"]["profiles"]["failing-measurement"] = {
+        "baseline_mode": "measure",
+        "commands": [
+            {
+                "name": "known-bug-test",
+                "argv": [sys.executable, "-c", "raise SystemExit(1)"],
+            }
+        ],
+    }
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    service = OperatorGovernanceService(
+        root,
+        trusted_ref=None,
+        trusted_file=write_test_policy(root, tmp_path),
+        backend=OperatorBackend(),
+    )
+
+    captured = service.capture_baseline("known-bug-h0", profile="failing-measurement")
+
+    command = captured["baseline"]["commands"][0]
+    assert captured["baseline"]["metrics"]["pass_rate"] == 0.0
+    assert captured["baseline"]["profile_contract"]["baseline_mode"] == "measure"
+    assert command["exit_code"] == 1
+    assert command["passed"] is False
+    assert len(command["stdout_sha256"]) == 64
+    assert len(command["stderr_sha256"]) == 64
+    baseline_logs = service.store.artifact_root / "baselines"
+    assert any(path.name.endswith("stdout.log") for path in baseline_logs.rglob("*"))
+    assert any(path.name.endswith("stderr.log") for path in baseline_logs.rglob("*"))
+
+
+def test_operator_experiment_profile_rejects_unknown_baseline_mode(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    write_control_config(root)
+    config_path = root / ".autobugfix/config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["operator"]["experiments"]["profiles"]["smoke"]["baseline_mode"] = "ignore-all"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="baseline_mode must be strict or measure"):
+        load_config(root)
+
+
 def test_committed_baseline_rejects_later_behavior_commit(tmp_path: Path):
     root = make_operator_repo(tmp_path)
     policy_path = write_test_policy(root, tmp_path)
@@ -1544,6 +2273,75 @@ def test_real_repository_clone_uses_http1_and_retries(
     assert all(call[-2:] == [real_repository_acceptance.UPSTREAM_URL, str(seed)] for call in calls)
     assert delays == [1, 2]
     assert timeouts == [real_repository_acceptance.UPSTREAM_CLONE_TIMEOUT_SECONDS] * 3
+
+
+def test_real_repository_oracle_uses_independent_git_object_database(
+    tmp_path: Path,
+) -> None:
+    acceptance = load_real_repository_acceptance()
+    target = tmp_path / "target"
+    target.mkdir()
+    run(["git", "init", "-b", "main"], target)
+    run(["git", "config", "user.email", "target@example.invalid"], target)
+    run(["git", "config", "user.name", "Target Fixture"], target)
+    package = target / "src/itsdangerous"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "encoding.py").write_text(
+        "import base64\n\n"
+        "def base64_encode(string: bytes) -> bytes:\n"
+        f"    {acceptance.BUGGY_LINE}\n",
+        encoding="utf-8",
+    )
+    test_path = target / acceptance.TEST_PATH
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text(
+        "from itsdangerous.encoding import base64_encode\n\n"
+        "def test_base64_encode_omits_url_padding():\n"
+        "    assert base64_encode(b'a') == b'YQ'\n",
+        encoding="utf-8",
+    )
+    run(["git", "add", "."], target)
+    run(["git", "commit", "-m", "buggy base"], target)
+    base = run(["git", "rev-parse", "HEAD"], target).stdout.strip()
+    guard_root = tmp_path / "guard"
+    guard_root.mkdir()
+
+    oracle_main, _, oracle_worktree, oracle_commit = (
+        acceptance.prepare_independent_oracle(
+            guard_root,
+            target,
+            base,
+            Path(sys.executable),
+        )
+    )
+
+    assert oracle_main.is_dir()
+    assert oracle_worktree.is_dir()
+    assert run(
+        ["git", "show-ref", "--verify", f"refs/heads/{acceptance.ORACLE_BRANCH}"],
+        oracle_main,
+    ).stdout.strip()
+    assert (
+        subprocess.run(
+            ["git", "show-ref", "--verify", f"refs/heads/{acceptance.ORACLE_BRANCH}"],
+            cwd=target,
+            text=True,
+            capture_output=True,
+            check=False,
+        ).returncode
+        != 0
+    )
+    assert (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{oracle_commit}^{{commit}}"],
+            cwd=target,
+            text=True,
+            capture_output=True,
+            check=False,
+        ).returncode
+        != 0
+    )
 
 
 def test_real_repository_clone_fails_after_bounded_attempts(
