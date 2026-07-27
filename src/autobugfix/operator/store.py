@@ -15,16 +15,25 @@ from typing import Any, Callable, Mapping, TypeVar
 from autobugfix.models import utc_now
 from autobugfix.operator.models import (
     ArtifactReference,
+    BudgetGrantRecord,
+    BudgetRequestRecord,
     CheckRun,
+    CheckpointRecord,
+    ExperimentLineRecord,
     FeedbackPacket,
     GateSnapshot,
+    IntegrationRecord,
     OperatorApproval,
     OperatorEvent,
     OperatorRequest,
     OperatorTriage,
     ScopeRevision,
+    StudyMetricRecord,
+    StudyRecord,
+    UsageEntryRecord,
     WriterRun,
     digest_payload,
+    is_expired,
 )
 
 
@@ -33,6 +42,7 @@ class OperatorStoreError(RuntimeError):
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_SCHEMA_VERSION = 4
 T = TypeVar("T")
 
 
@@ -64,7 +74,7 @@ def _verify_record_digest(data: Mapping[str, Any]) -> None:
 
 
 class OperatorStore:
-    """Transactional authority store for Operator Governance V3."""
+    """Transactional authority store for Operator Governance V4."""
 
     def __init__(
         self,
@@ -100,6 +110,9 @@ class OperatorStore:
 
     def init(self) -> None:
         schema = """
+        CREATE TABLE IF NOT EXISTS operator_schema (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1), version INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS triage (
           triage_id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL
         );
@@ -171,9 +184,85 @@ class OperatorStore:
         CREATE TABLE IF NOT EXISTS request_leases (
           request_id TEXT PRIMARY KEY, owner TEXT NOT NULL, acquired_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS studies (
+          study_id TEXT PRIMARY KEY, line_id TEXT UNIQUE NOT NULL, data TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS study_metrics (
+          metric_id TEXT PRIMARY KEY, study_id TEXT NOT NULL, line_id TEXT NOT NULL,
+          kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL,
+          FOREIGN KEY(study_id) REFERENCES studies(study_id)
+        );
+        CREATE INDEX IF NOT EXISTS study_metrics_study_idx
+          ON study_metrics(study_id, kind, created_at);
+        CREATE TABLE IF NOT EXISTS experiment_lines (
+          line_id TEXT PRIMARY KEY, study_id TEXT UNIQUE NOT NULL, branch TEXT UNIQUE NOT NULL,
+          head_sha TEXT NOT NULL, generation INTEGER NOT NULL, status TEXT NOT NULL,
+          data TEXT NOT NULL, created_at TEXT NOT NULL,
+          FOREIGN KEY(study_id) REFERENCES studies(study_id)
+        );
+        CREATE INDEX IF NOT EXISTS experiment_lines_status_idx
+          ON experiment_lines(status, created_at);
+        CREATE TABLE IF NOT EXISTS integrations (
+          integration_id TEXT PRIMARY KEY, study_id TEXT NOT NULL, line_id TEXT NOT NULL,
+          request_id TEXT, kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL,
+          FOREIGN KEY(study_id) REFERENCES studies(study_id),
+          FOREIGN KEY(line_id) REFERENCES experiment_lines(line_id),
+          FOREIGN KEY(request_id) REFERENCES requests(request_id)
+        );
+        CREATE INDEX IF NOT EXISTS integrations_line_idx
+          ON integrations(line_id, created_at);
+        CREATE TABLE IF NOT EXISTS checkpoints (
+          checkpoint_id TEXT PRIMARY KEY, study_id TEXT NOT NULL, line_id TEXT NOT NULL,
+          name TEXT NOT NULL, subject_sha TEXT NOT NULL, data TEXT NOT NULL,
+          created_at TEXT NOT NULL, UNIQUE(study_id, name),
+          FOREIGN KEY(study_id) REFERENCES studies(study_id),
+          FOREIGN KEY(line_id) REFERENCES experiment_lines(line_id)
+        );
+        CREATE INDEX IF NOT EXISTS checkpoints_line_idx
+          ON checkpoints(line_id, created_at);
+        CREATE TABLE IF NOT EXISTS budget_requests (
+          budget_request_id TEXT PRIMARY KEY, study_id TEXT NOT NULL, wave INTEGER NOT NULL,
+          data TEXT NOT NULL, created_at TEXT NOT NULL,
+          FOREIGN KEY(study_id) REFERENCES studies(study_id)
+        );
+        CREATE INDEX IF NOT EXISTS budget_requests_study_idx
+          ON budget_requests(study_id, wave, created_at);
+        CREATE TABLE IF NOT EXISTS budget_grants (
+          grant_id TEXT PRIMARY KEY, study_id TEXT NOT NULL, wave INTEGER NOT NULL,
+          data TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(study_id, wave),
+          FOREIGN KEY(study_id) REFERENCES studies(study_id)
+        );
+        CREATE INDEX IF NOT EXISTS budget_grants_study_idx
+          ON budget_grants(study_id, wave);
+        CREATE TABLE IF NOT EXISTS usage_entries (
+          usage_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, study_id TEXT NOT NULL,
+          call_key TEXT UNIQUE NOT NULL, case_id TEXT, role TEXT NOT NULL, status TEXT NOT NULL,
+          data TEXT NOT NULL, created_at TEXT NOT NULL,
+          FOREIGN KEY(grant_id) REFERENCES budget_grants(grant_id),
+          FOREIGN KEY(study_id) REFERENCES studies(study_id)
+        );
+        CREATE INDEX IF NOT EXISTS usage_entries_grant_idx
+          ON usage_entries(grant_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS usage_entries_case_idx
+          ON usage_entries(study_id, case_id, role, created_at);
+        CREATE TABLE IF NOT EXISTS experiment_line_leases (
+          line_id TEXT PRIMARY KEY, owner TEXT NOT NULL, acquired_at REAL NOT NULL
+        );
         """
         with self._connect() as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version > _SCHEMA_VERSION:
+                raise OperatorStoreError(
+                    f"operator store schema {version} is newer than supported {_SCHEMA_VERSION}"
+                )
             connection.executescript(schema)
+            connection.execute(
+                "INSERT INTO operator_schema (singleton,version) VALUES (1,?) "
+                "ON CONFLICT(singleton) DO UPDATE SET version = excluded.version",
+                (_SCHEMA_VERSION,),
+            )
+            connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
     @contextmanager
     def request_lease(self, request_id: str):
@@ -217,6 +306,51 @@ class OperatorStore:
                     connection.execute(
                         "DELETE FROM request_leases WHERE request_id = ? AND owner = ?",
                         (request_id, self._lease_owner),
+                    )
+
+    @contextmanager
+    def experiment_line_lease(self, line_id: str):
+        line_id = safe_id(line_id)
+        held = getattr(self._lease_local, "held_lines", {})
+        if held.get(line_id, 0):
+            held[line_id] += 1
+            self._lease_local.held_lines = held
+            try:
+                yield
+            finally:
+                held[line_id] -= 1
+            return
+        self.init()
+        now = time.time()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT owner,acquired_at FROM experiment_line_leases WHERE line_id = ?",
+                (line_id,),
+            ).fetchone()
+            if row is not None and now - float(row["acquired_at"]) <= self.lease_timeout_seconds:
+                connection.rollback()
+                raise OperatorStoreError(
+                    f"Operator experiment line is locked by another command: {line_id}"
+                )
+            connection.execute("DELETE FROM experiment_line_leases WHERE line_id = ?", (line_id,))
+            connection.execute(
+                "INSERT INTO experiment_line_leases (line_id,owner,acquired_at) VALUES (?,?,?)",
+                (line_id, self._lease_owner, now),
+            )
+            connection.commit()
+        held[line_id] = 1
+        self._lease_local.held_lines = held
+        try:
+            yield
+        finally:
+            held[line_id] -= 1
+            if held[line_id] == 0:
+                held.pop(line_id, None)
+                with self._connect() as connection:
+                    connection.execute(
+                        "DELETE FROM experiment_line_leases WHERE line_id = ? AND owner = ?",
+                        (line_id, self._lease_owner),
                     )
 
     def next_id(self, prefix: str = "op") -> str:
@@ -578,6 +712,703 @@ class OperatorStore:
         for record in records:
             _verify_record_digest(record)
         return records
+
+    def write_study(self, study: StudyRecord) -> None:
+        self._insert(
+            "studies",
+            "study_id",
+            study.study_id,
+            study.to_dict(),
+            line_id=study.line_id,
+        )
+
+    def read_study(self, study_id: str) -> StudyRecord:
+        return StudyRecord.from_dict(self._read("studies", "study_id", safe_id(study_id)))
+
+    def read_studies(self) -> list[StudyRecord]:
+        self.init()
+        with self._connect() as connection:
+            rows = connection.execute("SELECT data FROM studies ORDER BY created_at,study_id").fetchall()
+        return [StudyRecord.from_dict(json.loads(str(row["data"]))) for row in rows]
+
+    def write_study_metric_artifact(
+        self,
+        content: bytes,
+        *,
+        filename: str = "receipt.yaml",
+    ) -> tuple[Path, str]:
+        filename = Path(filename).name
+        sha = hashlib.sha256(content).hexdigest()
+        path = self.artifact_root / "study-metrics" / sha[:2] / sha / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            if path.read_bytes() != content:
+                raise OperatorStoreError(f"content-addressed study metric collision: {sha}")
+        else:
+            temporary = path.with_name(f".{filename}.{uuid.uuid4().hex}.tmp")
+            temporary.write_bytes(content)
+            temporary.replace(path)
+        return path.resolve(), sha
+
+    def write_study_metric(self, metric: StudyMetricRecord) -> None:
+        artifact = Path(metric.artifact_path).resolve()
+        try:
+            artifact.relative_to(self.artifact_root.resolve())
+        except ValueError as exc:
+            raise OperatorStoreError(
+                "study metric artifact must live under configured artifact root"
+            ) from exc
+        if not artifact.is_file():
+            raise OperatorStoreError(f"study metric artifact is missing: {artifact}")
+        if hashlib.sha256(artifact.read_bytes()).hexdigest() != metric.artifact_sha256:
+            raise OperatorStoreError("study metric artifact digest mismatch")
+        self._insert(
+            "study_metrics",
+            "metric_id",
+            metric.metric_id,
+            metric.to_dict(),
+            study_id=metric.study_id,
+            line_id=metric.line_id,
+            kind=metric.kind,
+        )
+
+    def read_study_metric(self, metric_id: str) -> StudyMetricRecord:
+        metric = StudyMetricRecord.from_dict(
+            self._read("study_metrics", "metric_id", safe_id(metric_id))
+        )
+        artifact = Path(metric.artifact_path).resolve()
+        try:
+            artifact.relative_to(self.artifact_root.resolve())
+        except ValueError as exc:
+            raise OperatorStoreError(
+                "study metric artifact escaped configured artifact root"
+            ) from exc
+        if not artifact.is_file():
+            raise OperatorStoreError(f"study metric artifact is missing: {artifact}")
+        if hashlib.sha256(artifact.read_bytes()).hexdigest() != metric.artifact_sha256:
+            raise OperatorStoreError("study metric artifact digest mismatch")
+        return metric
+
+    def read_study_metrics(self, study_id: str) -> list[StudyMetricRecord]:
+        self.init()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT metric_id FROM study_metrics WHERE study_id = ? "
+                "ORDER BY created_at,metric_id",
+                (safe_id(study_id),),
+            ).fetchall()
+        return [self.read_study_metric(str(row["metric_id"])) for row in rows]
+
+    def write_experiment_line(self, line: ExperimentLineRecord) -> None:
+        self._insert(
+            "experiment_lines",
+            "line_id",
+            line.line_id,
+            line.to_dict(),
+            study_id=line.study_id,
+            branch=line.branch,
+            head_sha=line.head_sha,
+            generation=line.generation,
+            status=line.status,
+        )
+
+    def initialize_experiment_line(
+        self,
+        line: ExperimentLineRecord,
+        checkpoint: CheckpointRecord,
+    ) -> None:
+        if checkpoint.name != "H0":
+            raise OperatorStoreError("experiment line initialization requires an H0 checkpoint")
+        if checkpoint.study_id != line.study_id or checkpoint.line_id != line.line_id:
+            raise OperatorStoreError("H0 checkpoint belongs to another experiment line")
+        self.init()
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                study_row = connection.execute(
+                    "SELECT data FROM studies WHERE study_id = ?",
+                    (safe_id(line.study_id),),
+                ).fetchone()
+                if study_row is None:
+                    raise OperatorStoreError(f"missing operator record: studies/{line.study_id}")
+                study = StudyRecord.from_dict(json.loads(str(study_row["data"])))
+                if study.line_id != line.line_id:
+                    raise OperatorStoreError("study designates another experiment line")
+                if study.base_checkpoint_id != checkpoint.checkpoint_id:
+                    raise OperatorStoreError("H0 checkpoint does not match study baseline identity")
+                if study.base_subject_sha != checkpoint.subject_sha or line.base_sha != checkpoint.subject_sha:
+                    raise OperatorStoreError("H0 subject SHA does not match study baseline")
+                connection.execute(
+                    "INSERT INTO experiment_lines "
+                    "(line_id,study_id,branch,head_sha,generation,status,data,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        safe_id(line.line_id),
+                        line.study_id,
+                        line.branch,
+                        line.head_sha,
+                        line.generation,
+                        line.status,
+                        _dump(line.to_dict()),
+                        line.created_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO checkpoints "
+                    "(checkpoint_id,study_id,line_id,name,subject_sha,data,created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        safe_id(checkpoint.checkpoint_id),
+                        checkpoint.study_id,
+                        checkpoint.line_id,
+                        checkpoint.name,
+                        checkpoint.subject_sha,
+                        _dump(checkpoint.to_dict()),
+                        checkpoint.created_at,
+                    ),
+                )
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise OperatorStoreError(
+                f"experiment line or H0 checkpoint already exists: {line.line_id}"
+            ) from exc
+
+    def _read_experiment_line_row(
+        self,
+        connection: sqlite3.Connection,
+        line_id: str,
+    ) -> tuple[ExperimentLineRecord, sqlite3.Row]:
+        row = connection.execute(
+            "SELECT study_id,branch,head_sha,generation,status,data "
+            "FROM experiment_lines WHERE line_id = ?",
+            (safe_id(line_id),),
+        ).fetchone()
+        if row is None:
+            raise OperatorStoreError(f"missing operator record: experiment_lines/{line_id}")
+        line = ExperimentLineRecord.from_dict(json.loads(str(row["data"])))
+        database_values = (
+            str(row["study_id"]),
+            str(row["branch"]),
+            str(row["head_sha"]),
+            int(row["generation"]),
+            str(row["status"]),
+        )
+        record_values = (
+            line.study_id,
+            line.branch,
+            line.head_sha,
+            line.generation,
+            line.status,
+        )
+        if database_values != record_values:
+            raise OperatorStoreError(f"experiment line columns disagree with record: {line_id}")
+        return line, row
+
+    def read_experiment_line(self, line_id: str) -> ExperimentLineRecord:
+        self.init()
+        with self._connect() as connection:
+            line, _ = self._read_experiment_line_row(connection, line_id)
+        return line
+
+    def read_experiment_lines(self, study_id: str | None = None) -> list[ExperimentLineRecord]:
+        self.init()
+        with self._connect() as connection:
+            if study_id is None:
+                rows = connection.execute(
+                    "SELECT line_id FROM experiment_lines ORDER BY created_at,line_id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT line_id FROM experiment_lines WHERE study_id = ? ORDER BY created_at,line_id",
+                    (safe_id(study_id),),
+                ).fetchall()
+            return [self._read_experiment_line_row(connection, str(row["line_id"]))[0] for row in rows]
+
+    @staticmethod
+    def _validate_line_update(
+        current: ExperimentLineRecord,
+        updated: ExperimentLineRecord,
+        *,
+        expected_head_sha: str,
+        expected_generation: int,
+    ) -> None:
+        if current.head_sha != expected_head_sha or current.generation != expected_generation:
+            raise OperatorStoreError("stale experiment line head or generation")
+        immutable_before = (
+            current.line_id,
+            current.study_id,
+            current.branch,
+            current.base_sha,
+            current.remote,
+            current.created_at,
+        )
+        immutable_after = (
+            updated.line_id,
+            updated.study_id,
+            updated.branch,
+            updated.base_sha,
+            updated.remote,
+            updated.created_at,
+        )
+        if immutable_before != immutable_after:
+            raise OperatorStoreError("experiment line immutable identity changed")
+        if updated.generation != expected_generation + 1:
+            raise OperatorStoreError("experiment line generation must advance by one")
+
+    def compare_and_swap_experiment_line(
+        self,
+        line: ExperimentLineRecord,
+        *,
+        expected_head_sha: str,
+        expected_generation: int,
+    ) -> ExperimentLineRecord:
+        self.init()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current, _ = self._read_experiment_line_row(connection, line.line_id)
+            self._validate_line_update(
+                current,
+                line,
+                expected_head_sha=expected_head_sha,
+                expected_generation=expected_generation,
+            )
+            result = connection.execute(
+                "UPDATE experiment_lines SET head_sha = ?, generation = ?, status = ?, data = ? "
+                "WHERE line_id = ? AND head_sha = ? AND generation = ?",
+                (
+                    line.head_sha,
+                    line.generation,
+                    line.status,
+                    _dump(line.to_dict()),
+                    line.line_id,
+                    expected_head_sha,
+                    expected_generation,
+                ),
+            )
+            if result.rowcount != 1:
+                connection.rollback()
+                raise OperatorStoreError("stale experiment line compare-and-swap")
+            connection.commit()
+        return line
+
+    def write_integration(self, integration: IntegrationRecord) -> None:
+        self._insert(
+            "integrations",
+            "integration_id",
+            integration.integration_id,
+            integration.to_dict(),
+            study_id=integration.study_id,
+            line_id=integration.line_id,
+            request_id=integration.request_id,
+            kind=integration.kind,
+        )
+
+    def advance_experiment_line(
+        self,
+        line: ExperimentLineRecord,
+        integration: IntegrationRecord,
+    ) -> ExperimentLineRecord:
+        if integration.line_id != line.line_id or integration.study_id != line.study_id:
+            raise OperatorStoreError("integration belongs to another experiment line")
+        if integration.result_head_sha != line.head_sha:
+            raise OperatorStoreError("integration result head does not match updated experiment line")
+        self.init()
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current, _ = self._read_experiment_line_row(connection, line.line_id)
+                self._validate_line_update(
+                    current,
+                    line,
+                    expected_head_sha=integration.expected_head_sha,
+                    expected_generation=integration.expected_generation,
+                )
+                connection.execute(
+                    "INSERT INTO integrations "
+                    "(integration_id,study_id,line_id,request_id,kind,data,created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        safe_id(integration.integration_id),
+                        integration.study_id,
+                        integration.line_id,
+                        integration.request_id,
+                        integration.kind,
+                        _dump(integration.to_dict()),
+                        integration.created_at,
+                    ),
+                )
+                result = connection.execute(
+                    "UPDATE experiment_lines SET head_sha = ?, generation = ?, status = ?, data = ? "
+                    "WHERE line_id = ? AND head_sha = ? AND generation = ?",
+                    (
+                        line.head_sha,
+                        line.generation,
+                        line.status,
+                        _dump(line.to_dict()),
+                        line.line_id,
+                        integration.expected_head_sha,
+                        integration.expected_generation,
+                    ),
+                )
+                if result.rowcount != 1:
+                    connection.rollback()
+                    raise OperatorStoreError("stale experiment line compare-and-swap")
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise OperatorStoreError(
+                f"immutable operator record already exists: integrations/{integration.integration_id}"
+            ) from exc
+        return line
+
+    def read_integration(self, integration_id: str) -> IntegrationRecord:
+        return IntegrationRecord.from_dict(
+            self._read("integrations", "integration_id", safe_id(integration_id))
+        )
+
+    def read_integrations(self, line_id: str) -> list[IntegrationRecord]:
+        self.init()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT data FROM integrations WHERE line_id = ? ORDER BY created_at,integration_id",
+                (safe_id(line_id),),
+            ).fetchall()
+        return [IntegrationRecord.from_dict(json.loads(str(row["data"]))) for row in rows]
+
+    def write_checkpoint(self, checkpoint: CheckpointRecord) -> None:
+        self._insert(
+            "checkpoints",
+            "checkpoint_id",
+            checkpoint.checkpoint_id,
+            checkpoint.to_dict(),
+            study_id=checkpoint.study_id,
+            line_id=checkpoint.line_id,
+            name=checkpoint.name,
+            subject_sha=checkpoint.subject_sha,
+        )
+
+    def write_checkpoint_and_activate(
+        self,
+        line: ExperimentLineRecord,
+        checkpoint: CheckpointRecord,
+        *,
+        expected_head_sha: str,
+        expected_generation: int,
+    ) -> ExperimentLineRecord:
+        if checkpoint.study_id != line.study_id or checkpoint.line_id != line.line_id:
+            raise OperatorStoreError("checkpoint belongs to another experiment line")
+        if line.active_checkpoint_id != checkpoint.checkpoint_id:
+            raise OperatorStoreError("line does not activate the supplied checkpoint")
+        if line.head_sha != checkpoint.subject_sha:
+            raise OperatorStoreError("checkpoint subject does not match line head")
+        self.init()
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current, _ = self._read_experiment_line_row(connection, line.line_id)
+                self._validate_line_update(
+                    current,
+                    line,
+                    expected_head_sha=expected_head_sha,
+                    expected_generation=expected_generation,
+                )
+                connection.execute(
+                    "INSERT INTO checkpoints "
+                    "(checkpoint_id,study_id,line_id,name,subject_sha,data,created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        safe_id(checkpoint.checkpoint_id),
+                        checkpoint.study_id,
+                        checkpoint.line_id,
+                        checkpoint.name,
+                        checkpoint.subject_sha,
+                        _dump(checkpoint.to_dict()),
+                        checkpoint.created_at,
+                    ),
+                )
+                result = connection.execute(
+                    "UPDATE experiment_lines SET head_sha = ?, generation = ?, status = ?, data = ? "
+                    "WHERE line_id = ? AND head_sha = ? AND generation = ?",
+                    (
+                        line.head_sha,
+                        line.generation,
+                        line.status,
+                        _dump(line.to_dict()),
+                        line.line_id,
+                        expected_head_sha,
+                        expected_generation,
+                    ),
+                )
+                if result.rowcount != 1:
+                    connection.rollback()
+                    raise OperatorStoreError("stale experiment line compare-and-swap")
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise OperatorStoreError(
+                f"immutable checkpoint already exists: {checkpoint.checkpoint_id}"
+            ) from exc
+        return line
+
+    def read_checkpoint(self, checkpoint_id: str) -> CheckpointRecord:
+        return CheckpointRecord.from_dict(
+            self._read("checkpoints", "checkpoint_id", safe_id(checkpoint_id))
+        )
+
+    def read_checkpoints(self, study_id: str) -> list[CheckpointRecord]:
+        self.init()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT data FROM checkpoints WHERE study_id = ? ORDER BY created_at,checkpoint_id",
+                (safe_id(study_id),),
+            ).fetchall()
+        return [CheckpointRecord.from_dict(json.loads(str(row["data"]))) for row in rows]
+
+    def write_budget_grant(self, grant: BudgetGrantRecord) -> None:
+        self._insert(
+            "budget_grants",
+            "grant_id",
+            grant.grant_id,
+            grant.to_dict(),
+            study_id=grant.study_id,
+            wave=grant.wave,
+        )
+
+    def write_budget_request(self, request: BudgetRequestRecord) -> None:
+        self._insert(
+            "budget_requests",
+            "budget_request_id",
+            request.budget_request_id,
+            request.to_dict(),
+            study_id=request.study_id,
+            wave=request.wave,
+        )
+
+    def read_budget_request(self, budget_request_id: str) -> BudgetRequestRecord:
+        return BudgetRequestRecord.from_dict(
+            self._read(
+                "budget_requests",
+                "budget_request_id",
+                safe_id(budget_request_id),
+            )
+        )
+
+    def read_budget_requests(self, study_id: str) -> list[BudgetRequestRecord]:
+        self.init()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT data FROM budget_requests WHERE study_id = ? "
+                "ORDER BY created_at,budget_request_id",
+                (safe_id(study_id),),
+            ).fetchall()
+        return [BudgetRequestRecord.from_dict(json.loads(str(row["data"]))) for row in rows]
+
+    def read_budget_grant(self, grant_id: str) -> BudgetGrantRecord:
+        return BudgetGrantRecord.from_dict(
+            self._read("budget_grants", "grant_id", safe_id(grant_id))
+        )
+
+    def read_budget_grants(self, study_id: str) -> list[BudgetGrantRecord]:
+        self.init()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT data FROM budget_grants WHERE study_id = ? ORDER BY wave",
+                (safe_id(study_id),),
+            ).fetchall()
+        return [BudgetGrantRecord.from_dict(json.loads(str(row["data"]))) for row in rows]
+
+    def write_usage_entry(self, entry: UsageEntryRecord) -> None:
+        self._insert(
+            "usage_entries",
+            "usage_id",
+            entry.usage_id,
+            entry.to_dict(),
+            grant_id=entry.grant_id,
+            study_id=entry.study_id,
+            call_key=entry.call_key,
+            case_id=entry.case_id,
+            role=entry.role,
+            status=entry.status,
+        )
+
+    def reserve_usage_entry(self, entry: UsageEntryRecord) -> UsageEntryRecord:
+        if entry.status != "RESERVED":
+            raise OperatorStoreError("usage reservation must start in RESERVED status")
+        self.init()
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                grant_row = connection.execute(
+                    "SELECT data FROM budget_grants WHERE grant_id = ?",
+                    (safe_id(entry.grant_id),),
+                ).fetchone()
+                if grant_row is None:
+                    raise OperatorStoreError(f"missing operator record: budget_grants/{entry.grant_id}")
+                grant = BudgetGrantRecord.from_dict(json.loads(str(grant_row["data"])))
+                request_row = connection.execute(
+                    "SELECT data FROM budget_requests WHERE budget_request_id = ?",
+                    (grant.budget_request_id,),
+                ).fetchone()
+                if request_row is None:
+                    raise OperatorStoreError("budget grant has no authority request")
+                budget_request = BudgetRequestRecord.from_dict(
+                    json.loads(str(request_row["data"]))
+                )
+                if budget_request.budget_request_digest != grant.budget_request_digest:
+                    raise OperatorStoreError("budget grant request digest mismatch")
+                if grant.study_id != entry.study_id or budget_request.study_id != entry.study_id:
+                    raise OperatorStoreError("usage belongs to another study")
+                if grant.model != entry.model:
+                    raise OperatorStoreError("usage model does not match budget grant")
+                if is_expired(grant.expires_at):
+                    raise OperatorStoreError("budget grant has expired")
+                latest_wave_row = connection.execute(
+                    "SELECT MAX(wave) FROM budget_grants WHERE study_id = ?",
+                    (entry.study_id,),
+                ).fetchone()
+                if latest_wave_row is None or int(latest_wave_row[0]) != grant.wave:
+                    raise OperatorStoreError("budget grant is superseded by a later wave")
+                rows = connection.execute(
+                    "SELECT status,data FROM usage_entries WHERE study_id = ?",
+                    (entry.study_id,),
+                ).fetchall()
+                usage: list[UsageEntryRecord] = []
+                for row in rows:
+                    item = UsageEntryRecord.from_dict(json.loads(str(row["data"])))
+                    if str(row["status"]) != item.status:
+                        raise OperatorStoreError("usage status column disagrees with record")
+                    usage.append(item)
+                if len(usage) >= grant.max_calls:
+                    raise OperatorStoreError("study SDK call budget is exhausted")
+                running = sum(item.status == "RESERVED" for item in usage)
+                if running >= grant.case_concurrency:
+                    raise OperatorStoreError("study SDK call concurrency is exhausted")
+                case_roles = {"writer", "evaluator", "eval_judge"}
+                operator_roles = {
+                    "operator_supervisor",
+                    "operator_writer",
+                    "operator_verifier",
+                }
+                if entry.role in case_roles:
+                    if not entry.case_id or entry.case_id not in grant.case_ids:
+                        raise OperatorStoreError("usage case is outside budget grant")
+                    if entry.attempt < 1:
+                        raise OperatorStoreError("case usage attempt must be positive")
+                    if entry.role == "writer":
+                        prior_attempts = sum(
+                            item.role == "writer"
+                            and item.case_id == entry.case_id
+                            and item.execution_id == entry.execution_id
+                            for item in usage
+                        )
+                        if prior_attempts >= grant.max_writer_attempts:
+                            raise OperatorStoreError("writer attempt budget is exhausted")
+                        if entry.attempt != prior_attempts + 1:
+                            raise OperatorStoreError("writer attempt is not the next reserved attempt")
+                elif entry.role in operator_roles:
+                    if entry.case_id is not None:
+                        raise OperatorStoreError("operator revision usage must not expose a case id")
+                    if entry.revision < 1 or entry.revision > grant.max_operator_revisions:
+                        raise OperatorStoreError("operator revision is outside budget grant")
+                    prior_role_calls = sum(
+                        item.role == entry.role
+                        and item.execution_id == entry.execution_id
+                        for item in usage
+                    )
+                    if entry.revision != prior_role_calls + 1:
+                        raise OperatorStoreError(
+                            "operator revision is not the next reserved revision"
+                        )
+                else:
+                    raise OperatorStoreError(f"role is outside study budget: {entry.role}")
+                connection.execute(
+                    "INSERT INTO usage_entries "
+                    "(usage_id,grant_id,study_id,call_key,case_id,role,status,data,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        safe_id(entry.usage_id),
+                        entry.grant_id,
+                        entry.study_id,
+                        entry.call_key,
+                        entry.case_id,
+                        entry.role,
+                        entry.status,
+                        _dump(entry.to_dict()),
+                        entry.reserved_at,
+                    ),
+                )
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise OperatorStoreError(
+                f"usage call key or id already exists: {entry.call_key}"
+            ) from exc
+        return entry
+
+    def finalize_usage_entry(self, entry: UsageEntryRecord) -> UsageEntryRecord:
+        if entry.status == "RESERVED":
+            raise OperatorStoreError("usage finalization requires a terminal status")
+        self.init()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT data,status FROM usage_entries WHERE usage_id = ?",
+                (safe_id(entry.usage_id),),
+            ).fetchone()
+            if row is None:
+                raise OperatorStoreError(f"missing operator record: usage_entries/{entry.usage_id}")
+            current = UsageEntryRecord.from_dict(json.loads(str(row["data"])))
+            immutable_before = (
+                current.usage_id,
+                current.grant_id,
+                current.study_id,
+                current.call_key,
+                current.execution_id,
+                current.case_id,
+                current.role,
+                current.model,
+                current.attempt,
+                current.revision,
+                current.reserved_at,
+            )
+            immutable_after = (
+                entry.usage_id,
+                entry.grant_id,
+                entry.study_id,
+                entry.call_key,
+                entry.execution_id,
+                entry.case_id,
+                entry.role,
+                entry.model,
+                entry.attempt,
+                entry.revision,
+                entry.reserved_at,
+            )
+            if immutable_before != immutable_after:
+                raise OperatorStoreError("usage immutable reservation fields changed")
+            if current.status != "RESERVED" or str(row["status"]) != "RESERVED":
+                raise OperatorStoreError("usage reservation is already finalized")
+            result = connection.execute(
+                "UPDATE usage_entries SET status = ?, data = ? "
+                "WHERE usage_id = ? AND status = 'RESERVED'",
+                (entry.status, _dump(entry.to_dict()), entry.usage_id),
+            )
+            if result.rowcount != 1:
+                connection.rollback()
+                raise OperatorStoreError("usage reservation was finalized concurrently")
+            connection.commit()
+        return entry
+
+    def read_usage_entry(self, usage_id: str) -> UsageEntryRecord:
+        return UsageEntryRecord.from_dict(
+            self._read("usage_entries", "usage_id", safe_id(usage_id))
+        )
+
+    def read_usage_entries(self, grant_id: str) -> list[UsageEntryRecord]:
+        self.init()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT data FROM usage_entries WHERE grant_id = ? ORDER BY created_at,usage_id",
+                (safe_id(grant_id),),
+            ).fetchall()
+        return [UsageEntryRecord.from_dict(json.loads(str(row["data"]))) for row in rows]
 
     @property
     def legacy_root(self) -> Path:

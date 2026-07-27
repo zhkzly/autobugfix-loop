@@ -59,11 +59,45 @@ class LocalGitAdapter:
             shutil.rmtree(main)
         run_git(case.worktree_path, ["rev-parse", "--git-dir"], check=True)
         subprocess.run(
-            ["git", "clone", "--bare", str(case.worktree_path), str(remote)],
+            ["git", "init", "--bare", str(remote)],
             check=True,
             text=True,
             capture_output=True,
         )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(remote),
+                "fetch",
+                "--no-tags",
+                str(case.worktree_path),
+                f"{case.base_commit}:refs/heads/main",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        run_git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"], check=True)
+        refs = run_git(
+            remote,
+            ["for-each-ref", "--format=%(refname)"],
+            check=True,
+        ).stdout.splitlines()
+        if refs != ["refs/heads/main"]:
+            raise EvalAdapterError(
+                f"isolated Execution remote contains unexpected refs: {refs}"
+            )
+        if case.final_commit and case.final_commit != case.base_commit:
+            leaked = run_git(
+                remote,
+                ["cat-file", "-e", f"{case.final_commit}^{{commit}}"],
+                check=False,
+            )
+            if leaked.returncode == 0:
+                raise EvalAdapterError(
+                    "isolated Execution remote contains the hidden reference commit"
+                )
         subprocess.run(
             ["git", "clone", str(remote), str(main)],
             check=True,

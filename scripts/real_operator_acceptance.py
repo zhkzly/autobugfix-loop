@@ -79,6 +79,20 @@ def build_repo(source_root: Path, root: Path) -> Path:
         root / "evidence/operator.yaml",
         "failure: normalize_case_id emits underscores but dataset paths require hyphens\n",
     )
+    write(
+        root / "evidence/study-manifest.yaml",
+        yaml.safe_dump(
+            {
+                "schema": "autobugfix-operator-acceptance-v1",
+                "cases": [
+                    "whitespace-normalization",
+                    "underscore-normalization",
+                    "mixed-case-normalization",
+                ],
+            },
+            sort_keys=False,
+        ),
+    )
     for relative in (
         "src/autobugfix/config.py",
         "src/autobugfix/codex_sdk.py",
@@ -138,6 +152,7 @@ def write_config(source_root: Path, root: Path, model: str) -> None:
                         "profiles": {
                             "operator-acceptance": {
                                 "timeout_seconds": 120,
+                                "baseline_mode": "measure",
                                 "commands": acceptance_commands(),
                             }
                         },
@@ -154,6 +169,8 @@ def main() -> int:
     parser.add_argument("--root", default="/tmp/autobugfix-real-operator-e2e")
     parser.add_argument("--model", default="gpt-5.4-mini")
     args = parser.parse_args()
+    if args.model != "gpt-5.4-mini":
+        raise RuntimeError("governed Operator acceptance requires gpt-5.4-mini")
     source_root = Path.cwd().resolve()
     root = Path(args.root).resolve()
     policy_path = build_repo(source_root, root)
@@ -179,6 +196,56 @@ def main() -> int:
         raise RuntimeError("Operator baseline did not preserve the expected failing state")
     run(["git", "add", ".autobugfix-baselines/operator-acceptance-base.yaml"], root)
     run(["git", "commit", "-m", "Record trusted Operator acceptance baseline"], root)
+    h0_sha = run(["git", "rev-parse", "main"], root).stdout.strip()
+    study = service.create_study(
+        study_id="operator-acceptance-study",
+        cohort_id="operator-acceptance-h0",
+        purpose="Exercise the governed Operator integration line with real Codex roles",
+        manifest_path=root / "evidence/study-manifest.yaml",
+        success_contract={
+            "observed_guard": {
+                "require_all_commands_pass": True,
+                "metrics": {
+                    "pass_rate": {"operator": "eq", "value": 1.0},
+                    "artifact_completeness": {"operator": "eq", "value": 1.0},
+                },
+                "protected_ref": "main",
+            },
+        },
+        base_ref=h0_sha,
+        primary_model=args.model,
+        target_checkpoint_name="H_bug",
+    )
+    h0_metric = service.record_observed_baseline_metric(
+        study.study_id,
+        baseline_name="operator-acceptance-base",
+    )
+    service.initialize_experiment_line(
+        study.study_id,
+        metric_receipt_id=h0_metric.metric_id,
+    )
+    budget_request = service.create_budget_request(
+        study.study_id,
+        wave=3,
+        case_ids=(
+            "whitespace-normalization",
+            "underscore-normalization",
+            "mixed-case-normalization",
+        ),
+        reason="Run the bounded real Operator acceptance wave",
+        requester="acceptance-operator",
+        model=args.model,
+        max_calls=6,
+        max_writer_attempts=2,
+        max_operator_revisions=3,
+        wall_time_seconds=900,
+        case_concurrency=1,
+    )
+    grant = service.approve_budget_grant(
+        budget_request.budget_request_id,
+        approver="acceptance-human",
+        confirm_request_digest=budget_request.budget_request_digest,
+    )
     triage = service.create_triage(
         triage_id="operator-real-triage",
         summary="Eval case IDs violate the dataset path contract",
@@ -195,6 +262,8 @@ def main() -> int:
         planned_paths=("src/autobugfix/eval/runner.py", "tests/test_eval.py"),
         validation_profiles=("eval",),
         performance_baseline="operator-acceptance-base",
+        experiment_line_id=study.line_id,
+        budget_grant_id=grant.grant_id,
         creator="acceptance-operator",
     )
     service.start(request.request_id)
@@ -207,6 +276,7 @@ def main() -> int:
         retry = service.retry_writer(request.request_id)
         if retry["status"] != "COMPLETED":
             raise RuntimeError(f"Operator retry Writer did not complete: {retry}")
+        writer = retry
         fast = service.verify(request.request_id, mode="fast")
         if fast["check_run"]["status"] != "PASSED":
             raise RuntimeError(
@@ -222,7 +292,6 @@ def main() -> int:
     audit = service.audit(request.request_id)
     if not audit["allowed"]:
         raise RuntimeError(f"Operator audit failed: {audit['violations']}")
-    promotion = service.prepare_promotion(request.request_id)
     workspace = Path(service.store.read_workspace(request.request_id)["path"])
     diff = run(["git", "diff", request.base_sha, "HEAD", "--", "src/autobugfix/eval/runner.py"], workspace).stdout
     if not diff.strip():
@@ -241,13 +310,61 @@ def main() -> int:
     ]
     if not raw_artifacts:
         raise RuntimeError("Operator Writer raw SDK log was not retained")
+    workspace_record = service.store.read_workspace(request.request_id)
+    baseline = workspace_record.get("writer_admission_baseline")
+    writer_runs = service.store.read_writer_runs(request.request_id)
+    latest_writer = writer_runs[-1] if writer_runs else None
+    artifacts = service.store.read_artifacts(request.request_id)
+    if not isinstance(baseline, dict) or not baseline.get("artifact_id"):
+        raise RuntimeError("Operator candidate has no trusted Writer admission baseline")
+    if latest_writer is None or not latest_writer.application_artifact_id:
+        raise RuntimeError("Operator Writer has no trusted application artifact")
+    if not any(
+        item["artifact_id"] == baseline["artifact_id"]
+        and item["kind"] == "writer-admission-baseline"
+        and item["trust_class"] == "authoritative"
+        for item in artifacts
+    ):
+        raise RuntimeError("Operator Writer admission baseline artifact was not retained")
+    if not any(
+        item["artifact_id"] == latest_writer.application_artifact_id
+        and item["kind"] == "writer-application"
+        and item["trust_class"] == "authoritative"
+        for item in artifacts
+    ):
+        raise RuntimeError("Operator Writer application artifact was not retained")
+    if not any(
+        event.kind == "writer_applied"
+        and event.payload.get("run_id") == latest_writer.run_id
+        and event.payload.get("application_artifact_id") == latest_writer.application_artifact_id
+        and event.payload.get("candidate_before_content_digest")
+        and event.payload.get("candidate_after_content_digest")
+        for event in service.store.read_events(request.request_id)
+    ):
+        raise RuntimeError("Operator Writer admission event was not retained")
+    integration = service.integrate_candidate(
+        request.request_id,
+        grant_id=grant.grant_id,
+        actor="acceptance-guard",
+    )
+    metric = service.record_observed_candidate_metric(study.study_id)
+    checkpoint = service.create_checkpoint(
+        study.line_id,
+        metric_receipt_id=metric.metric_id,
+    )
+    if run(["git", "rev-parse", "main"], root).stdout.strip() != h0_sha:
+        raise RuntimeError("Operator acceptance changed the protected main branch")
+    if run(["git", "status", "--porcelain"], root).stdout.strip():
+        raise RuntimeError("Operator acceptance left the main checkout dirty")
     print(
         json.dumps(
             {
                 "request_id": request.request_id,
                 "phase": service.projection(request.request_id).state,
                 "writer_run_id": writer["run_id"],
-                "promotion_id": promotion["promotion"]["promotion_id"],
+                "integration_id": integration["integration"]["integration_id"],
+                "checkpoint_id": checkpoint["checkpoint"]["checkpoint_id"],
+                "budget_grant_id": grant.grant_id,
                 "model": args.model,
                 "workspace": str(workspace),
             },
