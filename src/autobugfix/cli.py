@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import importlib.metadata
-import json
 import sys
 import uuid
 from pathlib import Path
@@ -14,22 +13,26 @@ from autobugfix.codex_runtime import build_codex_request
 from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.config import load_config, write_default_config
 from autobugfix.dataset import build_raw_dataset
-from autobugfix.eval.diagnosis import diagnose_run
-from autobugfix.eval.improvements import list_improvements, show_improvement, update_improvement
-from autobugfix.eval.runner import run_eval, score_path
-from autobugfix.eval.benchmarks.service import EvalBenchmarkService
 from autobugfix.eval.baselines.raw_codex import RawCodexBaselineService
 from autobugfix.eval.baselines.swe_raw_codex import SWERawCodexBaselineService
-from autobugfix.eval.swe_holdout_guard import SWEHoldoutGuardService
+from autobugfix.eval.benchmarks.exp2_coordinator import (
+    Exp2Coordinator,
+    Exp2CoordinatorError,
+)
+from autobugfix.eval.benchmarks.exp2_records import Exp2StudyPlan
+from autobugfix.eval.benchmarks.service import EvalBenchmarkService
+from autobugfix.eval.diagnosis import diagnose_run
+from autobugfix.eval.improvements import (
+    list_improvements,
+    show_improvement,
+    update_improvement,
+)
+from autobugfix.eval.runner import run_eval, score_path
 from autobugfix.eval.supervision import supervision_note
+from autobugfix.eval.swe_holdout_guard import SWEHoldoutGuardService
 from autobugfix.gradio_app import launch as launch_ui
 from autobugfix.memory.service import MemoryService
 from autobugfix.memory_gradio_app import launch as launch_memory_ui
-from autobugfix.projection import inspect_projection, render_inspect, status_projection
-from autobugfix.role_config import resolve_role
-from autobugfix.scheduler import tick
-from autobugfix.service import AutobugfixService
-from autobugfix.worker import start_worker, stop_worker, worker_status
 from autobugfix.memory_worker import start_worker as start_memory_worker
 from autobugfix.memory_worker import stop_worker as stop_memory_worker
 from autobugfix.memory_worker import worker_status as memory_worker_status
@@ -41,6 +44,11 @@ from autobugfix.operator.models import (
     VALID_RISKS,
 )
 from autobugfix.operator.service import OperatorGovernanceService
+from autobugfix.projection import inspect_projection, render_inspect, status_projection
+from autobugfix.role_config import resolve_role
+from autobugfix.scheduler import tick
+from autobugfix.service import AutobugfixService
+from autobugfix.worker import start_worker, stop_worker, worker_status
 
 
 def _stdin_or_file(args: argparse.Namespace) -> str:
@@ -293,6 +301,144 @@ def command_dataset(args: argparse.Namespace) -> int:
 
 def command_eval(args: argparse.Namespace) -> int:
     action = args.eval_action
+    if action == "exp2":
+        config = load_config(Path.cwd())
+        default_state_root = (
+            config.eval.benchmarks.trusted_case_root / "exp2" / args.study_id
+        ).resolve()
+        state_root = (
+            Path(args.state_root).resolve()
+            if getattr(args, "state_root", None)
+            else default_state_root
+        )
+        coordinator = Exp2Coordinator(state_root, args.study_id)
+        if args.exp2_action == "init":
+            plan = Exp2StudyPlan(
+                study_id=args.study_id,
+                calibration_protocol_path=str(Path(args.calibration_protocol).resolve()),
+                public_manifest_path=str(Path(args.manifest).resolve()),
+                h0_binding_path=str(Path(args.h0_binding).resolve()),
+                candidate_binding_path=str(Path(args.candidate_binding).resolve()),
+                calibration_case_ids=tuple(args.calibration_case),
+                public_case_ids=tuple(args.public_case),
+                execution_mode=args.execution_mode,
+                disposable_root=(
+                    str(Path(args.disposable_root).resolve())
+                    if args.disposable_root
+                    else None
+                ),
+                cohort_audit_path=(
+                    str(Path(args.cohort_audit).resolve())
+                    if args.cohort_audit
+                    else None
+                ),
+                policy_path=(
+                    str(Path(args.policy).resolve()) if args.policy else None
+                ),
+                apparatus_receipt_path=(
+                    str(Path(args.apparatus_receipt).resolve())
+                    if args.apparatus_receipt
+                    else None
+                ),
+                empty_memory_fixture_path=(
+                    str(Path(args.empty_memory_fixture).resolve())
+                    if args.empty_memory_fixture
+                    else None
+                ),
+            )
+            _print_yaml(coordinator.initialize(plan))
+            return 0
+        if args.exp2_action == "resume":
+            if not args.execute:
+                _print_yaml(coordinator.resume())
+                return 0
+            plan = coordinator.load_plan()
+            service = EvalBenchmarkService(Path.cwd())
+            run_root = (
+                config.eval.benchmarks.trusted_case_root
+                / "exp2"
+                / args.study_id
+                / "runs"
+            ).resolve()
+
+            def execute_stage(stage, cases, binding, arm):
+                reports = []
+                expected_kinds = {"BASELINE"} if arm == "H0" else {"CANDIDATE"}
+                for index, case_id in enumerate(cases, start=1):
+                    run_id = f"{stage.lower()}-{index:02d}-{case_id}"
+                    disposable_root = (
+                        Path(plan.disposable_root)
+                        if plan.disposable_root
+                        else None
+                    )
+                    if stage == "H0_CALIBRATION":
+                        reports.append(
+                            service.run_swe_exp2_calibration_case(
+                                Path(plan.calibration_protocol_path),
+                                adapter="swebench_verified",
+                                instance_id=case_id,
+                                run_id=run_id,
+                                execution_mode=plan.execution_mode,
+                                disposable_root=disposable_root,
+                            )
+                        )
+                    else:
+                        reports.append(
+                            service.run_swe_exp2_case(
+                                Path(plan.public_manifest_path),
+                                case_selector=case_id,
+                                study_binding_path=binding,
+                                out_root=run_root,
+                                run_id=run_id,
+                                expected_binding_kinds=expected_kinds,
+                                execution_mode=plan.execution_mode,
+                                disposable_root=disposable_root,
+                            )
+                        )
+                return reports
+
+            _print_yaml(coordinator.resume(execute_stage))
+            return 0
+        if args.exp2_action == "budget-plan":
+            _print_yaml(coordinator.budget_allocation(args.wave))
+            return 0
+        if args.exp2_action == "record-attribution":
+            _print_yaml(
+                coordinator.record_attribution(
+                    _read_yaml_mapping(args.record, "Exp2 attribution")
+                )
+            )
+            return 0
+        if args.exp2_action == "record-sealed-aggregate":
+            _print_yaml(
+                coordinator.record_sealed_aggregate(
+                    _read_yaml_mapping(args.record, "Exp2 sealed aggregate")
+                )
+            )
+            return 0
+        if args.exp2_action == "record-public-gate":
+            _print_yaml(
+                coordinator.record_public_regression_gate(
+                    _read_yaml_mapping(args.record, "Exp2 public regression gate")
+                )
+            )
+            return 0
+        if args.exp2_action == "record-burn":
+            _print_yaml(
+                coordinator.record_holdout_burn(
+                    _read_yaml_mapping(args.record, "Exp2 Holdout burn")
+                )
+            )
+            return 0
+        if args.exp2_action == "report":
+            result = {"status": coordinator.status()}
+            try:
+                result["paired_public"] = coordinator.paired_public_summary()
+            except Exp2CoordinatorError as exc:
+                result["paired_public_unavailable"] = str(exc)
+            _print_yaml(result)
+            return 0
+        raise AssertionError(f"unhandled Exp2 action: {args.exp2_action}")
     if action == "baseline":
         if args.baseline_action == "prepare-swe-raw-codex":
             service = SWERawCodexBaselineService(Path.cwd())
@@ -480,6 +626,10 @@ def command_eval(args: argparse.Namespace) -> int:
                 study_binding_path=Path(args.study_binding),
                 out_root=Path(args.out),
                 run_id=args.run_id,
+                execution_mode=args.execution_mode,
+                disposable_root=(
+                    Path(args.disposable_root) if args.disposable_root else None
+                ),
             )
             _print_yaml(report)
             return 0 if not report["harness_error"] else 1
@@ -1181,6 +1331,64 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_parser = sub.add_parser("eval")
     eval_sub = eval_parser.add_subparsers(dest="eval_action", required=True)
+    exp2 = eval_sub.add_parser("exp2")
+    exp2_sub = exp2.add_subparsers(dest="exp2_action", required=True)
+    exp2_init = exp2_sub.add_parser("init")
+    exp2_init.add_argument("--study-id", required=True)
+    exp2_init.add_argument("--calibration-protocol", required=True)
+    exp2_init.add_argument("--manifest", required=True)
+    exp2_init.add_argument("--h0-binding", required=True)
+    exp2_init.add_argument("--candidate-binding", required=True)
+    exp2_init.add_argument("--calibration-case", action="append", required=True)
+    exp2_init.add_argument("--public-case", action="append", required=True)
+    exp2_init.add_argument(
+        "--execution-mode", choices=["protected", "workspace_only"], default="protected"
+    )
+    exp2_init.add_argument("--disposable-root")
+    exp2_init.add_argument("--cohort-audit", required=True)
+    exp2_init.add_argument("--policy", required=True)
+    exp2_init.add_argument("--apparatus-receipt", required=True)
+    exp2_init.add_argument("--empty-memory-fixture", required=True)
+    exp2_init.add_argument("--state-root")
+    exp2_init.set_defaults(func=command_eval)
+    exp2_resume = exp2_sub.add_parser("resume")
+    exp2_resume.add_argument("--study-id", required=True)
+    exp2_resume.add_argument("--state-root")
+    exp2_resume.add_argument(
+        "--execute",
+        action="store_true",
+        help="execute the next safe public/calibration stage; otherwise inspect readiness",
+    )
+    exp2_resume.set_defaults(func=command_eval)
+    exp2_budget = exp2_sub.add_parser("budget-plan")
+    exp2_budget.add_argument("--study-id", required=True)
+    exp2_budget.add_argument("--wave", type=int, choices=[3, 8, 16], required=True)
+    exp2_budget.add_argument("--state-root")
+    exp2_budget.set_defaults(func=command_eval)
+    exp2_attribution = exp2_sub.add_parser("record-attribution")
+    exp2_attribution.add_argument("--study-id", required=True)
+    exp2_attribution.add_argument("--record", required=True)
+    exp2_attribution.add_argument("--state-root")
+    exp2_attribution.set_defaults(func=command_eval)
+    exp2_sealed_aggregate = exp2_sub.add_parser("record-sealed-aggregate")
+    exp2_sealed_aggregate.add_argument("--study-id", required=True)
+    exp2_sealed_aggregate.add_argument("--record", required=True)
+    exp2_sealed_aggregate.add_argument("--state-root")
+    exp2_sealed_aggregate.set_defaults(func=command_eval)
+    exp2_gate = exp2_sub.add_parser("record-public-gate")
+    exp2_gate.add_argument("--study-id", required=True)
+    exp2_gate.add_argument("--record", required=True)
+    exp2_gate.add_argument("--state-root")
+    exp2_gate.set_defaults(func=command_eval)
+    exp2_burn = exp2_sub.add_parser("record-burn")
+    exp2_burn.add_argument("--study-id", required=True)
+    exp2_burn.add_argument("--record", required=True)
+    exp2_burn.add_argument("--state-root")
+    exp2_burn.set_defaults(func=command_eval)
+    exp2_report = exp2_sub.add_parser("report")
+    exp2_report.add_argument("--study-id", required=True)
+    exp2_report.add_argument("--state-root")
+    exp2_report.set_defaults(func=command_eval)
     baseline = eval_sub.add_parser("baseline")
     baseline_sub = baseline.add_subparsers(
         dest="baseline_action", required=True
@@ -1311,6 +1519,10 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_run_swe_optimization.add_argument("--case", required=True)
     benchmark_run_swe_optimization.add_argument("--study-binding", required=True)
     benchmark_run_swe_optimization.add_argument("--run-id", required=True)
+    benchmark_run_swe_optimization.add_argument(
+        "--execution-mode", choices=["protected", "workspace_only"], default="protected"
+    )
+    benchmark_run_swe_optimization.add_argument("--disposable-root")
     benchmark_run_swe_optimization.add_argument(
         "--out",
         default=".autobugfix/trusted-eval-cases/swe/formal-optimization",

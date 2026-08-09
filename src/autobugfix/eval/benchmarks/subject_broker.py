@@ -8,9 +8,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Literal
 
 import yaml
 
@@ -31,23 +32,22 @@ from autobugfix.eval.benchmarks.swe_codex import (
 from autobugfix.eval.benchmarks.swe_materialize import SWEMaterializedRepository
 from autobugfix.eval.benchmarks.swe_models import (
     SWEInstance,
-    SWESubmission,
     SWESubjectTreatmentRuntime,
+    SWESubmission,
     SWEVisibleCase,
 )
-from autobugfix.eval.benchmarks.swe_runtime import SWERuntime, SWERuntimeError
+from autobugfix.eval.benchmarks.swe_runtime import SWERuntime
 from autobugfix.eval.benchmarks.swe_submission import (
     FrozenSWESubmission,
     SWESubmissionAuthority,
     write_evidence_manifest,
 )
 from autobugfix.eval.benchmarks.swe_verifier import (
-    SWEVerifierServer,
-    SWEDockerVisibleVerifier,
     VISIBLE_VERIFIER_COMMAND_ID,
+    SWEDockerVisibleVerifier,
+    SWEVerifierServer,
 )
 from autobugfix.git_utils import git_common_dir, rev_parse, run_git
-from autobugfix.models import RepoProfile
 from autobugfix.service import AutobugfixService
 from autobugfix.study_binding import StudyBindingError, validate_study_binding_shape
 from autobugfix.worktree import diff_for_task
@@ -55,6 +55,9 @@ from autobugfix.worktree import diff_for_task
 
 class SWESubjectBrokerError(RuntimeError):
     pass
+
+
+SWEExecutionMode = Literal["protected", "workspace_only"]
 
 
 class SWESubjectBroker:
@@ -369,6 +372,7 @@ class SWESubjectBroker:
         repo_id: str,
         treatment: SWESubjectTreatmentRuntime,
         codex_runtime_root: Path | None = None,
+        bridge_auth: bool = True,
     ) -> Path:
         frozen_config_path = self._subject_config_path(subject)
         subject_config = yaml.safe_load(
@@ -395,7 +399,7 @@ class SWESubjectBroker:
                 if self.config.codex.role_runtime.codex_bin is not None
                 else None
             ),
-            "bridge_auth": True,
+            "bridge_auth": bridge_auth,
             "skill_guard": True,
             "strict_skill_guard": True,
         }
@@ -647,6 +651,145 @@ class SWESubjectBroker:
         environment["TMPDIR"] = "/tmp"
         return environment
 
+    def _workspace_only_preflight(
+        self,
+        *,
+        workspace_root: Path,
+        disposable_root: Path,
+        artifact_root: Path,
+        authority_roots: tuple[Path, ...],
+        environment: Mapping[str, str],
+        credential_paths: tuple[Path, ...] = (),
+    ) -> dict[str, Any]:
+        """Prove the direct SDK mode has a disposable write surface.
+
+        This is deliberately stricter than the protected Bubblewrap path.  The
+        direct mode removes both process-isolation layers, so a caller must
+        provide a fresh root which is disjoint from every project authority
+        root and a scrubbed child-process environment.  A failed proof is a
+        hard stop; it is never silently downgraded to direct execution.
+        """
+
+        workspace = workspace_root.resolve()
+        disposable = disposable_root.resolve()
+        artifact = artifact_root.resolve()
+        if disposable == Path("/") or disposable == Path("/tmp"):
+            raise SWESubjectBrokerError(
+                "workspace-only disposable root must be a dedicated child directory"
+            )
+        if disposable.is_symlink() or not disposable.is_dir():
+            raise SWESubjectBrokerError(
+                "workspace-only disposable root must be a real directory"
+            )
+        if workspace.is_symlink() or not workspace.is_relative_to(disposable):
+            raise SWESubjectBrokerError(
+                "workspace-only execution root is outside the disposable root"
+            )
+        if workspace == disposable:
+            raise SWESubjectBrokerError(
+                "workspace-only execution root must be a dedicated child"
+            )
+        if workspace == artifact or workspace.is_relative_to(artifact):
+            raise SWESubjectBrokerError(
+                "workspace-only execution root overlaps Eval artifact state"
+            )
+        if artifact == disposable or artifact.is_relative_to(disposable):
+            raise SWESubjectBrokerError(
+                "workspace-only Eval artifact state overlaps the disposable root"
+            )
+        for variable in ("TMPDIR", "TMP", "TEMP"):
+            value = environment.get(variable)
+            if value:
+                temporary = Path(value).resolve()
+                if not temporary.is_relative_to(disposable):
+                    raise SWESubjectBrokerError(
+                        "workspace-only temporary directory is outside the disposable root"
+                    )
+        for authority in authority_roots:
+            candidate = authority.resolve()
+            if workspace.is_relative_to(candidate) or candidate.is_relative_to(workspace):
+                raise SWESubjectBrokerError(
+                    "workspace-only execution root overlaps trusted authority: "
+                    + str(candidate)
+                )
+            if disposable.is_relative_to(candidate) or candidate.is_relative_to(disposable):
+                raise SWESubjectBrokerError(
+                    "workspace-only disposable root overlaps trusted authority: "
+                    + str(candidate)
+                )
+            if candidate.exists():
+                entries = (candidate, *candidate.rglob("*")) if candidate.is_dir() else (candidate,)
+                for entry in entries:
+                    if entry.is_symlink():
+                        raise SWESubjectBrokerError(
+                            "workspace-only authority contains a redirect: "
+                            + str(entry)
+                        )
+                    try:
+                        writable = bool(entry.stat().st_mode & 0o222)
+                    except OSError as exc:
+                        raise SWESubjectBrokerError(
+                            "workspace-only authority cannot be inspected: "
+                            + str(entry)
+                        ) from exc
+                    if writable:
+                        raise SWESubjectBrokerError(
+                            "workspace-only authority is writable without process isolation: "
+                            + str(entry)
+                        )
+        exposed_credentials = tuple(
+            str(path.resolve())
+            for path in credential_paths
+            if path.exists() or path.is_symlink()
+        )
+        if exposed_credentials:
+            raise SWESubjectBrokerError(
+                "workspace-only environment exposes host credentials: "
+                + ", ".join(exposed_credentials)
+            )
+        sensitive_keys = {
+            key
+            for key in environment
+            if key == "SSH_AUTH_SOCK"
+            or any(fragment in key.upper() for fragment in (
+                "API_KEY",
+                "AUTH",
+                "CREDENTIAL",
+                "PASSWORD",
+                "PRIVATE_KEY",
+                "SECRET",
+                "TOKEN",
+            ))
+        }
+        if sensitive_keys:
+            raise SWESubjectBrokerError(
+                "workspace-only environment contains credentials: "
+                + ", ".join(sorted(sensitive_keys))
+            )
+        return record_with_digest(
+            {
+                "schema": "autobugfix-swe-workspace-only-preflight-v1",
+                "execution_mode": "workspace_only",
+                "workspace_root": str(workspace),
+                "disposable_root": str(disposable),
+                "artifact_root": str(artifact),
+                "authority_roots": sorted(str(path.resolve()) for path in authority_roots),
+                "environment_keys": sorted(environment),
+                "credential_keys": [],
+                "credential_paths_checked": sorted(
+                    str(path.resolve()) for path in credential_paths
+                ),
+                "temporary_root": str(
+                    Path(environment["TMPDIR"]).resolve()
+                    if environment.get("TMPDIR")
+                    else disposable
+                ),
+                "direct_sdk_in_process": True,
+                "sdk_bubblewrap": False,
+                "outer_bubblewrap": False,
+            }
+        )
+
     @staticmethod
     def _main_identity(main: Path) -> dict[str, str]:
         return {
@@ -759,6 +902,8 @@ class SWESubjectBroker:
         study_binding: Mapping[str, Any] | None = None,
         memory_snapshot: Path | None = None,
         codex_backend_factory: Callable[[str, int, int], CodexBackend] | None = None,
+        execution_mode: SWEExecutionMode = "protected",
+        disposable_root: Path | None = None,
     ) -> FrozenSWESubmission:
         try:
             return self._run_impl(
@@ -776,6 +921,8 @@ class SWESubjectBroker:
                 study_binding=study_binding,
                 memory_snapshot=memory_snapshot,
                 codex_backend_factory=codex_backend_factory,
+                execution_mode=execution_mode,
+                disposable_root=disposable_root,
             )
         except BaseException as exc:
             root = artifact_root.resolve()
@@ -832,6 +979,8 @@ class SWESubjectBroker:
         study_binding: Mapping[str, Any] | None = None,
         memory_snapshot: Path | None = None,
         codex_backend_factory: Callable[[str, int, int], CodexBackend] | None = None,
+        execution_mode: SWEExecutionMode = "protected",
+        disposable_root: Path | None = None,
     ) -> FrozenSWESubmission:
         try:
             verify_record(subject_runtime)
@@ -848,6 +997,12 @@ class SWESubjectBroker:
             )
         if experiment_role not in {"optimization", "sealed_holdout"}:
             raise SWESubjectBrokerError("unsupported SWE experiment role")
+        if execution_mode not in {"protected", "workspace_only"}:
+            raise SWESubjectBrokerError("unsupported SWE execution mode")
+        if execution_mode == "workspace_only" and disposable_root is None:
+            raise SWESubjectBrokerError(
+                "workspace-only execution requires an explicit disposable root"
+            )
         if study_binding is not None:
             if memory_snapshot is None:
                 raise SWESubjectBrokerError(
@@ -868,10 +1023,62 @@ class SWESubjectBroker:
                 or study_binding.get("target_checkpoint_name") != "H_general"
             ):
                 raise SWESubjectBrokerError("SWE Study binding differs from execution")
-        root = artifact_root.resolve()
-        if not root.is_relative_to(self.trusted_root):
+        output_root = artifact_root.resolve()
+        if not output_root.is_relative_to(self.trusted_root):
             raise SWESubjectBrokerError("subject run root must be Eval-owned trusted state")
-        root.mkdir(parents=True, exist_ok=False)
+        output_root.mkdir(parents=True, exist_ok=False)
+        root = output_root
+        preflight: dict[str, Any] | None = None
+        workspace_environment: dict[str, str] | None = None
+        broker_home: Path | None = None
+        if execution_mode == "workspace_only":
+            assert disposable_root is not None
+            disposable = disposable_root.resolve()
+            if (
+                disposable == Path("/")
+                or disposable == Path("/tmp")
+                or disposable.is_symlink()
+                or not disposable.is_dir()
+            ):
+                raise SWESubjectBrokerError(
+                    "workspace-only disposable root must be a dedicated real directory"
+                )
+            root = Path(
+                tempfile.mkdtemp(prefix="autobugfix-exp2-", dir=str(disposable))
+            ).resolve()
+            temporary_root = root / "tmp"
+            temporary_root.mkdir(mode=0o700)
+            workspace_environment = self._subject_environment()
+            broker_home = root / "broker-home"
+            broker_home.mkdir(mode=0o700)
+            workspace_environment.update(
+                {
+                    "HOME": str(broker_home),
+                    "PYTHONPATH": str(root / "subject" / "src"),
+                    "TMPDIR": str(temporary_root),
+                    "TMP": str(temporary_root),
+                    "TEMP": str(temporary_root),
+                }
+            )
+            preflight = self._workspace_only_preflight(
+                workspace_root=root,
+                disposable_root=disposable_root,
+                artifact_root=output_root,
+                authority_roots=(
+                    self.project_root,
+                    self.trusted_root,
+                    self.config.eval.benchmarks.cache_root,
+                    self.config.operator.state.root,
+                    self.config.operator.artifacts.root,
+                    self.config.operator.worktrees.root,
+                    self.project_root / ".autobugfix-memory",
+                ),
+                environment=workspace_environment,
+                credential_paths=(Path.home() / ".codex/auth.json",),
+            )
+            (output_root / "workspace-only-preflight.json").write_text(
+                json.dumps(preflight, sort_keys=True) + "\n", encoding="utf-8"
+            )
         subject = self._subject_checkout(subject_sha, root / "subject")
         subject_before = self._git_identity(subject)
         subject_tree = subject_before["tree"]
@@ -899,12 +1106,14 @@ class SWESubjectBroker:
             repo_id,
             treatment,
             root / "trusted-codex-runtime",
+            bridge_auth=execution_mode == "protected",
         )
         worker_source = self.project_root / "harnesses/swebench/scripts/run_subject.py"
         worker = control / "run_subject.py"
         shutil.copy2(worker_source, worker)
-        broker_home = control / "broker-home"
-        broker_home.mkdir(mode=0o700)
+        if broker_home is None:
+            broker_home = control / "broker-home"
+            broker_home.mkdir(mode=0o700)
         isolated_config = load_config(control)
         trusted_service = AutobugfixService(control, backend=object())  # type: ignore[arg-type]
         prepared_task = trusted_service.create_task(
@@ -939,8 +1148,9 @@ class SWESubjectBroker:
             allowed_task_branch=prepared_task.branch,
         )
         ledger = SWEExecutionLedger(treatment.max_attempts)
+        capability_parent = root if execution_mode == "workspace_only" else Path("/tmp")
         capability_root = Path(
-            tempfile.mkdtemp(prefix="autobugfix-swe-cap-", dir="/tmp")
+            tempfile.mkdtemp(prefix="autobugfix-swe-cap-", dir=str(capability_parent))
         ).resolve()
         capability_root.chmod(0o700)
         codex_token = secrets.token_hex(32)
@@ -985,6 +1195,10 @@ class SWESubjectBroker:
             ),
             "memory_input_digest": protected_before["memory"],
             "worker_sha256": protected_before["worker"],
+            "execution_mode": execution_mode,
+            "workspace_only_preflight_digest": (
+                str(preflight["record_digest"]) if preflight is not None else None
+            ),
         })
         binding_path = root / "subject-binding.yaml"
         binding_path.write_text(
@@ -1017,6 +1231,7 @@ class SWESubjectBroker:
             "verifier_socket": str(verifier_socket),
             "verifier_token": verifier_token,
             "verifier_command_id": VISIBLE_VERIFIER_COMMAND_ID,
+            "execution_mode": execution_mode,
         }
         request_path.write_text(json.dumps(request, sort_keys=True) + "\n", encoding="utf-8")
         request_path.chmod(0o600)
@@ -1061,6 +1276,8 @@ class SWESubjectBroker:
                         treatment=treatment,
                         ledger=ledger,
                         backend_factory=codex_backend_factory,
+                        execution_mode=execution_mode,
+                        expected_task_worktree=Path(prepared_task.worktree_path),
                     )
                 )
                 stack.enter_context(
@@ -1072,7 +1289,7 @@ class SWESubjectBroker:
                         max_timeout_seconds=treatment.timeout_seconds,
                     )
                 )
-                command = run_command(
+                execution_argv = (
                     self._sandbox_argv(
                         subject,
                         control,
@@ -1080,12 +1297,32 @@ class SWESubjectBroker:
                         request_path,
                         result_path,
                         capability_root,
-                    ),
-                    cwd=self.project_root,
+                    )
+                    if execution_mode == "protected"
+                    else [
+                        sys.executable,
+                        str(worker),
+                        "--request",
+                        str(request_path),
+                        "--result",
+                        str(result_path),
+                    ]
+                )
+                if execution_environment is None:
+                    execution_environment = self._subject_environment()
+                if execution_mode == "workspace_only":
+                    execution_environment["HOME"] = str(broker_home)
+                    execution_environment["PYTHONPATH"] = str(subject / "src")
+                    execution_environment["TMPDIR"] = str(root / "tmp")
+                    execution_environment["TMP"] = str(root / "tmp")
+                    execution_environment["TEMP"] = str(root / "tmp")
+                command = run_command(
+                    execution_argv,
+                    cwd=(self.project_root if execution_mode == "protected" else control),
                     artifact_dir=root / "subject-process",
                     name="exact-subject-execution",
                     timeout_seconds=treatment.timeout_seconds * treatment.max_attempts + 300,
-                    env=self._subject_environment(),
+                    env=execution_environment,
                     inherit_env=False,
                 )
         except BaseException as exc:
@@ -1101,7 +1338,7 @@ class SWESubjectBroker:
                 shutil.rmtree(capability_root, ignore_errors=True)
                 request_path.unlink(missing_ok=True)
         if process_error is not None or command is None or not command.passed or not result_path.is_file():
-            failure_evidence = root / "failed-execution-evidence"
+            failure_evidence = output_root / "failed-execution-evidence"
             failure_manifest = self._build_evidence_tree(
                 failure_evidence,
                 {
@@ -1127,7 +1364,7 @@ class SWESubjectBroker:
                     "evidence_manifest_digest": failure_manifest["record_digest"],
                 }
             )
-            (root / "broker-failure.yaml").write_text(
+            (output_root / "broker-failure.yaml").write_text(
                 yaml.safe_dump(failure, sort_keys=False), encoding="utf-8"
             )
             raise SWESubjectBrokerError("exact subject process failed")
@@ -1139,6 +1376,32 @@ class SWESubjectBroker:
         }
         if protected_after != protected_before:
             raise SWESubjectBrokerError("subject process changed trusted control inputs")
+        sdk_call_receipt_digests: list[str] = []
+        codex_receipt_root = root / "codex-broker"
+        for receipt_path in sorted(codex_receipt_root.glob("call-*/receipt.json")):
+            try:
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                if not isinstance(receipt, Mapping):
+                    raise ValueError("receipt is not a mapping")
+                verify_record(receipt)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                raise SWESubjectBrokerError(
+                    "Codex broker call receipt is invalid"
+                ) from exc
+            if receipt.get("execution_mode") != execution_mode:
+                raise SWESubjectBrokerError("Codex broker call execution mode drift")
+            if execution_mode == "workspace_only" and (
+                receipt.get("sdk_in_process") is not True
+                or receipt.get("sdk_bubblewrap") is not False
+            ):
+                raise SWESubjectBrokerError(
+                    "workspace-only execution recorded an SDK Bubblewrap worker"
+                )
+            sdk_call_receipt_digests.append(str(receipt["record_digest"]))
+        if execution_mode == "workspace_only" and not sdk_call_receipt_digests:
+            raise SWESubjectBrokerError(
+                "workspace-only execution has no direct SDK call receipt"
+            )
         raw_result = json.loads(result_path.read_text(encoding="utf-8"))
         if not isinstance(raw_result, Mapping):
             raise SWESubjectBrokerError("subject process result is invalid")
@@ -1188,7 +1451,7 @@ class SWESubjectBroker:
         if self._git_identity(subject) != subject_before:
             raise SWESubjectBrokerError("subject process changed exact subject worktree")
 
-        evidence_root = root / "frozen-execution-evidence"
+        evidence_root = output_root / "frozen-execution-evidence"
         evidence_manifest = self._build_evidence_tree(
             evidence_root,
             {
@@ -1238,11 +1501,17 @@ class SWESubjectBroker:
                 "protected_inputs": protected_after,
                 "target_main": main_before,
                 "task_id": task_path.parent.name,
+                "task_worktree_path": str(worktree),
                 "execution_state": str(task_data.get("state") or ""),
                 "iterations": int(task_data.get("iterations") or 0),
+                "execution_mode": execution_mode,
+                "sdk_call_receipt_digests": sdk_call_receipt_digests,
+                "workspace_only_preflight_digest": (
+                    str(preflight["record_digest"]) if preflight is not None else None
+                ),
             }
         )
-        (root / "broker-result.yaml").write_text(
+        (output_root / "broker-result.yaml").write_text(
             yaml.safe_dump(broker_record, sort_keys=False), encoding="utf-8"
         )
         return frozen

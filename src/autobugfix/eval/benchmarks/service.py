@@ -9,39 +9,21 @@ import secrets
 import shutil
 import tempfile
 import uuid
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 import yaml
 
+from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.config import load_config
+from autobugfix.eval.artifacts import write_yaml
 from autobugfix.eval.benchmarks.authority import (
     GuardCodeIdentity,
     resolve_guard_code_identity,
 )
 from autobugfix.eval.benchmarks.defects4j import Defects4JRuntime
-from autobugfix.eval.benchmarks.swe_runtime import (
-    SWE_GUARD_DAEMON_ISOLATION_LABEL,
-    SWEDockerAuthority,
-    SWERuntime,
-    SWERuntimeError,
-)
-from autobugfix.eval.benchmarks.swe_guard import SWEGuardStore, SWEGuardStoreError
-from autobugfix.eval.benchmarks.subject_broker import SWESubjectBroker
-from autobugfix.eval.benchmarks.swe_live import SWELiveAdapter
-from autobugfix.eval.benchmarks.swe_materialize import (
-    SWEImageMaterializer,
-    SWEMaterializedRepository,
-)
-from autobugfix.eval.benchmarks.swe_models import (
-    SWEAttachment,
-    SWEExperimentProtocol,
-    SWEInstance,
-    SWESubjectTreatmentRuntime,
-    SWEVisibleCase,
-)
-from autobugfix.eval.benchmarks.swe_verified import SWEVerifiedAdapter
 from autobugfix.eval.benchmarks.guard import (
     GuardBundle,
     GuardCaseSpec,
@@ -55,8 +37,8 @@ from autobugfix.eval.benchmarks.guard import (
     signed_metric,
 )
 from autobugfix.eval.benchmarks.models import (
-    BenchmarkContractError,
     BenchmarkCaseSeed,
+    BenchmarkContractError,
     BenchmarkSeedManifest,
     EligibilityReceipt,
     EvaluationSeedManifest,
@@ -69,15 +51,38 @@ from autobugfix.eval.benchmarks.models import (
     safe_component,
     verify_record,
 )
-from autobugfix.eval.artifacts import write_yaml
-from autobugfix.eval.benchmarks.store import BenchmarkStore
 from autobugfix.eval.benchmarks.runtime import run_command
+from autobugfix.eval.benchmarks.store import BenchmarkStore
+from autobugfix.eval.benchmarks.subject_broker import (
+    SWEExecutionMode,
+    SWESubjectBroker,
+)
+from autobugfix.eval.benchmarks.swe_guard import SWEGuardStore, SWEGuardStoreError
+from autobugfix.eval.benchmarks.swe_live import SWELiveAdapter
+from autobugfix.eval.benchmarks.swe_materialize import (
+    SWEImageMaterializer,
+    SWEMaterializedRepository,
+)
+from autobugfix.eval.benchmarks.swe_models import (
+    SWEAttachment,
+    SWEExperimentProtocol,
+    SWEInstance,
+    SWESubjectTreatmentRuntime,
+    SWEVisibleCase,
+)
+from autobugfix.eval.benchmarks.swe_runtime import (
+    SWE_GUARD_DAEMON_ISOLATION_LABEL,
+    SWEDockerAuthority,
+    SWERuntime,
+    SWERuntimeError,
+)
+from autobugfix.eval.benchmarks.swe_verified import SWEVerifiedAdapter
 from autobugfix.eval.benchmarks.verify import (
     managed_verifier_for_receipt,
     official_oracle_for_receipt,
 )
-from autobugfix.eval.runner import run_eval
 from autobugfix.eval.reporting import write_evaluation_report
+from autobugfix.eval.runner import run_eval
 from autobugfix.git_utils import rev_parse, run_git
 from autobugfix.models import utc_now
 from autobugfix.operator.service import (
@@ -659,6 +664,8 @@ class EvalBenchmarkService:
         model: str = "gpt-5.4-mini",
         max_attempts: int = 2,
         timeout_seconds: int = 900,
+        execution_mode: SWEExecutionMode = "protected",
+        disposable_root: Path | None = None,
     ) -> dict[str, Any]:
         protocol = SWEExperimentProtocol.from_yaml(protocol_path)
         if (
@@ -748,7 +755,75 @@ class EvalBenchmarkService:
             treatment=protocol.codex_runtime,
             subject_runtime=subject_runtime,
             experiment_role="optimization",
+            execution_mode=execution_mode,
+            disposable_root=disposable_root,
         )
+        broker_result_path = root / "subject-run" / "broker-result.yaml"
+        if broker_result_path.is_symlink() or not broker_result_path.is_file():
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration execution did not produce a broker receipt"
+            )
+        broker_result = yaml.safe_load(
+            broker_result_path.read_text(encoding="utf-8")
+        ) or {}
+        if not isinstance(broker_result, Mapping):
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration broker receipt is invalid"
+            )
+        verify_record(broker_result)
+        command = broker_result.get("command")
+        if not isinstance(command, Mapping) or not isinstance(
+            command.get("record_digest"), str
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration broker command receipt is invalid"
+            )
+        if broker_result.get("execution_mode") != execution_mode:
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration execution mode receipt drift"
+            )
+        preflight_digest: str | None = None
+        if execution_mode == "workspace_only":
+            preflight_path = root / "subject-run" / "workspace-only-preflight.json"
+            if preflight_path.is_symlink() or not preflight_path.is_file():
+                raise EvalBenchmarkServiceError(
+                    "Exp2 calibration has no workspace-only preflight receipt"
+                )
+            preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+            if not isinstance(preflight, Mapping):
+                raise EvalBenchmarkServiceError(
+                    "Exp2 calibration preflight receipt is invalid"
+                )
+            verify_record(preflight)
+            if (
+                preflight.get("execution_mode") != "workspace_only"
+                or preflight.get("direct_sdk_in_process") is not True
+                or preflight.get("sdk_bubblewrap") is not False
+                or preflight.get("outer_bubblewrap") is not False
+            ):
+                raise EvalBenchmarkServiceError(
+                    "Exp2 calibration preflight is not direct and Bubblewrap-free"
+                )
+            preflight_digest = str(preflight["record_digest"])
+        execution_receipt = record_with_digest(
+            {
+                "schema": "autobugfix-exp2-execution-receipt-v1",
+                "execution_mode": execution_mode,
+                "direct_sdk_in_process": execution_mode == "workspace_only",
+                "outer_bubblewrap": execution_mode == "protected",
+                "broker_command_digest": command["record_digest"],
+                "broker_result_digest": broker_result["record_digest"],
+                "task_worktree_path": broker_result.get("task_worktree_path"),
+                "workspace_only_preflight_digest": preflight_digest,
+            }
+        )
+        development_binding_path = root / "subject-run" / "subject-binding.yaml"
+        development_binding = yaml.safe_load(
+            development_binding_path.read_text(encoding="utf-8")
+        ) or {}
+        if not isinstance(development_binding, Mapping):
+            raise EvalBenchmarkServiceError("SWE development subject binding is invalid")
+        verify_record(development_binding)
         before = frozen.identity()
         official = runner.score(
             instance,
@@ -780,9 +855,17 @@ class EvalBenchmarkService:
                 "schema": "autobugfix-swe-development-run-v1",
                 "development_only": True,
                 "protocol_digest": protocol.protocol_digest,
+                "codex_runtime": protocol.codex_runtime.to_dict(),
                 "subject_runtime_contract_digest": protocol.subject_runtime_contract_digest,
                 "subject_runtime_digest": subject_runtime["record_digest"],
                 "evaluator_runtime_id": runner.runtime.evaluator_runtime_id,
+                "memory_digest": str(development_binding.get("memory_digest") or ""),
+                "role_config_digest": digest_payload(
+                    {"config_sha256": development_binding.get("config_sha256")}
+                ),
+                "policy_digest": digest_payload(
+                    {"development_only": True, "protocol_digest": protocol.protocol_digest}
+                ),
                 "adapter": adapter,
                 "instance_id": identity,
                 "visible_case_digest": visible.to_dict()["record_digest"],
@@ -794,6 +877,7 @@ class EvalBenchmarkService:
                 "official_result_path": str(official_path),
                 "noninterference_digest": noninterference["record_digest"],
                 "noninterference_path": str(noninterference_path),
+                "execution_receipt": execution_receipt,
                 "resolved": official.resolved,
                 "harness_error": official.harness_error,
             }
@@ -805,6 +889,113 @@ class EvalBenchmarkService:
             report,
         )
         return {**report, "report_path": str(report_path), "run_root": str(root)}
+
+    def run_swe_exp2_calibration_case(
+        self,
+        protocol_path: Path,
+        *,
+        adapter: str,
+        instance_id: str,
+        run_id: str,
+        execution_mode: SWEExecutionMode = "protected",
+        disposable_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Adapt an existing H0 development run into Exp2 calibration input.
+
+        Calibration is deliberately outside the formal ten-case denominator
+        and therefore uses the existing H0-only development endpoint.  The
+        official result is copied into a result projection without exposing
+        any scorer-private fields to the coordinator.
+        """
+
+        report = self.run_swe_development_case(
+            protocol_path,
+            adapter,
+            instance_id,
+            run_id=run_id,
+            execution_mode=execution_mode,
+            disposable_root=disposable_root,
+        )
+        trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
+        official_source = Path(str(report.get("official_result_path") or ""))
+        official_path = official_source.resolve()
+        if (
+            official_source.is_symlink()
+            or not official_source.is_file()
+            or not official_path.is_relative_to(trusted_root)
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration official result is outside trusted Eval state"
+            )
+        official = yaml.safe_load(official_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(official, Mapping):
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration official result is invalid"
+            )
+        verify_record(official)
+        noninterference_source = Path(
+            str(report.get("noninterference_path") or "")
+        )
+        noninterference_path = noninterference_source.resolve()
+        if (
+            noninterference_source.is_symlink()
+            or not noninterference_path.is_file()
+            or not noninterference_path.is_relative_to(trusted_root)
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration noninterference receipt is outside trusted Eval state"
+            )
+        noninterference = yaml.safe_load(
+            noninterference_path.read_text(encoding="utf-8")
+        ) or {}
+        if not isinstance(noninterference, Mapping):
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration noninterference receipt is invalid"
+            )
+        verify_record(noninterference)
+        if (
+            noninterference.get("schema") != "autobugfix-swe-noninterference-v1"
+            or noninterference.get("unchanged") is not True
+            or noninterference.get("submission_digest") != report["submission_digest"]
+            or noninterference.get("official_result_digest")
+            != official.get("record_digest")
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration noninterference receipt is invalid"
+            )
+        binding_digest = digest_payload(
+            {
+                "schema": "autobugfix-exp2-calibration-binding-v1",
+                "protocol_digest": report["protocol_digest"],
+                "subject_sha": report["executed_subject_sha"],
+            }
+        )
+        return record_with_digest(
+            {
+                "schema": "autobugfix-exp2-calibration-case-v1",
+                "source_report_digest": report["record_digest"],
+                "case_token": report["instance_id"],
+                "executed_subject_sha": report["executed_subject_sha"],
+                "submission_digest": report["submission_digest"],
+                "protocol_digest": report["protocol_digest"],
+                "subject_runtime_contract_digest": report[
+                    "subject_runtime_contract_digest"
+                ],
+                "subject_runtime_digest": report["subject_runtime_digest"],
+                "evaluator_runtime_id": report["evaluator_runtime_id"],
+                "codex_runtime": report.get("codex_runtime", {}),
+                "memory_digest": report.get("memory_digest", ""),
+                "role_config_digest": report.get("role_config_digest", ""),
+                "policy_digest": report.get("policy_digest", ""),
+                "study_binding_digest": binding_digest,
+                "official_result": dict(official),
+                "noninterference": dict(noninterference),
+                "execution_receipt": dict(
+                    report.get("execution_receipt") or {}
+                ),
+                "harness_error": report["harness_error"],
+            }
+        )
 
     @staticmethod
     def submission_noninterference(
@@ -914,6 +1105,8 @@ class EvalBenchmarkService:
         run_id: str,
         experiment_role: str,
         authority_root: Path,
+        execution_mode: SWEExecutionMode = "protected",
+        disposable_root: Path | None = None,
     ) -> dict[str, Any]:
         current_subject_runtime = runner.runtime.subject_runtime_identity(treatment)
         if current_subject_runtime.get("record_digest") != subject_runtime.get(
@@ -936,14 +1129,41 @@ class EvalBenchmarkService:
                 "SWE Study Memory is not available from trusted Operator state"
             ) from exc
         codex_backend_factory = None
-        if experiment_role == "optimization":
+        if experiment_role == "optimization" and study_binding.get("kind") in {
+            "OPTIMIZATION",
+            "CANDIDATE",
+        }:
             operator = OperatorGovernanceService(self.project_root)
             try:
-                grant = operator.validate_optimization_case_binding(
-                    study_binding,
-                    case_id=instance.instance_id,
-                    first_wave=visible.first_wave,
-                )
+                if study_binding.get("kind") == "OPTIMIZATION":
+                    grant = operator.validate_optimization_case_binding(
+                        study_binding,
+                        case_id=instance.instance_id,
+                        first_wave=visible.first_wave,
+                    )
+                else:
+                    # A terminal CANDIDATE binding is intentionally closed by
+                    # Operator before formal scoring, so the existing
+                    # optimization-only validator cannot be reused verbatim.
+                    # Re-derive the same grant constraints read-only here.
+                    authoritative = operator.verify_guard_study_binding(
+                        study_binding
+                    )
+                    grant_id = str(authoritative.get("budget_grant_id") or "")
+                    grant = operator.store.read_budget_grant(grant_id)
+                    grants = operator.store.read_budget_grants(
+                        str(authoritative["study_id"])
+                    )
+                    if (
+                        not grants
+                        or grants[-1].grant_id != grant.grant_id
+                        or grant.grant_digest != authoritative.get("budget_digest")
+                        or instance.instance_id not in grant.case_ids
+                        or visible.first_wave > grant.wave
+                    ):
+                        raise OperatorGovernanceError(
+                            "candidate case is outside the current trusted budget wave"
+                        )
             except OperatorGovernanceError as exc:
                 raise EvalBenchmarkServiceError(
                     "SWE Optimization case is outside trusted Operator budget"
@@ -957,6 +1177,9 @@ class EvalBenchmarkService:
                     execution_id=execution_id,
                     case_id=instance.instance_id,
                     attempt=attempt,
+                    backend=CodexSDKBackend(
+                        in_process=execution_mode == "workspace_only"
+                    ),
                 )
 
         frozen = SWESubjectBroker(
@@ -978,6 +1201,77 @@ class EvalBenchmarkService:
             study_binding=study_binding,
             memory_snapshot=memory_snapshot,
             codex_backend_factory=codex_backend_factory,
+            execution_mode=execution_mode,
+            disposable_root=disposable_root,
+        )
+        broker_result_path = run_root / "subject-run" / "broker-result.yaml"
+        if broker_result_path.is_symlink() or not broker_result_path.is_file():
+            raise EvalBenchmarkServiceError(
+                "SWE formal execution did not produce a broker receipt"
+            )
+        broker_result = yaml.safe_load(
+            broker_result_path.read_text(encoding="utf-8")
+        ) or {}
+        if not isinstance(broker_result, Mapping):
+            raise EvalBenchmarkServiceError("SWE formal broker receipt is invalid")
+        verify_record(broker_result)
+        command = broker_result.get("command")
+        command_argv = command.get("argv") if isinstance(command, Mapping) else None
+        if not isinstance(command_argv, list) or not all(
+            isinstance(item, str) for item in command_argv
+        ):
+            raise EvalBenchmarkServiceError("SWE formal broker command receipt is invalid")
+        if broker_result.get("execution_mode") != execution_mode:
+            raise EvalBenchmarkServiceError("SWE formal execution mode receipt drift")
+        if execution_mode == "workspace_only" and any(
+            Path(item).name == "bwrap" or item == "bwrap" for item in command_argv
+        ):
+            raise EvalBenchmarkServiceError(
+                "workspace-only execution recorded an outer Bubblewrap command"
+            )
+        preflight_digest: str | None = None
+        if execution_mode == "workspace_only":
+            preflight_path = run_root / "subject-run" / "workspace-only-preflight.json"
+            if preflight_path.is_symlink() or not preflight_path.is_file():
+                raise EvalBenchmarkServiceError(
+                    "workspace-only execution has no preflight receipt"
+                )
+            preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+            if not isinstance(preflight, Mapping):
+                raise EvalBenchmarkServiceError(
+                    "workspace-only preflight receipt is invalid"
+                )
+            verify_record(preflight)
+            if (
+                preflight.get("execution_mode") != "workspace_only"
+                or preflight.get("direct_sdk_in_process") is not True
+                or preflight.get("sdk_bubblewrap") is not False
+                or preflight.get("outer_bubblewrap") is not False
+            ):
+                raise EvalBenchmarkServiceError(
+                    "workspace-only preflight receipt is not direct and Bubblewrap-free"
+                )
+            preflight_digest = str(preflight["record_digest"])
+            sdk_receipts = broker_result.get("sdk_call_receipt_digests")
+            if not isinstance(sdk_receipts, list) or not sdk_receipts or any(
+                not isinstance(item, str) or len(item) != 64 for item in sdk_receipts
+            ):
+                raise EvalBenchmarkServiceError(
+                    "workspace-only execution has no valid direct SDK call receipts"
+                )
+        execution_receipt = record_with_digest(
+            {
+                "schema": "autobugfix-exp2-execution-receipt-v1",
+                "execution_mode": execution_mode,
+                "direct_sdk_in_process": execution_mode == "workspace_only",
+                "outer_bubblewrap": execution_mode == "protected",
+                "broker_command_digest": broker_result["command"].get("record_digest")
+                if isinstance(broker_result.get("command"), Mapping)
+                else None,
+                "broker_result_digest": broker_result["record_digest"],
+                "task_worktree_path": broker_result.get("task_worktree_path"),
+                "workspace_only_preflight_digest": preflight_digest,
+            }
         )
         frozen_before = frozen.identity()
         official = runner.score(
@@ -1007,6 +1301,9 @@ class EvalBenchmarkService:
                 "cohort_id": study_binding["cohort_id"],
                 "treatment": study_binding["target_checkpoint_name"],
                 "study_binding_digest": study_binding["record_digest"],
+                "memory_digest": study_binding["memory_digest"],
+                "role_config_digest": study_binding["role_config_digest"],
+                "policy_digest": study_binding["policy_digest"],
                 "executed_subject_sha": frozen.submission.subject_sha,
                 "executed_subject_tree": frozen.submission.subject_tree,
                 "submission_digest": frozen.submission.record["record_digest"],
@@ -1014,6 +1311,7 @@ class EvalBenchmarkService:
                 "noninterference": noninterference,
                 "resolved": official.resolved,
                 "harness_error": official.harness_error,
+                "execution_receipt": execution_receipt,
             }
         )
         write_yaml(run_root / "formal-case-report.yaml", report)
@@ -1027,6 +1325,8 @@ class EvalBenchmarkService:
         study_binding_path: Path,
         out_root: Path,
         run_id: str,
+        execution_mode: SWEExecutionMode = "protected",
+        disposable_root: Path | None = None,
     ) -> dict[str, Any]:
         public = self._load_swe_public_manifest(public_manifest_path)
         binding = self._load_swe_study_binding(
@@ -1107,6 +1407,109 @@ class EvalBenchmarkService:
             run_id=safe_component(run_id, "run_id"),
             experiment_role="optimization",
             authority_root=trusted_root,
+            execution_mode=execution_mode,
+            disposable_root=disposable_root,
+        )
+
+    def run_swe_exp2_case(
+        self,
+        public_manifest_path: Path,
+        *,
+        case_selector: str,
+        study_binding_path: Path,
+        out_root: Path,
+        run_id: str,
+        expected_binding_kinds: set[str],
+        execution_mode: SWEExecutionMode = "protected",
+        disposable_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Run one explicitly bound Exp2 public case.
+
+        This is a thin adapter over the existing official SWE scorer.  It
+        adds only the H0/H1 binding selector and execution-mode receipt; it
+        does not alter scorer inputs or result semantics.
+        """
+
+        public = self._load_swe_public_manifest(public_manifest_path)
+        binding = self._load_swe_study_binding(
+            study_binding_path,
+            public,
+            expected_kinds=set(expected_binding_kinds),
+        )
+        current_identity = self.guard_authority()
+        raw_guard = public.get("guard")
+        if not isinstance(raw_guard, Mapping):
+            raise EvalBenchmarkServiceError("SWE manifest Guard projection is invalid")
+        sealed_identity = raw_guard.get("code_identity")
+        if not isinstance(sealed_identity, Mapping):
+            raise EvalBenchmarkServiceError("SWE manifest code identity is invalid")
+        if current_identity != GuardCodeIdentity.from_dict(sealed_identity):
+            raise EvalBenchmarkServiceError("SWE trusted Eval code identity drift")
+        raw_cases = public.get("optimization_cases")
+        if not isinstance(raw_cases, list):
+            raise EvalBenchmarkServiceError("SWE Optimization projection is invalid")
+        matches = []
+        for item in raw_cases:
+            if not isinstance(item, Mapping):
+                continue
+            candidate_visible = item.get("visible_case")
+            case_token = (
+                str(candidate_visible.get("case_token") or "")
+                if isinstance(candidate_visible, Mapping)
+                else ""
+            )
+            if case_selector in {
+                str(item.get("benchmark_instance_id") or ""),
+                case_token,
+            }:
+                matches.append(item)
+        if len(matches) != 1:
+            raise EvalBenchmarkServiceError("no unique SWE Exp2 case selected")
+        selected = matches[0]
+        verify_record(selected)
+        raw_visible = selected.get("visible_case")
+        if not isinstance(raw_visible, Mapping):
+            raise EvalBenchmarkServiceError("SWE visible case is invalid")
+        visible = SWEVisibleCase.from_dict(raw_visible)
+        treatment = SWESubjectTreatmentRuntime.from_dict(public["codex_runtime"])
+        instance_id = str(selected["benchmark_instance_id"])
+        runner = self._swe_adapter("swebench_verified")
+        output = out_root.resolve()
+        trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
+        if not output.is_relative_to(trusted_root):
+            raise EvalBenchmarkServiceError(
+                "SWE Exp2 output must remain in trusted Eval state"
+            )
+        root = output / safe_component(run_id, "run_id")
+        root.mkdir(parents=True, mode=0o700, exist_ok=False)
+        instance = runner.load_instance(instance_id, root / "inspection")
+        image_id = runner.image_id(instance, root / "image", allow_pull=False)
+        materialized = SWEImageMaterializer(runner).materialize(
+            instance, root / "materialization"
+        )
+        if (
+            visible.repository != instance.repository
+            or visible.base_commit != instance.base_commit
+            or visible.source_snapshot_digest != materialized.source_digest
+        ):
+            raise EvalBenchmarkServiceError("SWE Exp2 case materialization drift")
+        return self._execute_formal_swe_case(
+            runner=runner,
+            instance=instance,
+            visible=visible,
+            materialized=materialized,
+            image_id=image_id,
+            study_binding=binding,
+            protocol_digest=str(public["protocol_digest"]),
+            treatment=treatment,
+            subject_runtime=public["subject_runtime"],
+            evaluator_runtime_id=str(public["evaluator_runtime_id"]),
+            run_root=root,
+            run_id=safe_component(run_id, "run_id"),
+            experiment_role="optimization",
+            authority_root=trusted_root,
+            execution_mode=execution_mode,
+            disposable_root=disposable_root,
         )
 
     @staticmethod

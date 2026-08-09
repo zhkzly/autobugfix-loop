@@ -6,13 +6,14 @@ import json
 import os
 import socket
 import threading
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from autobugfix.codex_backend import CodexBackend
-from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.codex_runtime import build_codex_request
+from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.config import load_config
 from autobugfix.eval.benchmarks.models import record_with_digest
 from autobugfix.eval.benchmarks.swe_models import SWESubjectTreatmentRuntime
@@ -227,7 +228,11 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
         ledger: SWEExecutionLedger,
         backend: CodexSDKBackend | None = None,
         backend_factory: Callable[[str, int, int], CodexBackend] | None = None,
+        execution_mode: str = "protected",
+        expected_task_worktree: Path | None = None,
     ) -> None:
+        if execution_mode not in {"protected", "workspace_only"}:
+            raise SWERuntimeError("unsupported SWE execution mode")
         self.socket_path = socket_path.resolve()
         self.token = token
         self.control_root = control_root.resolve()
@@ -239,7 +244,13 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
         self.treatment = treatment
         self.model = treatment.model
         self.ledger = ledger
-        self.backend = backend or CodexSDKBackend()
+        self.execution_mode = execution_mode
+        self.expected_task_worktree = (
+            expected_task_worktree.resolve() if expected_task_worktree is not None else None
+        )
+        self.backend = backend or CodexSDKBackend(
+            in_process=execution_mode == "workspace_only"
+        )
         self.backend_factory = backend_factory
         self.config = load_config(self.control_root)
         self.repo = self.config.repo(self.repo_id)
@@ -269,6 +280,10 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
         cwd = Path(str(request.get("cwd") or "")).resolve()
         if not cwd.is_dir() or not cwd.is_relative_to(self.worktree_root):
             raise SWERuntimeError("Codex broker cwd is outside the task worktree root")
+        if self.expected_task_worktree is not None and cwd != self.expected_task_worktree:
+            raise SWERuntimeError(
+                "Codex broker cwd is not the dedicated Exp2 task worktree"
+            )
         if git_common_dir(cwd) != self.common_dir:
             raise SWERuntimeError("Codex broker cwd has foreign Git metadata")
         return role, prompt, cwd
@@ -313,6 +328,26 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
             if self.backend_factory is not None
             else self.backend
         )
+        backend_cursor: Any = backend
+        # A wrapper that does not explicitly identify its execution mode is
+        # untrusted.  Protected mode may still use it through the existing
+        # outer sandbox, but workspace-only mode must fail closed rather than
+        # treating an unknown wrapper as an in-process SDK.
+        backend_is_in_process = False
+        seen_backends: set[int] = set()
+        while id(backend_cursor) not in seen_backends:
+            seen_backends.add(id(backend_cursor))
+            if hasattr(backend_cursor, "in_process"):
+                backend_is_in_process = bool(backend_cursor.in_process)
+                break
+            nested = getattr(backend_cursor, "backend", None)
+            if nested is None:
+                break
+            backend_cursor = nested
+        if self.execution_mode == "workspace_only" and not backend_is_in_process:
+            raise SWERuntimeError(
+                "workspace-only Codex dispatch cannot use a Bubblewrap worker backend"
+            )
         result = backend.run(request)
         receipt = record_with_digest(
             {
@@ -325,7 +360,15 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
                 "treatment_contract_digest": self.treatment.contract_digest,
                 "sandbox": request.sandbox,
                 "approval_mode": request.approval_mode,
+                "execution_mode": self.execution_mode,
+                "sdk_in_process": backend_is_in_process,
+                "sdk_bubblewrap": not backend_is_in_process,
                 "cwd": str(cwd),
+                "expected_task_worktree": (
+                    str(self.expected_task_worktree)
+                    if self.expected_task_worktree is not None
+                    else None
+                ),
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "result_sha256": hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
                 "exit_code": result.exit_code,
@@ -396,7 +439,7 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
             with connection:
                 self._handle(connection)
 
-    def __enter__(self) -> "SWECodexServer":
+    def __enter__(self) -> SWECodexServer:
         self.socket_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if self.socket_path.exists():
             raise SWERuntimeError("Codex broker socket path already exists")

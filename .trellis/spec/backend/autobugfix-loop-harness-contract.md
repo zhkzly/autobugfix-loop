@@ -274,3 +274,127 @@ right subsystem on a non-main branch.
 ```
 
 This keeps LLM execution inside a real loop and a real harness.
+
+---
+
+## Scenario: Experiment 2 Execution-Only Study Apparatus
+
+### 1. Scope / Trigger
+
+- Trigger: Any change to the Exp2 execution-only coordinator, direct
+  workspace-only SWE dispatch, formal Exp2 adapter, or its study records.
+- This apparatus is measurement infrastructure. It may select exact H0/H1
+  subjects, record transitions, and dispatch the existing Eval scorer, but it
+  must not evolve Memory, Eval semantics, Operator skills/policy, or the
+  Operator state authority.
+- The formal path is fail-closed. A missing isolation proof is a blocked
+  calibration/formal run, not permission to fall back to a weaker execution
+  mode.
+
+### 2. Signatures
+
+- `Exp2StudyPlan(...) -> Exp2StudyPlan`: requires absolute paths for the
+  cohort audit, policy, apparatus receipt, and empty-Memory fixture, in
+  addition to the protocol, public manifest, and H0/H1 binding paths.
+- `Exp2Coordinator.initialize(plan) -> Mapping`: validates and persists the
+  immutable plan and its four frozen reference records.
+- `Exp2Coordinator.record_stage(stage, reports, subject_sha,
+  execution_mode) -> Mapping`: accepts only terminal reports for the frozen
+  stage schedule and appends a digest-chained receipt.
+- `Exp2Coordinator.record_attribution(record) -> Mapping`: accepts one
+  approved, allowlisted hypothesis for the awaiting H1 revision.
+- `Exp2Coordinator.record_public_regression_gate(record) -> Mapping` and
+  `record_sealed_aggregate(record) -> Mapping`: advance only from the public
+  gate and Guard-released aggregate contracts respectively.
+- `EvalBenchmarkService.run_swe_exp2_case(...) -> Mapping` and
+  `run_swe_exp2_calibration_case(...) -> Mapping`: adapt the existing official
+  scorer; they do not implement a second scorer or Memory loop.
+- `SWECodexServer(..., execution_mode, expected_task_worktree)`: in
+  `workspace_only` mode it uses an explicitly in-process SDK backend and
+  rejects any request cwd other than the dedicated task worktree.
+
+### 3. Contracts
+
+- Every plan binds these frozen references before initialization:
+  `Exp2CohortAudit`, `Exp2PolicyRecord`, `Exp2ApparatusReceipt`, and an
+  `Exp2EmptyMemoryFixture`. The policy and apparatus must agree on the empty
+  Memory and frozen Operator-role digests.
+- Every formal report carries an
+  `autobugfix-exp2-execution-receipt-v1` with:
+  `execution_mode`, `direct_sdk_in_process`, `outer_bubblewrap`,
+  `broker_command_digest`, `broker_result_digest`, `task_worktree_path`, and
+  `workspace_only_preflight_digest` (required for direct mode).
+- A workspace-only stage receipt persists direct-SDK/no-Bubblewrap flags and
+  one preflight digest per case. A protected stage persists the converse
+  Bubblewrap contract and no direct-mode preflight digests.
+- The public projection contains terminal labels and immutable artifact
+  digests only; official raw result fields, oracle material, and Guard-private
+  case data remain outside the projection.
+- The only formal sealed completion input is the Guard aggregate. The CLI
+  exposes `record-sealed-aggregate`; the older metric-only completion path is
+  not a formal Exp2 transition.
+- Backend mode is explicit. An unknown backend wrapper is not considered
+  in-process; workspace-only dispatch rejects it before an SDK call.
+- New Exp2 tests use the existing `tests/test_swe_*.py` classification
+  convention, so the frozen Operator constitution does not need an Exp2-only
+  policy edit.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| Any required plan reference is missing, relative, redirected, malformed, or digest-inconsistent | `Exp2ContractError`/`Exp2CoordinatorError` before ledger creation or execution |
+| Workspace-only mode lacks a dedicated disposable root or preflight proof | `SWESubjectBrokerError`; no SDK call |
+| Workspace-only report lacks a valid direct/no-Bubblewrap execution receipt | `Exp2CoordinatorError`; stage is not journaled |
+| SDK/backend wrapper does not explicitly identify in-process mode | `SWERuntimeError` in workspace-only mode |
+| Protected report claims direct SDK or omits outer Bubblewrap | `Exp2CoordinatorError` |
+| Same-arm official retry or H1 frozen-input drift | `Exp2CoordinatorError`; no retry/transition |
+| Public gate has invalid runs, a regression, or negative paired gain | gate fails and Holdout remains locked |
+| Sealed aggregate arrives before a passing public gate or has a non-six denominator | `Exp2CoordinatorError`/`Exp2ContractError` |
+
+### 5. Good/Base/Bad Cases
+
+- Good: Initialize with all four frozen references, run a terminal report with
+  a digest-valid execution receipt, and recover an interrupted journal by
+  replaying only its append-only event.
+- Base: Use protected mode for development tests; use explicit
+  `workspace_only` plus a fresh disposable root only on a host whose
+  preflight proves authority roots and credentials are absent/read-only.
+- Bad: Omit the empty-Memory fixture because it is empty, infer direct mode
+  from a CLI flag alone, or accept an opaque backend wrapper as in-process.
+- Bad: Let a Guard aggregate be recorded through a metric-only shortcut or
+  expose case-level Holdout labels to the coordinator.
+
+### 6. Tests Required
+
+- `tests/test_swe_exp2_records.py`: assert required plan references, digest
+  round trips, projection redaction, stage transitions, attribution/revision
+  limits, public gate, sealed aggregate, and crash recovery.
+- `tests/test_swe_exp2_workspace_only.py`: assert explicit in-process mode,
+  disposable-root disjointness, credential rejection, and authority-root
+  rejection.
+- `tests/test_subject_broker.py` and the full project suite: preserve the
+  existing protected path and target-main/worktree invariants.
+- Run `uv run pytest -q`, compileall, `git diff --check`, role-skill
+  validation, and the read-only benchmark doctor. Real direct formal runs
+  additionally require a passing Docker/Bubblewrap environment doctor and a
+  supplied disposable root.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```text
+Initialize Exp2 with only a public manifest, assume an empty Memory is
+implicitly fixed, and let the coordinator trust execution_mode="workspace_only"
+without a signed preflight/execution receipt.
+```
+
+#### Correct
+
+```text
+Freeze cohort + policy + apparatus + empty-Memory records -> prove the
+disposable direct-mode boundary -> execute the dedicated task worktree -> freeze
+and officially score -> persist the execution receipt -> expose only the public
+projection -> advance the append-only coordinator from typed receipts.
+```
