@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/guides/autobugfix-task-start-checklist.md", "reason": "Restates loop ownership, real validation, target-main protection, and evidence preservation before cross-loop implementation."}
+{"file": ".trellis/spec/backend/autobugfix-loop-harness-contract.md", "reason": "Defines the Execution, Memory, Eval, and Operator ownership boundaries that this execution-only treatment must preserve."}
+{"file": ".trellis/spec/backend/operator-governance-policy.md", "reason": "Defines trusted candidate transitions, isolated verification, experiment receipts, rollback, and scope authority for the bounded H1 loop."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Requires explicit contracts across subject dispatch, Execution artifacts, scoring, Operator handoff, Guard, and reporting."}
+{"file": ".trellis/tasks/08-09-exp2-workspace-only-runner/research.md", "reason": "Records protocol facts, independent opposition reviews, cohort limitations, and blocking risks used by the plan."}
+{"file": ".trellis/tasks/08-09-exp2-workspace-only-runner/research.md", "reason": "Records the resolved distinction between protocol/public/holdout counters and the existing Operator 3/8/16 opaque budget-slot invariant."}
+{"file": ".trellis/tasks/08-09-exp2-workspace-only-runner/implement.md", "reason": "Implementation order freezes the apparatus, builds a receipt-driven coordinator, records attribution hypotheses, and keeps Memory/Eval/Operator state ownership unchanged."}
