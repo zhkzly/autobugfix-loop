@@ -70,3 +70,24 @@ Added deterministic Operator scope ownership, trusted baseline receipts and remo
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Exp2 execution-only coordinator
+
+**Date**: 2026-08-09
+**Task**: Exp2 execution-only coordinator
+**Branch**: `main`
+
+### Summary
+
+Implemented the frozen Exp2 execution-only apparatus on the isolated experiment branch: required study references, empty-Memory fixture identity, workspace-only fail-closed preflight, direct SDK/worktree receipts, bounded coordinator transitions, public/sealed projections, and CLI wiring. Verified with 341 passed and 1 skipped, role skills, compileall, diff check, and a passing benchmark doctor in the Docker-enabled host; formal direct execution remains blocked until a disposable read-only authority environment is supplied.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ebb994f` | (see git log) |
+
+### Status
+
+[OK] **Completed**
