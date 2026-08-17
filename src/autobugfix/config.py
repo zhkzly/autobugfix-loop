@@ -245,6 +245,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "verified_dataset": "princeton-nlp/SWE-bench_Verified",
                 "verified_dataset_revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
                 "verified_namespace": None,
+                "verified_image_manifest": None,
                 "verified_build_network_mode": "default",
                 "live_repository": "https://github.com/microsoft/SWE-bench-Live.git",
                 "live_commit": "c5ea7e48b7b8bb0f4bcbbceb182a09dadfabfc2c",
@@ -676,6 +677,9 @@ def load_config(project_root: Path | str = ".") -> AutobugfixConfig:
                     str(swe_raw["verified_namespace"])
                     if swe_raw.get("verified_namespace") is not None
                     else None
+                ),
+                verified_image_manifest=_resolve(
+                    root, swe_raw.get("verified_image_manifest")
                 ),
                 verified_build_network_mode=str(
                     swe_raw.get("verified_build_network_mode", "default")

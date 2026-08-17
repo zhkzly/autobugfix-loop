@@ -135,7 +135,8 @@ all expected case receipts are terminal.
 
 For Flask then Pylint:
 
-1. resolve and pin the selected image;
+1. import the selected official image by frozen registry manifest digest,
+   verify its platform/layers, and bind it to the local scorer tag;
 2. pass protected-process isolation validation;
 3. run the H0 development endpoint through real Execution;
 4. freeze submission/evidence;
@@ -146,6 +147,17 @@ For Flask then Pylint:
 Two official-terminal outcomes produce `CALIBRATION_COMPLETE`. Any invalid
 outcome produces `CALIBRATION_BLOCKED`. Resolved/unresolved does not affect
 calibration success.
+
+Before calibration, each of the twelve selected Verified cases must pass two
+official gold scores, one explicit unresolved null/base score, stable image
+identity, and source materialization. Qualification never rebuilds a historical
+open-ended dependency environment when a selected official OCI digest is
+available.
+
+The MVP treatment allowlist is one mechanism:
+`.agents/role-skills/execution/writer/autobugfix-writer/SKILL.md`. Operator,
+Eval, Guard, Memory, shared runtime, prompts, and the protected runner are not
+candidate surfaces in this study.
 
 The terminal receipt includes both case receipts and proves there is no formal
 H0 event in that ledger.

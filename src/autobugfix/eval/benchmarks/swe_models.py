@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence, cast
 
 import yaml
 
@@ -194,6 +194,7 @@ class SWEExperimentProtocol:
     qualification_repeats: int
     optimization_cases: tuple[SWEOptimizationSelection, ...]
     holdout_excluded_instances: tuple[str, ...]
+    verified_image_mode: Literal["local-build", "pinned-official-import"]
     schema_version: int = 3
 
     def __post_init__(self) -> None:
@@ -207,6 +208,13 @@ class SWEExperimentProtocol:
         if self.qualification_repeats != 2:
             raise BenchmarkContractError(
                 "SWE experiment qualification requires two official gold runs"
+            )
+        if self.verified_image_mode not in {
+            "local-build",
+            "pinned-official-import",
+        }:
+            raise BenchmarkContractError(
+                "unsupported SWE Verified image mode"
             )
         if (self.optimization_count, self.holdout_count) != (10, 6):
             raise BenchmarkContractError("SWE experiment requires 10 Optimization and six Holdout cases")
@@ -272,7 +280,7 @@ class SWEExperimentProtocol:
             raise BenchmarkContractError("SWE protocol upstreams and waves must be mappings")
         if not isinstance(codex_runtime, Mapping):
             raise BenchmarkContractError("SWE protocol codex_runtime must be a mapping")
-        cls._validate_upstreams(upstreams)
+        verified_image_mode = cls._validate_upstreams(upstreams)
         _only_fields(
             optimization,
             {"dataset", "count", "cases"},
@@ -314,10 +322,13 @@ class SWEExperimentProtocol:
                 holdout.get("excluded_instances") or (),
                 "holdout.excluded_instances",
             ),
+            verified_image_mode=verified_image_mode,
         )
 
     @staticmethod
-    def _validate_upstreams(data: Mapping[str, Any]) -> None:
+    def _validate_upstreams(
+        data: Mapping[str, Any],
+    ) -> Literal["local-build", "pinned-official-import"]:
         expected = {
             "swebench_version": SWE_BENCH_VERSION,
             "swebench_commit": SWE_BENCH_COMMIT,
@@ -331,7 +342,6 @@ class SWEExperimentProtocol:
             "live_launch_tree": SWE_LIVE_LAUNCH_TREE,
             "live_dataset_revision": SWE_LIVE_DATASET_REVISION,
             "platform": SWE_PLATFORM,
-            "verified_image_mode": "local-build",
         }
         observed = {key: str(data.get(key) or "") for key in expected}
         if observed != expected:
@@ -339,6 +349,12 @@ class SWEExperimentProtocol:
             raise BenchmarkContractError(
                 "SWE upstream identity drift: " + ", ".join(drift)
             )
+        mode = str(data.get("verified_image_mode") or "")
+        if mode not in {"local-build", "pinned-official-import"}:
+            raise BenchmarkContractError(
+                "SWE upstream identity drift: verified_image_mode"
+            )
+        return cast(Literal["local-build", "pinned-official-import"], mode)
 
     @classmethod
     def from_yaml(cls, path: Path) -> "SWEExperimentProtocol":
@@ -356,8 +372,9 @@ class SWEExperimentProtocol:
         """Identity for gold scoring/materialization, excluding subject treatment."""
         return digest_payload(
             {
-                "schema": "autobugfix-swe-qualification-contract-v1",
+                "schema": "autobugfix-swe-qualification-contract-v2",
                 "qualification_repeats": self.qualification_repeats,
+                "null_base_repeats": 1,
                 "optimization_dataset": self.optimization_dataset,
                 "holdout_dataset": self.holdout_dataset,
                 "upstreams": self.to_dict()["upstreams"],
@@ -412,7 +429,7 @@ class SWEExperimentProtocol:
                 "live_launch_tree": SWE_LIVE_LAUNCH_TREE,
                 "live_dataset_revision": SWE_LIVE_DATASET_REVISION,
                 "platform": SWE_PLATFORM,
-                "verified_image_mode": "local-build",
+                "verified_image_mode": self.verified_image_mode,
             },
         }
 

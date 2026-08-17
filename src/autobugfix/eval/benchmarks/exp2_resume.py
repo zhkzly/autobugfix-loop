@@ -65,6 +65,9 @@ _TERMINAL_STATUSES = {
     "scorer_infrastructure_invalid",
 }
 _UNSET = object()
+EXP2_WRITER_SKILL_PATH = (
+    ".agents/role-skills/execution/writer/autobugfix-writer/SKILL.md"
+)
 _FORBIDDEN_PROJECTION_KEYS = {
     "gold_patch",
     "gold",
@@ -246,6 +249,8 @@ class Exp2OciImageIdentity:
     manifest_digest: str
     config_digest: str
     layer_digests: tuple[str, ...]
+    local_image_id: str
+    rootfs_diff_ids: tuple[str, ...]
     platform: str = "linux/amd64"
 
     def __post_init__(self) -> None:
@@ -254,10 +259,15 @@ class Exp2OciImageIdentity:
         _sha256(self.qualification_digest, "OCI qualification_digest")
         _sha256(self.manifest_digest, "OCI manifest_digest")
         _sha256(self.config_digest, "OCI config_digest")
+        _sha256(self.local_image_id, "OCI local_image_id")
         if not self.layer_digests:
             raise Exp2ContractError("OCI image must bind at least one layer digest")
         for digest in self.layer_digests:
             _sha256(digest, "OCI layer_digests")
+        if not self.rootfs_diff_ids:
+            raise Exp2ContractError("OCI image must bind at least one rootfs diff ID")
+        for digest in self.rootfs_diff_ids:
+            _sha256(digest, "OCI rootfs_diff_ids")
         if self.platform != "linux/amd64":
             raise Exp2ContractError("Exp2 OCI platform must be linux/amd64")
 
@@ -269,6 +279,8 @@ class Exp2OciImageIdentity:
             "manifest_digest": self.manifest_digest,
             "config_digest": self.config_digest,
             "layer_digests": list(self.layer_digests),
+            "local_image_id": self.local_image_id,
+            "rootfs_diff_ids": list(self.rootfs_diff_ids),
             "platform": self.platform,
         }
 
@@ -281,6 +293,8 @@ class Exp2OciImageIdentity:
             "manifest_digest",
             "config_digest",
             "layer_digests",
+            "local_image_id",
+            "rootfs_diff_ids",
             "platform",
         }
         unknown = sorted(set(data) - expected)
@@ -295,6 +309,10 @@ class Exp2OciImageIdentity:
             manifest_digest=str(data.get("manifest_digest") or ""),
             config_digest=str(data.get("config_digest") or ""),
             layer_digests=_tuple_digests(data.get("layer_digests") or (), "layer_digests"),
+            local_image_id=str(data.get("local_image_id") or ""),
+            rootfs_diff_ids=_tuple_digests(
+                data.get("rootfs_diff_ids") or (), "rootfs_diff_ids"
+            ),
             platform=str(data.get("platform") or ""),
         )
 
@@ -356,8 +374,10 @@ class Exp2ResumeProtocol:
             raise Exp2ContractError("Exp2 resume protocol budget/timeout/concurrency drift")
         if self.one_revision_cap != 1:
             raise Exp2ContractError("Exp2 resume protocol permits exactly one revision")
-        if not self.execution_allowlist:
-            raise Exp2ContractError("Exp2 resume execution allowlist must not be empty")
+        if self.execution_allowlist != (EXP2_WRITER_SKILL_PATH,):
+            raise Exp2ContractError(
+                "Exp2 resume MVP treatment must be the single Writer skill"
+            )
         if any(Path(item).is_absolute() or ".." in Path(item).parts for item in self.execution_allowlist):
             raise Exp2ContractError("Exp2 execution allowlist contains an unsafe path")
         if tuple(self.calibration_cases) != _CALIBRATION_CASES:
@@ -2177,6 +2197,35 @@ class Exp2ResumeCoordinator:
         self.protocol_path = self.state_root / "protocol.yaml"
         self.events_path = self.state_root / "events.jsonl"
         self.events_lock_path = self.state_root / ".events.lock"
+        self.study_lock_path = self.state_root / ".study.lock"
+
+    @contextmanager
+    def _study_lease(self):
+        if fcntl is None:
+            raise Exp2ResumeError(
+                "Exp2 study lease requires POSIX file locking"
+            )
+        self.state_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        try:
+            descriptor = os.open(
+                self.study_lock_path,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except OSError as exc:
+            raise Exp2ResumeError("Exp2 study lease is unavailable") from exc
+        acquired = False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                pass
+            yield acquired
+        finally:
+            if acquired:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     @contextmanager
     def _journal_lock(self):
@@ -2198,6 +2247,16 @@ class Exp2ResumeCoordinator:
             os.close(descriptor)
 
     def initialize(self, plan: Exp2ResumeStudyPlan, protocol: Exp2ResumeProtocol) -> dict[str, Any]:
+        with self._study_lease() as acquired:
+            if not acquired:
+                raise Exp2ResumeError("Exp2 study initialization is in progress")
+            return self._initialize_unlocked(plan, protocol)
+
+    def _initialize_unlocked(
+        self,
+        plan: Exp2ResumeStudyPlan,
+        protocol: Exp2ResumeProtocol,
+    ) -> dict[str, Any]:
         if plan.study_id != self.study_id:
             raise Exp2ResumeError("Exp2 v2 plan study ID differs from coordinator")
         if plan.protocol_digest != protocol.record_digest:
@@ -2352,7 +2411,16 @@ class Exp2ResumeCoordinator:
                 stream.write(serialized)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, path)
+            try:
+                os.link(temporary, path, follow_symlinks=False)
+            except FileExistsError:
+                if (
+                    path.is_symlink()
+                    or path.read_text(encoding="utf-8") != serialized
+                ):
+                    raise Exp2ResumeError(
+                        f"immutable Exp2 v2 record already exists: {path}"
+                    )
             directory = os.open(path.parent, os.O_RDONLY)
             try:
                 os.fsync(directory)
@@ -2746,7 +2814,7 @@ class Exp2ResumeCoordinator:
             ]
             if (
                 len(images) != 1
-                or receipt.image_digest != images[0].config_digest
+                or receipt.image_digest != images[0].local_image_id
             ):
                 raise Exp2ResumeError(
                     "official receipt image differs from the frozen case image"
@@ -2854,11 +2922,22 @@ class Exp2ResumeCoordinator:
             "operator_policy_digest": state.plan.operator_policy_digest,
             "memory_fixture_digest": state.plan.memory_fixture_digest,
             "operator_role_skill_digest": state.plan.operator_role_skill_digest,
-            "execution_role_skill_digest": state.plan.execution_role_skill_digest,
             "runtime_digest": state.plan.runtime_digest,
         }
         if any(getattr(binding, name) != value for name, value in expected.items()):
             raise Exp2ResumeError("candidate transition frozen identity drift")
+        execution_skill_changed = any(
+            path.startswith(".agents/role-skills/execution/")
+            for path in receipt.actual_paths
+        )
+        execution_digest_changed = (
+            binding.execution_role_skill_digest
+            != state.plan.execution_role_skill_digest
+        )
+        if execution_skill_changed != execution_digest_changed:
+            raise Exp2ResumeError(
+                "candidate Execution role-skill digest differs from its actual scope"
+            )
         if (
             tuple(receipt.requested_paths) != state.attribution.execution_scope
             or tuple(receipt.allowed_paths) != state.protocol.execution_allowlist
@@ -3317,6 +3396,20 @@ class Exp2ResumeCoordinator:
         reconciler: Callable[[Mapping[str, Any]], Mapping[str, Any] | Exp2CaseAttemptReceipt | None] | None = None,
     ) -> dict[str, Any]:
         """Execute/reconcile one case only.  A completed Execution is never rerun."""
+
+        if executor is None and reconciler is None:
+            return self._resume_unlocked(executor, reconciler=reconciler)
+        with self._study_lease() as acquired:
+            if not acquired:
+                return {"status": "in_progress", **self.status()}
+            return self._resume_unlocked(executor, reconciler=reconciler)
+
+    def _resume_unlocked(
+        self,
+        executor: Callable[[Mapping[str, Any]], Mapping[str, Any] | Exp2CaseAttemptReceipt] | None = None,
+        *,
+        reconciler: Callable[[Mapping[str, Any]], Mapping[str, Any] | Exp2CaseAttemptReceipt | None] | None = None,
+    ) -> dict[str, Any]:
 
         state = self._replay()
         terminal = {"CALIBRATION_COMPLETE", "CALIBRATION_BLOCKED", "PILOT_COMPLETE", "ROLLBACK_AWAITING", "ROLLED_BACK", "BLOCKED", "REPORTED", "SOURCE_RELEASED", "CANDIDATE_TRANSITION_AWAITING"}

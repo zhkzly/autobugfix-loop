@@ -440,6 +440,18 @@ projection -> advance the append-only coordinator from typed receipts.
   binding (pilot only). Paths and semantic digests are both authority.
 - Protocol image entries bind one eligible official qualification plus current
   OCI manifest/config/layers/platform. A tag alone is never execution-ready.
+- Resume-MVP Verified qualification imports only the selected official images
+  from a versioned manifest whose entries use registry `@sha256` references.
+  Eval verifies the pulled descriptor/platform, binds the same layers to the
+  local scorer tag, and records an import receipt. Re-solving a historical
+  repository's open-ended dependency file is not equivalent authority.
+- OCI evidence keeps registry manifest/config/compressed-layer digests distinct
+  from Docker's local image ID and rootfs diff IDs. In particular, `.Id` must
+  not be relabelled as the config digest on containerd-backed Docker stores.
+- A v5 qualification is eligible only when two official gold submissions
+  resolve, one explicit null/base submission remains unresolved without a
+  harness error, all three observations use one image ID, and source
+  materialization succeeds. Earlier qualification schemas are not reusable.
 - Formal protected Execution must prove:
   - broker command used outer Bubblewrap;
   - SDK call used the isolated worker (`sdk_in_process=false`,
@@ -459,6 +471,11 @@ projection -> advance the append-only coordinator from typed receipts.
   `fsync`, and immutable event digests. A non-newline final fragment is a torn
   tail: replay ignores it and the next locked append truncates it before
   continuing. A complete invalid line remains corruption and fails closed.
+- A non-blocking process-wide study lease covers replay, open-intent
+  reconciliation, dispatch, model/scorer execution, and terminal append. A
+  second executing resume returns `in_progress`; it must not reconcile an
+  intent owned by the live process. Initialization uses the same lease and
+  atomic compare-and-create links rather than replacement writes.
 - CLI state root is exactly
   `<configured trusted_case_root>/exp2/<study_id>`; caller-selected external or
   redirected roots are rejected.
@@ -473,6 +490,11 @@ projection -> advance the append-only coordinator from typed receipts.
 - Operator rollback mutation requires a coordinator-issued, trusted-Eval
   `Exp2RollbackAuthorization` bound to transfer metrics and the locked
   candidate. Authorization lookup occurs before Operator rollback starts.
+- Operator policy/Memory/runtime/operator-skill identities remain equal to H0.
+  The Execution role-skill digest may change only when the candidate's actual
+  diff contains an allowlisted `.agents/role-skills/execution/` path; a digest
+  change without that actual scope, or a skill edit without a digest change,
+  is rejected.
 - Reports derive coverage, evidence/noninterference numerators and
   denominators, Writer/model usage, first visible-verifier outcome, loop
   rescue, changed files/lines, and empty-patch counts from receipts, ledger, and
@@ -486,9 +508,11 @@ projection -> advance the append-only coordinator from typed receipts.
 | Guard root is absent, redirected, omitted from broker hidden paths, or not masked by outer Bubblewrap | reject before/adoption; no official receipt |
 | Apparatus checkout has any tracked or untracked change at dispatch | reject before Eval case call |
 | OCI identity or eligible qualification differs | block before case intent/SDK |
+| Selected image is not imported from its pinned official manifest digest, gold is unstable, or null/base resolves | mark qualification ineligible; do not freeze protocol |
 | Real broker evidence is absent, redirected, manifest-invalid, or stored in an unexpected layout | leave/reconcile intent as infrastructure-invalid; never synthesize official truth |
 | State root escapes configured trusted Eval root | CLI error before read/write |
 | Event predecessor changes between replay and append | CAS error; caller retries from current state |
+| Another process holds the study execution lease | return `in_progress`; do not dispatch or reconcile |
 | Final JSONL fragment has no newline | ignore on replay; preserve/truncate under lock before next append |
 | Complete event line has invalid JSON/digest/chain | permanent corruption error |
 | H0 metric contains resolved counts or fields beyond the fixed feasibility contract | Operator rejects handoff |
@@ -499,7 +523,7 @@ projection -> advance the append-only coordinator from typed receipts.
 
 ### 5. Good/Base/Bad Cases
 
-- Good: official qualification -> content-addressed protocol -> clean apparatus
+- Good: pinned official image import -> two gold + null/base qualification -> content-addressed protocol -> clean apparatus
   receipt -> protected one-case intent -> real broker -> canonical frozen
   evidence -> official score -> terminal receipt -> next case.
 - Good: process dies after report publication; resume adopts the report and

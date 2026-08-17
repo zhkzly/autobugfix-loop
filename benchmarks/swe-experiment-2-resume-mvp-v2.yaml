@@ -59,4 +59,4 @@ upstreams:
   live_launch_tree: 1491dbf642336270565700707393f24dadbe190a
   live_dataset_revision: 608f7ae9ab8ea1f9f0d030fe04562cf6bd1a0c8b
   platform: linux/amd64
-  verified_image_mode: local-build
+  verified_image_mode: pinned-official-import

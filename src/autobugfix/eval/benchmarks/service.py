@@ -136,6 +136,10 @@ class EvalBenchmarkService:
             raise EvalBenchmarkServiceError(
                 "Exp2 evaluator runtime identity is unavailable"
             )
+        if protocol.verified_image_mode != runner.runtime.verified_image_mode:
+            raise EvalBenchmarkServiceError(
+                "SWE protocol Verified image mode differs from runtime authority"
+            )
         return record_with_digest(
             {
                 "schema": "autobugfix-exp2-eval-runtime-identity-v2",
@@ -150,6 +154,20 @@ class EvalBenchmarkService:
                 "max_attempts": protocol.codex_runtime.max_attempts,
                 "timeout_seconds": protocol.codex_runtime.timeout_seconds,
                 "case_concurrency": protocol.case_concurrency,
+                "verified_image_mode": runner.runtime.verified_image_mode,
+                "verified_image_manifest_digest": (
+                    runner.runtime.verified_image_manifest_digest
+                ),
+                "verified_image_instance_ids": list(
+                    runner.runtime.verified_image_instance_ids
+                ),
+                "verified_image_pins": [
+                    {
+                        "instance_id": instance_id,
+                        **(runner.runtime.verified_image_pin(instance_id) or {}),
+                    }
+                    for instance_id in runner.runtime.verified_image_instance_ids
+                ],
             }
         )
 
@@ -560,8 +578,15 @@ class EvalBenchmarkService:
             )
         inspect_root = run_root / "inspection"
         instance = runner.load_instance(instance_id, inspect_root)
+        image_source = runner.prepare_verified_image(
+            instance, run_root / "image-source"
+        )
         official_attempts = []
-        expected_image_id: str | None = None
+        expected_image_id: str | None = (
+            str(image_source["local_image_id"])
+            if image_source is not None
+            else None
+        )
         for attempt in range(1, protocol.qualification_repeats + 1):
             official = runner.score(
                 instance,
@@ -597,23 +622,60 @@ class EvalBenchmarkService:
             )
             if attempt == 1 and official.image_id.startswith("sha256:"):
                 expected_image_id = official.image_id
+        null_result = runner.score(
+            instance,
+            run_root / "null-score",
+            run_id=f"null-{identity}-{run_token[:8]}",
+            null=True,
+            expected_image_id=expected_image_id,
+        )
+        null_record = null_result.to_dict()
+        null_path = (
+            self.store.write_swe_record(
+                "official-results",
+                adapter,
+                identity,
+                null_record,
+            )
+            if guard_store is None
+            else None
+        )
+        null_attempt = {
+            "record_digest": null_record["record_digest"],
+            "record_path": (
+                str(null_path)
+                if null_path is not None
+                else "encrypted:null-attempt"
+            ),
+            "resolved": null_result.resolved,
+            "harness_error": null_result.harness_error,
+            "image_id": null_result.image_id,
+        }
         materialized = None
         harness_error = next(
             (
                 str(item["harness_error"])
-                for item in official_attempts
+                for item in (*official_attempts, null_attempt)
                 if item["harness_error"]
             ),
             "",
         )
         stable_gold = all(item["resolved"] for item in official_attempts)
-        stable_image = len({item["image_id"] for item in official_attempts}) == 1
+        stable_null = null_attempt["resolved"] is False
+        stable_image = len(
+            {
+                item["image_id"]
+                for item in (*official_attempts, null_attempt)
+            }
+        ) == 1
         eligibility_reason = harness_error
         if not stable_gold and not harness_error:
             eligibility_reason = "repeated official gold patches did not resolve the case"
+        if not stable_null and not harness_error:
+            eligibility_reason = "official null/base submission unexpectedly resolved"
         if not stable_image and not harness_error:
             eligibility_reason = "official image identity changed across qualification runs"
-        if stable_gold and stable_image and not harness_error:
+        if stable_gold and stable_null and stable_image and not harness_error:
             try:
                 materialized = SWEImageMaterializer(runner).materialize(
                     instance,
@@ -624,17 +686,19 @@ class EvalBenchmarkService:
                 eligibility_reason = harness_error
         eligible = (
             stable_gold
+            and stable_null
             and stable_image
             and not harness_error
             and materialized is not None
         )
         if eligible:
             eligibility_reason = (
-                "two official gold scorer runs and materialization passed"
+                "two official gold runs, null/base scoring, and materialization passed"
             )
+        image_pin = runner.runtime.verified_image_pin(instance.instance_id)
         receipt = record_with_digest(
             {
-                "schema": "autobugfix-swe-qualification-v4",
+                "schema": "autobugfix-swe-qualification-v5",
                 "qualification_contract_digest": protocol.qualification_contract_digest,
                 "adapter": adapter,
                 "role": role,
@@ -648,7 +712,31 @@ class EvalBenchmarkService:
                 "runtime_id": runner.runtime.runtime_id,
                 "docker_authority_digest": runner.runtime.docker_authority_digest,
                 "evaluator_runtime_id": runner.runtime.evaluator_runtime_id,
+                "image_source_mode": (
+                    runner.runtime.verified_image_mode
+                    if adapter == "swebench_verified"
+                    else "guard-private"
+                ),
+                "image_source_ref": (
+                    image_pin["source_ref"] if image_pin is not None else None
+                ),
+                "image_source_manifest_digest": (
+                    image_pin["manifest_digest"]
+                    if image_pin is not None
+                    else None
+                ),
+                "image_source_receipt_digest": (
+                    image_source["record_digest"]
+                    if image_source is not None
+                    else None
+                ),
+                "image_source_receipt_path": (
+                    image_source["receipt_path"]
+                    if image_source is not None
+                    else None
+                ),
                 "official_attempts": official_attempts,
+                "null_attempt": null_attempt,
                 "official_result_digest": official_attempts[-1]["record_digest"],
                 "official_result_path": official_attempts[-1]["record_path"],
                 "image": instance.docker_image,
@@ -2149,7 +2237,7 @@ class EvalBenchmarkService:
             verify_record(raw)
             if path.name != f"{raw['record_digest']}.yaml":
                 raise EvalBenchmarkServiceError("SWE qualification path digest drift")
-            if raw.get("schema") != "autobugfix-swe-qualification-v4":
+            if raw.get("schema") != "autobugfix-swe-qualification-v5":
                 continue
             if (
                 raw.get("qualification_contract_digest")
@@ -2161,6 +2249,16 @@ class EvalBenchmarkService:
             if raw.get("dataset_revision") != runner.snapshot.revision:
                 continue
             instance_id = safe_component(raw.get("instance_id"), "instance_id")
+            self._validate_swe_qualification_semantics(
+                raw,
+                protocol=protocol,
+                adapter=adapter,
+                expected_image_pin=(
+                    runner.runtime.verified_image_pin(instance_id)
+                    if adapter == "swebench_verified"
+                    else None
+                ),
+            )
             if path.parent.name != instance_id:
                 raise EvalBenchmarkServiceError("SWE qualification identity path drift")
             current = by_instance.get(instance_id)
@@ -2171,9 +2269,112 @@ class EvalBenchmarkService:
         return [
             record
             for record in by_instance.values()
-            if record.get("schema") == "autobugfix-swe-qualification-v4"
+            if record.get("schema") == "autobugfix-swe-qualification-v5"
             and record.get("eligible")
         ]
+
+    @staticmethod
+    def _validate_swe_qualification_semantics(
+        record: Mapping[str, Any],
+        *,
+        protocol: SWEExperimentProtocol,
+        adapter: str,
+        expected_image_pin: Mapping[str, str] | None = None,
+    ) -> None:
+        attempts = record.get("official_attempts")
+        null_attempt = record.get("null_attempt")
+        if (
+            not isinstance(attempts, list)
+            or len(attempts) != protocol.qualification_repeats
+            or not all(isinstance(item, Mapping) for item in attempts)
+            or not isinstance(null_attempt, Mapping)
+        ):
+            raise EvalBenchmarkServiceError(
+                "SWE qualification lacks gold/null attempt evidence"
+            )
+        if [item.get("attempt") for item in attempts] != list(
+            range(1, protocol.qualification_repeats + 1)
+        ) or not all(
+            re.fullmatch(
+                r"[0-9a-f]{64}", str(item.get("record_digest") or "")
+            )
+            and str(item.get("record_path") or "")
+            for item in (*attempts, null_attempt)
+        ):
+            raise EvalBenchmarkServiceError(
+                "SWE qualification attempt provenance is invalid"
+            )
+        if (
+            record.get("official_result_digest")
+            != attempts[-1].get("record_digest")
+            or record.get("official_result_path")
+            != attempts[-1].get("record_path")
+        ):
+            raise EvalBenchmarkServiceError(
+                "SWE qualification terminal gold binding is invalid"
+            )
+        observations = [*attempts, null_attempt]
+        image_ids = {str(item.get("image_id") or "") for item in observations}
+        gold_valid = all(
+            item.get("resolved") is True
+            and not str(item.get("harness_error") or "")
+            for item in attempts
+        )
+        null_valid = (
+            null_attempt.get("resolved") is False
+            and not str(null_attempt.get("harness_error") or "")
+        )
+        stable_image = (
+            len(image_ids) == 1
+            and next(iter(image_ids)).startswith("sha256:")
+            and record.get("image_id") == next(iter(image_ids))
+        )
+        if record.get("eligible") is True and (
+            not gold_valid
+            or not null_valid
+            or not stable_image
+            or not str(record.get("source_path") or "")
+            or record.get("source_path") == "unavailable"
+            or not re.fullmatch(
+                r"[0-9a-f]{40}", str(record.get("source_tree") or "")
+            )
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", str(record.get("source_digest") or "")
+            )
+        ):
+            raise EvalBenchmarkServiceError(
+                "eligible SWE qualification contradicts gold/null/image/materialization evidence"
+            )
+        expected_mode = (
+            protocol.verified_image_mode
+            if adapter == "swebench_verified"
+            else "guard-private"
+        )
+        if record.get("image_source_mode") != expected_mode:
+            raise EvalBenchmarkServiceError(
+                "SWE qualification image source mode drift"
+            )
+        if (
+            adapter == "swebench_verified"
+            and protocol.verified_image_mode == "pinned-official-import"
+            and (
+                expected_image_pin is None
+                or record.get("image_source_ref")
+                != expected_image_pin.get("source_ref")
+                or record.get("image_source_manifest_digest")
+                != expected_image_pin.get("manifest_digest")
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(record.get("image_source_receipt_digest") or ""),
+                )
+                or not Path(
+                    str(record.get("image_source_receipt_path") or "")
+                ).is_absolute()
+            )
+        ):
+            raise EvalBenchmarkServiceError(
+                "SWE qualification lacks pinned official image evidence"
+            )
 
     def exp2_qualification_receipt(
         self,
@@ -2306,14 +2507,22 @@ class EvalBenchmarkService:
             protocol, "swebench_verified"
         )
         try:
+            holdout_records = guard_store.qualification_records(
+                secret=guard_secret,
+                protocol_digest=protocol.qualification_contract_digest,
+                runtime_id=live_runner.runtime.evaluator_runtime_id,
+            )
+            for record in holdout_records:
+                if record.get("schema") == "autobugfix-swe-qualification-v5":
+                    self._validate_swe_qualification_semantics(
+                        record,
+                        protocol=protocol,
+                        adapter="swebench_live",
+                    )
             holdout_pool = [
                 record
-                for record in guard_store.qualification_records(
-                    secret=guard_secret,
-                    protocol_digest=protocol.qualification_contract_digest,
-                    runtime_id=live_runner.runtime.evaluator_runtime_id,
-                )
-                if record.get("schema") == "autobugfix-swe-qualification-v4"
+                for record in holdout_records
+                if record.get("schema") == "autobugfix-swe-qualification-v5"
                 and record.get("eligible")
             ]
         except SWEGuardStoreError as exc:

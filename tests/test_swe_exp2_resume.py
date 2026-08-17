@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 import pytest
@@ -12,7 +15,10 @@ import yaml
 from autobugfix.config import load_config
 from autobugfix.eval.benchmarks.exp2_records import Exp2ContractError
 from autobugfix.eval.benchmarks.exp2_resume import (
+    EXP2_WRITER_SKILL_PATH,
     Exp2CalibrationTerminalReceipt,
+    Exp2CandidateBinding,
+    Exp2CandidateTransitionReceipt,
     Exp2CaseAttemptIntent,
     Exp2CaseAttemptReceipt,
     Exp2OciImageIdentity,
@@ -36,7 +42,6 @@ from autobugfix.eval.benchmarks.swe_models import SWEExperimentProtocol
 from autobugfix.git_utils import rev_parse
 from tests.helpers import make_service_project, run
 
-
 _EMPTY_MEMORY_SPEC = """schema: autobugfix-exp2-empty-memory-fixture-spec-v1
 fixture_id: exp2-empty-memory-v1
 active_entries: []
@@ -55,12 +60,130 @@ def _sha(label: str) -> str:
 def _qualification_record(case_id: str) -> dict[str, Any]:
     return record_with_digest(
         {
-            "schema": "autobugfix-swe-qualification-v4",
+            "schema": "autobugfix-swe-qualification-v5",
             "instance_id": case_id,
-            "image_id": "sha256:" + _digest(f"config:{case_id}"),
+            "image_id": "sha256:" + _digest(f"local:{case_id}"),
             "eligible": True,
         }
     )
+
+
+def _candidate_transition(
+    tmp_path: Path,
+    *,
+    path: str,
+    execution_skill_digest: str,
+) -> tuple[SimpleNamespace, Exp2CandidateTransitionReceipt]:
+    study_id = "exp2-skill-transition"
+    attribution_digest = _digest("attribution")
+    source_digest = _digest("source-bundle")
+    request_digest = _digest("request")
+    integration_digest = _digest("integration")
+    binding = Exp2CandidateBinding(
+        study_id=study_id,
+        parent_sha=_sha("h0"),
+        parent_tree=_sha("h0-tree"),
+        candidate_sha=_sha("candidate"),
+        candidate_tree=_sha("candidate-tree"),
+        candidate_diff_digest=_digest("candidate-diff"),
+        allowlist_digest=digest_payload({"allowed_paths": [path]}),
+        scope_digest=digest_payload(
+            {"requested_paths": [path], "actual_paths": [path]}
+        ),
+        operator_policy_digest=_digest("operator-policy"),
+        memory_fixture_digest=_digest("empty-memory"),
+        operator_role_skill_digest=_digest("operator-skill"),
+        execution_role_skill_digest=execution_skill_digest,
+        runtime_digest=_digest("runtime"),
+        request_digest=request_digest,
+        integration_digest=integration_digest,
+    )
+    eval_binding_path = tmp_path / "binding.yaml"
+    eval_binding = record_with_digest(
+        {
+            "schema": "autobugfix-operator-study-binding-v1",
+            "kind": "CANDIDATE",
+            "study_id": "operator-study",
+            "line_id": "line-one",
+            "subject_sha": binding.candidate_sha,
+            "subject_tree": binding.candidate_tree,
+        }
+    )
+    eval_binding_path.write_text(
+        yaml.safe_dump(eval_binding, sort_keys=False), encoding="utf-8"
+    )
+    receipt = Exp2CandidateTransitionReceipt(
+        study_id=study_id,
+        issuer="operator-governance-service-v4",
+        attribution_digest=attribution_digest,
+        source_projection_bundle_digest=source_digest,
+        operator_study_id="operator-study",
+        line_id="line-one",
+        request_id="request-one",
+        request_digest=request_digest,
+        grant_id="grant-one",
+        grant_digest=_digest("grant"),
+        writer_run_id="writer-one",
+        writer_run_digest=_digest("writer"),
+        fast_check_digest=_digest("fast"),
+        full_check_digest=_digest("full"),
+        integration_id="integration-one",
+        integration_digest=integration_digest,
+        usage_digest=_digest("usage"),
+        eval_study_binding_path=str(eval_binding_path.resolve()),
+        eval_study_binding_digest=str(eval_binding["record_digest"]),
+        requested_paths=(path,),
+        allowed_paths=(path,),
+        actual_paths=(path,),
+        binding=binding,
+    )
+    state = SimpleNamespace(
+        state="CANDIDATE_TRANSITION_AWAITING",
+        attribution=SimpleNamespace(
+            record_digest=attribution_digest,
+            execution_scope=(path,),
+        ),
+        source_bundle=SimpleNamespace(record_digest=source_digest),
+        plan=SimpleNamespace(
+            h0_subject_sha=_sha("h0"),
+            h0_subject_tree=_sha("h0-tree"),
+            operator_policy_digest=_digest("operator-policy"),
+            memory_fixture_digest=_digest("empty-memory"),
+            operator_role_skill_digest=_digest("operator-skill"),
+            execution_role_skill_digest=_digest("execution-skill"),
+            runtime_digest=_digest("runtime"),
+        ),
+        protocol=SimpleNamespace(execution_allowlist=(path,)),
+    )
+    return state, receipt
+
+
+def test_candidate_transition_allows_bound_execution_skill_change(
+    tmp_path: Path,
+) -> None:
+    path = ".agents/role-skills/execution/writer/autobugfix-writer/SKILL.md"
+    state, receipt = _candidate_transition(
+        tmp_path,
+        path=path,
+        execution_skill_digest=_digest("candidate-execution-skill"),
+    )
+    coordinator = Exp2ResumeCoordinator(tmp_path / "state", receipt.study_id)
+
+    coordinator._validate_candidate_transition(state, receipt)
+
+
+def test_candidate_transition_rejects_unexplained_execution_skill_drift(
+    tmp_path: Path,
+) -> None:
+    state, receipt = _candidate_transition(
+        tmp_path,
+        path="src/autobugfix/runner.py",
+        execution_skill_digest=_digest("candidate-execution-skill"),
+    )
+    coordinator = Exp2ResumeCoordinator(tmp_path / "state", receipt.study_id)
+
+    with pytest.raises(Exp2ResumeError, match="actual scope"):
+        coordinator._validate_candidate_transition(state, receipt)
 
 
 def _protocol(*, qualified: bool = True) -> Exp2ResumeProtocol:
@@ -82,7 +205,7 @@ def _protocol(*, qualified: bool = True) -> Exp2ResumeProtocol:
         max_attempts=2,
         timeout_seconds=900,
         case_concurrency=1,
-        execution_allowlist=("src/autobugfix/eval/benchmarks",),
+        execution_allowlist=(EXP2_WRITER_SKILL_PATH,),
     )
     if not qualified:
         return pending
@@ -97,6 +220,8 @@ def _protocol(*, qualified: bool = True) -> Exp2ResumeProtocol:
             manifest_digest=_digest(f"manifest:{case.case_id}"),
             config_digest=_digest(f"config:{case.case_id}"),
             layer_digests=(_digest(f"layer:{case.case_id}"),),
+            local_image_id=_digest(f"local:{case.case_id}"),
+            rootfs_diff_ids=(_digest(f"diff-id:{case.case_id}"),),
         )
         for case in cases
     )
@@ -357,7 +482,7 @@ def _official_report(
             "executed_subject_tree": intent.subject_tree,
             "subject_runtime_digest": _digest("runtime"),
             "memory_digest": _digest("empty-memory"),
-            "image_digest": _digest(f"config:{intent.case_id}"),
+            "image_digest": _digest(f"local:{intent.case_id}"),
             "submission_digest": submission,
             "official_result": official,
             "noninterference": noninterference,
@@ -432,6 +557,22 @@ def test_v2_record_parser_rejects_missing_fields() -> None:
         Exp2ResumeProtocol.from_dict(raw)
 
 
+@pytest.mark.parametrize(
+    "scope",
+    [
+        ("src/autobugfix/runner.py",),
+        ("src/autobugfix/prompts.py",),
+        (".agents/role-skills/execution/**",),
+        (EXP2_WRITER_SKILL_PATH, "src/autobugfix/runner.py"),
+    ],
+)
+def test_resume_protocol_rejects_non_writer_skill_treatment(
+    scope: tuple[str, ...],
+) -> None:
+    with pytest.raises(Exp2ContractError, match="single Writer skill"):
+        replace(_protocol(qualified=False), execution_allowlist=scope)
+
+
 def test_resume_mvp_swe_protocol_matches_frozen_h0_cohort() -> None:
     protocol = SWEExperimentProtocol.from_yaml(
         Path("benchmarks/swe-experiment-2-resume-mvp-v2.yaml")
@@ -491,6 +632,75 @@ def test_calibration_executes_one_case_per_resume_and_stays_terminal(
     assert terminal["status"] == "terminal"
     assert terminal["state"] == "CALIBRATION_COMPLETE"
     assert len(calls) == 2
+
+
+def test_study_lease_prevents_concurrent_dispatch_and_is_process_exclusive(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    calls = 0
+
+    def executor(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+        nonlocal calls
+        calls += 1
+        return _official_report(
+            Exp2CaseAttemptIntent.from_dict(raw), resolved=False
+        )
+
+    child = """
+from pathlib import Path
+import sys
+from autobugfix.eval.benchmarks.exp2_resume import Exp2ResumeCoordinator
+c = Exp2ResumeCoordinator(Path(sys.argv[1]), sys.argv[2])
+with c._study_lease() as acquired:
+    print("acquired" if acquired else "busy")
+"""
+    with coordinator._study_lease() as acquired:
+        assert acquired is True
+        concurrent = coordinator.resume(executor)
+        observed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                child,
+                str(coordinator.state_root),
+                coordinator.study_id,
+            ],
+            cwd=Path.cwd(),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    assert concurrent["status"] == "in_progress"
+    assert observed.stdout.strip() == "busy"
+    assert calls == 0
+    completed = coordinator.resume(executor)
+    assert completed["terminal_receipt_count"] == 1
+    assert calls == 1
+
+
+def test_initialize_is_lease_guarded_and_never_replaces_existing_state(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    plan = Exp2ResumeStudyPlan.from_dict(
+        yaml.safe_load(coordinator.plan_path.read_text(encoding="utf-8"))
+    )
+    protocol = Exp2ResumeProtocol.from_dict(
+        yaml.safe_load(coordinator.protocol_path.read_text(encoding="utf-8"))
+    )
+    concurrent = Exp2ResumeCoordinator(
+        coordinator.state_root, coordinator.study_id
+    )
+
+    with coordinator._study_lease() as acquired:
+        assert acquired is True
+        with pytest.raises(Exp2ResumeError, match="initialization is in progress"):
+            concurrent.initialize(plan, protocol)
+
+    with pytest.raises(Exp2ResumeError, match="state root already exists"):
+        concurrent.initialize(plan, protocol)
 
 
 def test_open_intent_requires_trusted_reconciliation_without_reexecution(
@@ -968,7 +1178,7 @@ class _FakeExp2EvalService:
             "executed_subject_tree": _sha("h0-tree"),
             "subject_runtime_digest": _digest("runtime"),
             "memory_digest": _digest("empty-memory"),
-            "image_digest": _digest(f"config:{case_id}"),
+            "image_digest": _digest(f"local:{case_id}"),
             "submission_digest": submission_digest,
             "official_result": official,
             "noninterference": noninterference,
@@ -1140,6 +1350,8 @@ def _fake_image_gate(
             "manifest_digest": identity.manifest_digest,
             "config_digest": identity.config_digest,
             "layer_digests": list(identity.layer_digests),
+            "local_image_id": identity.local_image_id,
+            "rootfs_diff_ids": list(identity.rootfs_diff_ids),
             "platform": identity.platform,
             "command_digest": _digest(f"image-gate:{intent.run_id}"),
         }

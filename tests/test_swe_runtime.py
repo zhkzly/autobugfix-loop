@@ -4,8 +4,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 
 from autobugfix.config import load_config
+from autobugfix.eval.benchmarks.models import record_with_digest
 from autobugfix.eval.benchmarks.swe_runtime import SWERuntime, SWERuntimeError
 from tests.helpers import make_service_project
 
@@ -42,7 +44,7 @@ def test_swe_runtime_rejects_mutable_verified_image_namespace(tmp_path: Path) ->
         verified_namespace="mutable-remote",
     )
 
-    with pytest.raises(SWERuntimeError, match="local-build images"):
+    with pytest.raises(SWERuntimeError, match="locally qualified images"):
         SWERuntime(project_root, config.eval.benchmarks)
 
 
@@ -55,6 +57,62 @@ def test_swe_runtime_rejects_unknown_verified_build_network_mode(tmp_path: Path)
     )
 
     with pytest.raises(SWERuntimeError, match="verified_build_network_mode"):
+        SWERuntime(project_root, config.eval.benchmarks)
+
+
+def test_swe_runtime_loads_digest_bound_selected_image_manifest(
+    tmp_path: Path,
+) -> None:
+    project_root, _ = make_service_project(tmp_path)
+    manifest = project_root / "benchmarks/selected-images.yaml"
+    manifest.parent.mkdir()
+    digest = "1" * 64
+    record = record_with_digest(
+        {
+            "schema": "autobugfix-swe-selected-image-manifest-v1",
+            "platform": "linux/amd64",
+            "registry_namespace": "swebench",
+            "swebench_commit": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+            "swebench_tree": "f178530b37202c549b1b2b3300db2da90da648db",
+            "images": [
+                {
+                    "instance_id": "owner__repo-1",
+                    "source_ref": (
+                        "swebench/sweb.eval.x86_64.owner_1776_repo-1"
+                        f"@sha256:{digest}"
+                    ),
+                    "manifest_digest": digest,
+                }
+            ],
+        }
+    )
+    manifest.write_text(
+        yaml.safe_dump(record, sort_keys=False), encoding="utf-8"
+    )
+    config = load_config(project_root)
+    config.eval.benchmarks.swe = replace(
+        config.eval.benchmarks.swe,
+        verified_image_manifest=manifest,
+    )
+
+    runtime = SWERuntime(project_root, config.eval.benchmarks)
+
+    assert runtime.verified_image_mode == "pinned-official-import"
+    assert runtime.verified_image_manifest_digest == record["record_digest"]
+    assert runtime.verified_image_instance_ids == ("owner__repo-1",)
+    assert runtime.verified_image_pin("owner__repo-1") == {
+        "source_ref": (
+            "swebench/sweb.eval.x86_64.owner_1776_repo-1"
+            f"@sha256:{digest}"
+        ),
+        "manifest_digest": digest,
+    }
+
+    record["images"][0]["manifest_digest"] = "2" * 64  # type: ignore[index]
+    manifest.write_text(
+        yaml.safe_dump(record, sort_keys=False), encoding="utf-8"
+    )
+    with pytest.raises(SWERuntimeError, match="manifest digest"):
         SWERuntime(project_root, config.eval.benchmarks)
 
 
@@ -122,9 +180,10 @@ def test_dataset_snapshot_reader_rejects_digest_drift(tmp_path: Path) -> None:
     root.mkdir(parents=True)
     data = root / "test.jsonl"
     data.write_text('{"instance_id":"one"}\n', encoding="utf-8")
+    import yaml
+
     from autobugfix.eval.benchmarks.models import digest_file
     from autobugfix.eval.benchmarks.swe_runtime import SWEDatasetSnapshot
-    import yaml
 
     snapshot = SWEDatasetSnapshot(
         adapter="swebench_verified",

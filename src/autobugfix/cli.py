@@ -20,6 +20,7 @@ from autobugfix.eval.benchmarks.exp2_coordinator import (
     Exp2CoordinatorError,
 )
 from autobugfix.eval.benchmarks.exp2_resume import (
+    EXP2_WRITER_SKILL_PATH,
     Exp2AttributionHypothesis,
     Exp2ResumeCoordinator,
     Exp2ResumeError,
@@ -1588,7 +1589,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--empty-memory-fixture", required=True
     )
     exp2_build_protocol.add_argument(
-        "--execution-allowlist", action="append", required=True
+        "--execution-allowlist",
+        action="append",
+        choices=[EXP2_WRITER_SKILL_PATH],
+        required=True,
     )
     exp2_build_protocol.add_argument("--artifact-root")
     exp2_build_protocol.add_argument("--out", required=True)

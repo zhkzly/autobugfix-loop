@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import json
 import hashlib
 import importlib.metadata
+import json
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
-import tempfile
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -17,11 +18,13 @@ from typing import Any, Mapping
 import yaml
 
 from autobugfix.eval.benchmarks.models import (
+    BenchmarkContractError,
     DoctorCheck,
     DoctorReport,
     digest_file,
     digest_payload,
     record_with_digest,
+    safe_component,
     verify_record,
 )
 from autobugfix.eval.benchmarks.runtime import run_command
@@ -246,6 +249,7 @@ class SWEDatasetSnapshot:
 
 class SWERuntime:
     ADAPTERS = ("swebench_verified", "swebench_live")
+    PINNED_IMAGE_SCHEMA = "autobugfix-swe-selected-image-manifest-v1"
 
     def __init__(
         self,
@@ -264,6 +268,10 @@ class SWERuntime:
         }
         self._docker_authority = docker_authority
         self._validate_config(self.config)
+        (
+            self._verified_image_pins,
+            self._verified_image_manifest_digest,
+        ) = self._load_verified_image_manifest()
 
     @staticmethod
     def _validate_config(config: SWEBenchmarkConfig) -> None:
@@ -294,7 +302,7 @@ class SWERuntime:
             )
         if config.verified_namespace is not None:
             raise SWERuntimeError(
-                "formal SWE-bench Verified runs require local-build images; "
+                "formal SWE-bench Verified runs require locally qualified images; "
                 "verified_namespace must be null"
             )
         if config.verified_build_network_mode not in {"default", "host"}:
@@ -305,6 +313,95 @@ class SWERuntime:
             raise SWERuntimeError("SWE scorer timeout must be positive")
         if config.cpu_limit <= 0 or config.pids_limit < 1:
             raise SWERuntimeError("SWE Docker resource limits must be positive")
+
+    def _load_verified_image_manifest(
+        self,
+    ) -> tuple[dict[str, dict[str, str]], str | None]:
+        path = self.config.verified_image_manifest
+        if path is None:
+            return {}, None
+        manifest_path = path.resolve()
+        if (
+            path.is_symlink()
+            or not manifest_path.is_file()
+            or not manifest_path.is_relative_to(self.project_root)
+        ):
+            raise SWERuntimeError(
+                "SWE pinned image manifest must be a real project file"
+            )
+        try:
+            raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise SWERuntimeError("SWE pinned image manifest is unreadable") from exc
+        if not isinstance(raw, Mapping):
+            raise SWERuntimeError("SWE pinned image manifest must be a mapping")
+        try:
+            verify_record(raw)
+        except BenchmarkContractError as exc:
+            raise SWERuntimeError("SWE pinned image manifest digest is invalid") from exc
+        images = raw.get("images")
+        if (
+            raw.get("schema") != self.PINNED_IMAGE_SCHEMA
+            or raw.get("platform") != SWE_PLATFORM
+            or raw.get("registry_namespace") != "swebench"
+            or raw.get("swebench_commit") != SWE_BENCH_COMMIT
+            or raw.get("swebench_tree") != SWE_BENCH_TREE
+            or not isinstance(images, list)
+            or not images
+        ):
+            raise SWERuntimeError("SWE pinned image manifest contract is invalid")
+        pins: dict[str, dict[str, str]] = {}
+        for item in images:
+            if not isinstance(item, Mapping):
+                raise SWERuntimeError("SWE pinned image entry is invalid")
+            try:
+                instance_id = safe_component(
+                    item.get("instance_id"), "instance_id"
+                )
+            except BenchmarkContractError as exc:
+                raise SWERuntimeError(
+                    "SWE pinned image instance ID is invalid"
+                ) from exc
+            if instance_id in pins:
+                raise SWERuntimeError("SWE pinned image instance ID is invalid")
+            digest = str(item.get("manifest_digest") or "")
+            source_ref = str(item.get("source_ref") or "")
+            remote_name = instance_id.lower().replace("__", "_1776_")
+            expected_ref = (
+                f"swebench/sweb.eval.x86_64.{remote_name}@sha256:{digest}"
+            )
+            if (
+                not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or source_ref != expected_ref
+            ):
+                raise SWERuntimeError(
+                    f"SWE pinned image authority is invalid: {instance_id}"
+                )
+            pins[instance_id] = {
+                "source_ref": source_ref,
+                "manifest_digest": digest,
+            }
+        return pins, str(raw["record_digest"])
+
+    @property
+    def verified_image_mode(self) -> str:
+        return (
+            "pinned-official-import"
+            if self._verified_image_manifest_digest is not None
+            else "local-build"
+        )
+
+    @property
+    def verified_image_manifest_digest(self) -> str | None:
+        return self._verified_image_manifest_digest
+
+    @property
+    def verified_image_instance_ids(self) -> tuple[str, ...]:
+        return tuple(self._verified_image_pins)
+
+    def verified_image_pin(self, instance_id: str) -> dict[str, str] | None:
+        pin = self._verified_image_pins.get(instance_id)
+        return dict(pin) if pin is not None else None
 
     @property
     def live_checkout(self) -> Path:
@@ -385,7 +482,10 @@ class SWERuntime:
                 "live_launch_commit": self.config.live_launch_commit,
                 "live_launch_tree": self.config.live_launch_tree,
                 "platform": self.config.platform,
-                "verified_image_mode": "local-build",
+                "verified_image_mode": self.verified_image_mode,
+                "verified_image_manifest_digest": (
+                    self.verified_image_manifest_digest
+                ),
                 "verified_build_network_mode": self.config.verified_build_network_mode,
                 "docker_authority_digest": (
                     self._docker_authority.authority_digest

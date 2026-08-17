@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Mapping
 
-from autobugfix.eval.benchmarks.models import digest_file, safe_component
+import yaml
+
+from autobugfix.eval.benchmarks.models import (
+    digest_file,
+    record_with_digest,
+    safe_component,
+)
 from autobugfix.eval.benchmarks.runtime import run_command
 from autobugfix.eval.benchmarks.swe_models import (
     SWEInstance,
@@ -97,6 +104,190 @@ class SWEOfficialRunner:
         if not isinstance(image, Mapping):
             raise SWERuntimeError("official SWE-bench instance inspection was not a mapping")
         return SWEInstance.from_verified(row, image)
+
+    def prepare_verified_image(
+        self,
+        instance: SWEInstance,
+        artifact_root: Path,
+    ) -> dict[str, Any] | None:
+        """Import one selected official image by digest into the local tag."""
+
+        if self.adapter != "swebench_verified":
+            return None
+        pin = self.runtime.verified_image_pin(instance.instance_id)
+        if pin is None:
+            return None
+        docker = shutil.which("docker")
+        if not docker:
+            raise SWERuntimeError("docker executable is unavailable")
+        artifact_root.mkdir(parents=True, exist_ok=False)
+        pull = run_command(
+            [
+                docker,
+                "pull",
+                "--platform",
+                self.runtime.config.platform,
+                pin["source_ref"],
+            ],
+            cwd=self.runtime.project_root,
+            artifact_dir=artifact_root / "docker-pull-pinned",
+            name="docker-pull-pinned-instance",
+            timeout_seconds=self.runtime.benchmark_config.command_timeout_seconds,
+            env=self.runtime.command_env(),
+            inherit_env=False,
+        )
+        if not pull.passed:
+            raise SWERuntimeError(
+                f"failed to pull pinned official image: {instance.instance_id}"
+            )
+        source_inspect = run_command(
+            [docker, "image", "inspect", "--format", "{{json .}}", pin["source_ref"]],
+            cwd=self.runtime.project_root,
+            artifact_dir=artifact_root / "docker-inspect-pinned",
+            name="docker-inspect-pinned-instance",
+            timeout_seconds=60,
+            env=self.runtime.command_env(),
+            inherit_env=False,
+        )
+        source = self._image_inspection(source_inspect, "pinned official image")
+        manifest_inspect = run_command(
+            [docker, "manifest", "inspect", pin["source_ref"]],
+            cwd=self.runtime.project_root,
+            artifact_dir=artifact_root / "docker-inspect-manifest",
+            name="docker-inspect-pinned-manifest",
+            timeout_seconds=60,
+            env=self.runtime.command_env(),
+            inherit_env=False,
+        )
+        manifest = self._image_inspection(
+            manifest_inspect, "pinned OCI manifest"
+        )
+        descriptor = source.get("Descriptor")
+        if (
+            not isinstance(descriptor, Mapping)
+            or descriptor.get("digest")
+            != f"sha256:{pin['manifest_digest']}"
+            or source.get("Os") != "linux"
+            or source.get("Architecture") != "amd64"
+        ):
+            raise SWERuntimeError(
+                "pinned official image manifest or platform differs from authority"
+            )
+        tag = run_command(
+            [docker, "image", "tag", pin["source_ref"], instance.docker_image],
+            cwd=self.runtime.project_root,
+            artifact_dir=artifact_root / "docker-tag-local",
+            name="docker-tag-pinned-instance",
+            timeout_seconds=60,
+            env=self.runtime.command_env(),
+            inherit_env=False,
+        )
+        if not tag.passed:
+            raise SWERuntimeError("failed to bind pinned image to local scorer tag")
+        local_inspect = run_command(
+            [
+                docker,
+                "image",
+                "inspect",
+                "--format",
+                "{{json .}}",
+                instance.docker_image,
+            ],
+            cwd=self.runtime.project_root,
+            artifact_dir=artifact_root / "docker-inspect-local",
+            name="docker-inspect-tagged-instance",
+            timeout_seconds=60,
+            env=self.runtime.command_env(),
+            inherit_env=False,
+        )
+        local = self._image_inspection(local_inspect, "tagged local image")
+        image_id = str(source.get("Id") or "")
+        root_fs = source.get("RootFS")
+        raw_diff_ids = (
+            root_fs.get("Layers") if isinstance(root_fs, Mapping) else None
+        )
+        manifest_config = manifest.get("config")
+        manifest_layers = manifest.get("layers")
+        if (
+            not image_id.startswith("sha256:")
+            or local.get("Id") != image_id
+            or local.get("RootFS") != root_fs
+            or not isinstance(raw_diff_ids, list)
+            or not raw_diff_ids
+            or not all(
+                isinstance(layer, str) and layer.startswith("sha256:")
+                for layer in raw_diff_ids
+            )
+            or not isinstance(manifest_config, Mapping)
+            or not isinstance(manifest_layers, list)
+            or not manifest_layers
+            or not all(isinstance(layer, Mapping) for layer in manifest_layers)
+        ):
+            raise SWERuntimeError(
+                "tagged local image differs from pinned official image"
+            )
+        receipt = record_with_digest(
+            {
+                "schema": "autobugfix-swe-pinned-image-import-v1",
+                "instance_id": instance.instance_id,
+                "source_ref": pin["source_ref"],
+                "manifest_digest": pin["manifest_digest"],
+                "manifest_record_digest": (
+                    self.runtime.verified_image_manifest_digest
+                ),
+                "local_image": instance.docker_image,
+                "local_image_id": image_id,
+                "config_digest": self._sha256_digest(
+                    manifest_config.get("digest"), "manifest config"
+                ),
+                "layer_digests": [
+                    self._sha256_digest(layer.get("digest"), "manifest layer")
+                    for layer in manifest_layers
+                ],
+                "rootfs_diff_ids": [
+                    self._sha256_digest(diff_id, "rootfs diff ID")
+                    for diff_id in raw_diff_ids
+                ],
+                "platform": self.runtime.config.platform,
+                "pull_command_digest": pull.to_dict()["record_digest"],
+                "source_inspect_command_digest": (
+                    source_inspect.to_dict()["record_digest"]
+                ),
+                "manifest_inspect_command_digest": (
+                    manifest_inspect.to_dict()["record_digest"]
+                ),
+                "tag_command_digest": tag.to_dict()["record_digest"],
+                "local_inspect_command_digest": (
+                    local_inspect.to_dict()["record_digest"]
+                ),
+            }
+        )
+        receipt_path = artifact_root / "receipt.yaml"
+        receipt_path.write_text(
+            yaml.safe_dump(receipt, sort_keys=False), encoding="utf-8"
+        )
+        return {**receipt, "receipt_path": str(receipt_path.resolve())}
+
+    @staticmethod
+    def _sha256_digest(value: object, label: str) -> str:
+        digest = str(value or "").removeprefix("sha256:")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise SWERuntimeError(f"{label} digest is invalid")
+        return digest
+
+    @staticmethod
+    def _image_inspection(command: Any, label: str) -> Mapping[str, Any]:
+        if not command.passed:
+            raise SWERuntimeError(f"{label} inspection failed")
+        try:
+            raw = json.loads(
+                Path(command.stdout_path).read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+            raise SWERuntimeError(f"{label} inspection is invalid") from exc
+        if not isinstance(raw, Mapping):
+            raise SWERuntimeError(f"{label} inspection is not a mapping")
+        return raw
 
     def image_id(
         self,
@@ -242,32 +433,49 @@ class SWEOfficialRunner:
         run_id: str,
         submission: SWESubmission | None = None,
         gold: bool = False,
+        null: bool = False,
         expected_image_id: str | None = None,
     ) -> SWEOfficialResult:
         safe_component(run_id, "run_id")
-        if gold == (submission is not None):
-            raise SWERuntimeError("official scoring requires exactly one of gold or submission")
+        if sum((gold, submission is not None, null)) != 1:
+            raise SWERuntimeError(
+                "official scoring requires exactly one of gold, null, or submission"
+            )
         artifact_root.mkdir(parents=True, exist_ok=False)
         official_root = artifact_root / "official"
         official_root.mkdir()
+        if (
+            self.adapter == "swebench_verified"
+            and expected_image_id is None
+            and self.runtime.verified_image_pin(instance.instance_id) is not None
+        ):
+            imported = self.prepare_verified_image(
+                instance, artifact_root / "image-source"
+            )
+            assert imported is not None
+            expected_image_id = str(imported["local_image_id"])
         prediction: str
         prediction_path: Path | None = None
         model_name = "gold"
         if gold:
             prediction = "gold"
         else:
-            assert submission is not None
+            if null:
+                patch = ""
+            else:
+                assert submission is not None
+                patch = submission.patch
             prediction_path = artifact_root / (
                 "prediction.jsonl" if self.adapter == "swebench_verified" else "prediction.json"
             )
-            model_name = "autobugfix-subject"
+            model_name = "autobugfix-null" if null else "autobugfix-subject"
             if self.adapter == "swebench_verified":
                 prediction_path.write_text(
                     json.dumps(
                         {
                             "instance_id": instance.instance_id,
                             "model_name_or_path": model_name,
-                            "model_patch": submission.patch,
+                            "model_patch": patch,
                         },
                         sort_keys=True,
                     )
@@ -279,7 +487,7 @@ class SWEOfficialRunner:
                     json.dumps(
                         {
                             instance.instance_id: {
-                                "model_patch": submission.patch,
+                                "model_patch": patch,
                             }
                         },
                         sort_keys=True,
@@ -382,7 +590,7 @@ class SWEOfficialRunner:
                     completed_ids = set(aggregate.get("completed_ids") or [])
                     if instance.instance_id in error_ids:
                         log_path = report_path.parent / "run_instance.log"
-                        if not self._verified_submission_failure(log_path):
+                        if null or not self._verified_submission_failure(log_path):
                             harness_error = "official SWE-bench reported a harness error"
                         resolved = False
                     elif instance.instance_id in empty_ids:
@@ -422,7 +630,7 @@ class SWEOfficialRunner:
                     )
                     if instance.instance_id in error_ids:
                         command_stdout = Path(command.stdout_path)
-                        if not self._live_submission_failure(command_stdout):
+                        if null or not self._live_submission_failure(command_stdout):
                             harness_error = (
                                 "official SWE-bench-Live reported a harness error"
                             )

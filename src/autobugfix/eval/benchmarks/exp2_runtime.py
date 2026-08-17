@@ -327,7 +327,7 @@ class Exp2EvalAuthority:
             or self._docker_digest(
                 qualification.get("image_id"), "qualified image"
             )
-            != identity.config_digest
+            != identity.local_image_id
             or qualification.get("eligible") is not True
         ):
             raise Exp2EvalAuthorityError(
@@ -344,7 +344,14 @@ class Exp2EvalAuthority:
                 != digest_payload(identity.to_dict())
                 or gate.get("qualification_digest")
                 != identity.qualification_digest
+                or gate.get("manifest_digest") != identity.manifest_digest
                 or gate.get("config_digest") != identity.config_digest
+                or gate.get("local_image_id") != identity.local_image_id
+                or tuple(gate.get("layer_digests") or ())
+                != identity.layer_digests
+                or tuple(gate.get("rootfs_diff_ids") or ())
+                != identity.rootfs_diff_ids
+                or gate.get("platform") != identity.platform
             ):
                 raise Exp2EvalAuthorityError(
                     "persisted Exp2 image gate differs from the frozen image"
@@ -372,6 +379,9 @@ class Exp2EvalAuthority:
                 or supplied.get("config_digest") != identity.config_digest
                 or tuple(supplied.get("layer_digests") or ())
                 != identity.layer_digests
+                or supplied.get("local_image_id") != identity.local_image_id
+                or tuple(supplied.get("rootfs_diff_ids") or ())
+                != identity.rootfs_diff_ids
                 or supplied.get("platform") != identity.platform
             ):
                 raise Exp2EvalAuthorityError(
@@ -417,18 +427,19 @@ class Exp2EvalAuthority:
         manifest_digest = self._docker_digest(
             descriptor.get("digest"), "manifest"
         )
-        config_digest = self._docker_digest(raw.get("Id"), "config")
-        raw_layers = root_fs.get("Layers")
-        if not isinstance(raw_layers, list):
+        local_image_id = self._docker_digest(raw.get("Id"), "local image ID")
+        raw_diff_ids = root_fs.get("Layers")
+        if not isinstance(raw_diff_ids, list):
             raise Exp2EvalAuthorityError("Docker image layers are invalid")
-        layer_digests = tuple(
-            self._docker_digest(item, "layer") for item in raw_layers
+        rootfs_diff_ids = tuple(
+            self._docker_digest(item, "rootfs diff ID")
+            for item in raw_diff_ids
         )
         platform = f"{raw.get('Os')}/{raw.get('Architecture')}"
         if (
             manifest_digest != identity.manifest_digest
-            or config_digest != identity.config_digest
-            or layer_digests != identity.layer_digests
+            or local_image_id != identity.local_image_id
+            or rootfs_diff_ids != identity.rootfs_diff_ids
             or platform != identity.platform
         ):
             raise Exp2EvalAuthorityError(
@@ -444,8 +455,10 @@ class Exp2EvalAuthority:
                 "image_identity_digest": digest_payload(identity.to_dict()),
                 "qualification_digest": identity.qualification_digest,
                 "manifest_digest": manifest_digest,
-                "config_digest": config_digest,
-                "layer_digests": list(layer_digests),
+                "config_digest": identity.config_digest,
+                "layer_digests": list(identity.layer_digests),
+                "local_image_id": local_image_id,
+                "rootfs_diff_ids": list(rootfs_diff_ids),
                 "platform": platform,
                 "command_digest": command.to_dict()["record_digest"],
             }
@@ -677,7 +690,7 @@ class Exp2EvalAuthority:
             self._report_path(intent),
             "Exp2 official case report",
         )
-        if report.get("image_digest") != image_gate.get("config_digest"):
+        if report.get("image_digest") != image_gate.get("local_image_id"):
             raise Exp2EvalAuthorityError(
                 "Exp2 report image differs from its trusted image gate"
             )
@@ -773,7 +786,7 @@ class Exp2EvalAuthority:
                 0 if intent.attempt_kind == "scorer_only_retry" else writer_calls
             ),
             failure_stage=str(report.get("failure_stage") or "unknown"),  # type: ignore[arg-type]
-            image_digest=str(image_gate["config_digest"]),
+            image_digest=str(image_gate["local_image_id"]),
             runtime_digest=self.protocol.runtime_digest,
             usage_digest=str(usage["record_digest"]),
             usage_summary=usage,
@@ -979,7 +992,7 @@ class Exp2EvalAuthority:
                 sdk_call_occurred=False,
                 failure_artifact_digest=str(recovery["record_digest"]),
                 submission_digest=intent.frozen_submission_digest,
-                image_digest=str(image_gate["config_digest"]),
+                image_digest=str(image_gate["local_image_id"]),
                 runtime_digest=self.protocol.runtime_digest,
                 failure_stage="infrastructure",
                 writer_attempts=0,
@@ -1137,7 +1150,7 @@ class Exp2EvalAuthority:
             failure_artifact_digest=failure_digest,
             submission_digest=submission_digest,
             workspace_only_preflight_digest=preflight_digest,
-            image_digest=str(image_gate["config_digest"]),
+            image_digest=str(image_gate["local_image_id"]),
             runtime_digest=self.protocol.runtime_digest,
             usage_digest=usage_digest,
             model_calls=len(sdk_records),
@@ -1325,6 +1338,10 @@ def build_exp2_resume_protocol(
     service = EvalBenchmarkService(root)
     operator = OperatorGovernanceService(root)
     swe_protocol = SWEExperimentProtocol.from_yaml(swe_protocol_path)
+    if swe_protocol.verified_image_mode != "pinned-official-import":
+        raise Exp2EvalAuthorityError(
+            "Exp2 v2 requires selected pinned official SWE images"
+        )
     runtime = service.exp2_runtime_identity(swe_protocol_path)
     try:
         verify_record(runtime)
@@ -1368,6 +1385,32 @@ def build_exp2_resume_protocol(
         raise Exp2EvalAuthorityError(
             "SWE protocol cases differ from the frozen Exp2 H0 cohort"
         )
+    selected_all = tuple(
+        item.case_id for item in (*pending.calibration_cases, *pending.h0_cases)
+    )
+    if tuple(runtime.get("verified_image_instance_ids") or ()) != selected_all:
+        raise Exp2EvalAuthorityError(
+            "pinned official image manifest differs from the exact Exp2 cohort/order"
+        )
+    raw_pins = runtime.get("verified_image_pins")
+    if (
+        not isinstance(raw_pins, list)
+        or not all(isinstance(item, Mapping) for item in raw_pins)
+    ):
+        raise Exp2EvalAuthorityError(
+            "Exp2 runtime lacks selected pinned image authority"
+        )
+    runtime_pins = {
+        str(item.get("instance_id") or ""): {
+            "source_ref": str(item.get("source_ref") or ""),
+            "manifest_digest": str(item.get("manifest_digest") or ""),
+        }
+        for item in raw_pins
+    }
+    if tuple(runtime_pins) != selected_all:
+        raise Exp2EvalAuthorityError(
+            "Exp2 runtime pinned image mapping differs from cohort/order"
+        )
     docker = shutil.which("docker")
     if docker is None:
         raise Exp2EvalAuthorityError("Docker executable is unavailable")
@@ -1375,6 +1418,7 @@ def build_exp2_resume_protocol(
     artifact = artifact_root.resolve()
     artifact.mkdir(parents=True, mode=0o700, exist_ok=True)
     for case in (*pending.calibration_cases, *pending.h0_cases):
+        expected_pin = runtime_pins[case.case_id]
         qualification = service.exp2_qualification_receipt(
             swe_protocol_path,
             case.case_id,
@@ -1417,10 +1461,33 @@ def build_exp2_resume_protocol(
             raise Exp2EvalAuthorityError(
                 f"Docker inspection lacks OCI identity for {case.case_id}"
             )
-        raw_layers = root_fs.get("Layers")
-        if not isinstance(raw_layers, list):
+        raw_diff_ids = root_fs.get("Layers")
+        if not isinstance(raw_diff_ids, list):
             raise Exp2EvalAuthorityError(
                 f"Docker inspection layers are invalid for {case.case_id}"
+            )
+        import_path = Path(
+            str(qualification.get("image_source_receipt_path") or "")
+        )
+        trusted_root = service.config.eval.benchmarks.trusted_case_root.resolve()
+        if (
+            not import_path.is_absolute()
+            or not import_path.resolve().is_relative_to(trusted_root)
+        ):
+            raise Exp2EvalAuthorityError(
+                f"pinned image import receipt escapes Eval state: {case.case_id}"
+            )
+        import_receipt = Exp2EvalAuthority._read_yaml_record(
+            import_path,
+            "Exp2 pinned image import receipt",
+        )
+        imported_layers = import_receipt.get("layer_digests")
+        imported_diff_ids = import_receipt.get("rootfs_diff_ids")
+        if not isinstance(imported_layers, list) or not isinstance(
+            imported_diff_ids, list
+        ):
+            raise Exp2EvalAuthorityError(
+                f"pinned image import receipt lacks OCI layers: {case.case_id}"
             )
         identities.append(
             Exp2OciImageIdentity(
@@ -1431,11 +1498,18 @@ def build_exp2_resume_protocol(
                     descriptor.get("digest"), "manifest"
                 ),
                 config_digest=Exp2EvalAuthority._docker_digest(
-                    raw.get("Id"), "config"
+                    import_receipt.get("config_digest"), "config"
                 ),
                 layer_digests=tuple(
                     Exp2EvalAuthority._docker_digest(item, "layer")
-                    for item in raw_layers
+                    for item in imported_layers
+                ),
+                local_image_id=Exp2EvalAuthority._docker_digest(
+                    raw.get("Id"), "local image ID"
+                ),
+                rootfs_diff_ids=tuple(
+                    Exp2EvalAuthority._docker_digest(item, "rootfs diff ID")
+                    for item in raw_diff_ids
                 ),
                 platform=f"{raw.get('Os')}/{raw.get('Architecture')}",
             )
@@ -1443,9 +1517,61 @@ def build_exp2_resume_protocol(
         if Exp2EvalAuthority._docker_digest(
             qualification.get("image_id"),
             "qualified image",
-        ) != identities[-1].config_digest:
+        ) != identities[-1].local_image_id:
             raise Exp2EvalAuthorityError(
                 f"qualified image differs from Docker state for {case.case_id}"
+            )
+        if (
+            qualification.get("image_source_mode")
+            != "pinned-official-import"
+            or qualification.get("image_source_manifest_digest")
+            != expected_pin["manifest_digest"]
+            or qualification.get("image_source_ref")
+            != expected_pin["source_ref"]
+            or identities[-1].manifest_digest
+            != expected_pin["manifest_digest"]
+        ):
+            raise Exp2EvalAuthorityError(
+                f"qualified image lacks pinned official provenance: {case.case_id}"
+            )
+        if (
+            import_receipt.get("record_digest")
+            != qualification.get("image_source_receipt_digest")
+            or import_receipt.get("instance_id") != case.case_id
+            or import_receipt.get("source_ref")
+            != qualification.get("image_source_ref")
+            or import_receipt.get("manifest_digest")
+            != identities[-1].manifest_digest
+            or import_receipt.get("manifest_record_digest")
+            != runtime.get("verified_image_manifest_digest")
+            or import_receipt.get("local_image") != identities[-1].image
+            or Exp2EvalAuthority._docker_digest(
+                import_receipt.get("local_image_id"), "imported image"
+            )
+            != identities[-1].local_image_id
+            or Exp2EvalAuthority._docker_digest(
+                import_receipt.get("config_digest"), "imported config"
+            )
+            != identities[-1].config_digest
+            or import_receipt.get("platform") != identities[-1].platform
+            or tuple(
+                Exp2EvalAuthority._docker_digest(layer, "imported layer")
+                for layer in imported_layers
+            )
+            != identities[-1].layer_digests
+            or tuple(
+                Exp2EvalAuthority._docker_digest(diff_id, "imported diff ID")
+                for diff_id in imported_diff_ids
+            )
+            != identities[-1].rootfs_diff_ids
+            or identities[-1].rootfs_diff_ids
+            != tuple(
+                Exp2EvalAuthority._docker_digest(diff_id, "local diff ID")
+                for diff_id in raw_diff_ids
+            )
+        ):
+            raise Exp2EvalAuthorityError(
+                f"pinned image import receipt drift: {case.case_id}"
             )
     return replace(
         pending,
