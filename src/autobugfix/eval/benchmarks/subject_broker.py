@@ -488,6 +488,7 @@ class SWESubjectBroker:
         request_path: Path,
         result_path: Path,
         capability_root: Path,
+        additional_hidden_paths: tuple[Path, ...] = (),
     ) -> list[str]:
         bubblewrap = shutil.which("bwrap")
         if not bubblewrap:
@@ -553,6 +554,20 @@ class SWESubjectBroker:
                 *self._sandbox_dirs(self.trusted_root, allowed),
             ]
         )
+        additional_mask_argv: list[str] = []
+        for hidden in additional_hidden_paths:
+            resolved = hidden.resolve()
+            if not resolved.exists() or any(
+                resolved.is_relative_to(path) for path in existing_masks
+            ):
+                continue
+            additional_mask_argv.extend(
+                (
+                    "--tmpfs",
+                    str(resolved),
+                    *self._sandbox_dirs(resolved, allowed),
+                )
+            )
         return [
             bubblewrap,
             "--die-with-parent",
@@ -582,6 +597,7 @@ class SWESubjectBroker:
             str(self.project_root),
             *self._sandbox_dirs(self.project_root, allowed),
             *authority_mask_argv,
+            *additional_mask_argv,
             *runtime_binds,
             "--ro-bind",
             str(subject),
@@ -718,7 +734,11 @@ class SWESubjectBroker:
                     + str(candidate)
                 )
             if candidate.exists():
-                entries = (candidate, *candidate.rglob("*")) if candidate.is_dir() else (candidate,)
+                entries = (
+                    (candidate, *candidate.rglob("*"))
+                    if candidate.is_dir()
+                    else (candidate,)
+                )
                 for entry in entries:
                     if entry.is_symlink():
                         raise SWESubjectBrokerError(
@@ -740,7 +760,7 @@ class SWESubjectBroker:
         exposed_credentials = tuple(
             str(path.resolve())
             for path in credential_paths
-            if path.exists() or path.is_symlink()
+            if (path.exists() or path.is_symlink())
         )
         if exposed_credentials:
             raise SWESubjectBrokerError(
@@ -904,6 +924,7 @@ class SWESubjectBroker:
         codex_backend_factory: Callable[[str, int, int], CodexBackend] | None = None,
         execution_mode: SWEExecutionMode = "protected",
         disposable_root: Path | None = None,
+        additional_hidden_paths: tuple[Path, ...] = (),
     ) -> FrozenSWESubmission:
         try:
             return self._run_impl(
@@ -923,6 +944,7 @@ class SWESubjectBroker:
                 codex_backend_factory=codex_backend_factory,
                 execution_mode=execution_mode,
                 disposable_root=disposable_root,
+                additional_hidden_paths=additional_hidden_paths,
             )
         except BaseException as exc:
             root = artifact_root.resolve()
@@ -981,6 +1003,7 @@ class SWESubjectBroker:
         codex_backend_factory: Callable[[str, int, int], CodexBackend] | None = None,
         execution_mode: SWEExecutionMode = "protected",
         disposable_root: Path | None = None,
+        additional_hidden_paths: tuple[Path, ...] = (),
     ) -> FrozenSWESubmission:
         try:
             verify_record(subject_runtime)
@@ -1060,22 +1083,44 @@ class SWESubjectBroker:
                     "TEMP": str(temporary_root),
                 }
             )
-            preflight = self._workspace_only_preflight(
-                workspace_root=root,
-                disposable_root=disposable_root,
-                artifact_root=output_root,
-                authority_roots=(
-                    self.project_root,
-                    self.trusted_root,
-                    self.config.eval.benchmarks.cache_root,
-                    self.config.operator.state.root,
-                    self.config.operator.artifacts.root,
-                    self.config.operator.worktrees.root,
-                    self.project_root / ".autobugfix-memory",
-                ),
-                environment=workspace_environment,
-                credential_paths=(Path.home() / ".codex/auth.json",),
+            authority_roots = (
+                self.project_root,
+                self.trusted_root,
+                self.config.eval.benchmarks.cache_root,
+                self.config.operator.state.root,
+                self.config.operator.artifacts.root,
+                self.config.operator.worktrees.root,
+                self.project_root / ".autobugfix-memory",
+                *additional_hidden_paths,
             )
+            try:
+                preflight = self._workspace_only_preflight(
+                    workspace_root=root,
+                    disposable_root=disposable_root,
+                    artifact_root=output_root,
+                    authority_roots=authority_roots,
+                    environment=workspace_environment,
+                    credential_paths=(Path.home() / ".codex/auth.json",),
+                )
+            except BaseException as exc:
+                rejection = record_with_digest(
+                    {
+                        "schema": "autobugfix-swe-workspace-only-preflight-rejection-v1",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "workspace_root": str(root),
+                        "disposable_root": str(disposable),
+                        "artifact_root": str(output_root),
+                        "authority_roots": sorted(
+                            str(path.resolve()) for path in authority_roots
+                        ),
+                        "sdk_call_occurred": False,
+                    }
+                )
+                (output_root / "workspace-only-preflight-rejection.yaml").write_text(
+                    yaml.safe_dump(rejection, sort_keys=False),
+                    encoding="utf-8",
+                )
+                raise
             (output_root / "workspace-only-preflight.json").write_text(
                 json.dumps(preflight, sort_keys=True) + "\n", encoding="utf-8"
             )
@@ -1252,6 +1297,8 @@ class SWESubjectBroker:
                     self.config.operator.state.root,
                     self.config.operator.artifacts.root,
                     self.project_root / ".autobugfix-memory",
+                    *additional_hidden_paths,
+                    Path.home(),
                     self.project_root,
                     subject,
                     main,
@@ -1297,6 +1344,7 @@ class SWESubjectBroker:
                         request_path,
                         result_path,
                         capability_root,
+                        additional_hidden_paths,
                     )
                     if execution_mode == "protected"
                     else [
@@ -1308,8 +1356,9 @@ class SWESubjectBroker:
                         str(result_path),
                     ]
                 )
-                if execution_environment is None:
-                    execution_environment = self._subject_environment()
+                execution_environment = dict(
+                    workspace_environment or self._subject_environment()
+                )
                 if execution_mode == "workspace_only":
                     execution_environment["HOME"] = str(broker_home)
                     execution_environment["PYTHONPATH"] = str(subject / "src")
@@ -1508,6 +1557,9 @@ class SWESubjectBroker:
                 "sdk_call_receipt_digests": sdk_call_receipt_digests,
                 "workspace_only_preflight_digest": (
                     str(preflight["record_digest"]) if preflight is not None else None
+                ),
+                "additional_hidden_paths": sorted(
+                    str(path.resolve()) for path in additional_hidden_paths
                 ),
             }
         )

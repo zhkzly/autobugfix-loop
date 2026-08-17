@@ -76,6 +76,7 @@ from autobugfix.eval.benchmarks.swe_runtime import (
     SWERuntime,
     SWERuntimeError,
 )
+from autobugfix.eval.benchmarks.swe_submission import SWESubmissionAuthority
 from autobugfix.eval.benchmarks.swe_verified import SWEVerifiedAdapter
 from autobugfix.eval.benchmarks.verify import (
     managed_verifier_for_receipt,
@@ -120,6 +121,99 @@ class EvalBenchmarkService:
         return self._guard_authority_resolver(
             self.project_root,
             self.config.eval.benchmarks.guard.trusted_ref,
+        )
+
+    def exp2_runtime_identity(self, protocol_path: Path) -> dict[str, Any]:
+        """Return the trusted scorer and subject-runtime identity used by Exp2."""
+
+        protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+        runner = self._swe_adapter("swebench_verified")
+        subject_runtime = runner.runtime.subject_runtime_identity(
+            protocol.codex_runtime
+        )
+        evaluator_runtime_id = runner.runtime.evaluator_runtime_id
+        if not evaluator_runtime_id.startswith("sha256:"):
+            raise EvalBenchmarkServiceError(
+                "Exp2 evaluator runtime identity is unavailable"
+            )
+        return record_with_digest(
+            {
+                "schema": "autobugfix-exp2-eval-runtime-identity-v2",
+                "swe_protocol_sha256": digest_file(protocol_path),
+                "swe_protocol_digest": protocol.protocol_digest,
+                "dataset_revision": runner.snapshot.revision,
+                "dataset_snapshot_sha256": runner.snapshot.sha256,
+                "scorer_digest": evaluator_runtime_id.removeprefix("sha256:"),
+                "runtime_digest": subject_runtime["record_digest"],
+                "model": protocol.codex_runtime.model,
+                "reasoning_effort": protocol.codex_runtime.reasoning_effort,
+                "max_attempts": protocol.codex_runtime.max_attempts,
+                "timeout_seconds": protocol.codex_runtime.timeout_seconds,
+                "case_concurrency": protocol.case_concurrency,
+            }
+        )
+
+    def verify_exp2_frozen_submission(
+        self,
+        *,
+        submission_digest: str,
+        expected_case_token: str,
+        expected_subject_sha: str,
+        expected_subject_tree: str,
+    ) -> dict[str, Any]:
+        """Load and re-verify one content-addressed Exp2 submission."""
+
+        if not re.fullmatch(r"[0-9a-f]{64}", submission_digest):
+            raise EvalBenchmarkServiceError(
+                "Exp2 frozen submission digest is invalid"
+            )
+        trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
+        matches = tuple(
+            (trusted_root / "swe" / "submissions" / "swebench_verified").glob(
+                f"*/{submission_digest}"
+            )
+        )
+        if len(matches) != 1:
+            raise EvalBenchmarkServiceError(
+                "Exp2 frozen submission is not uniquely present"
+            )
+        frozen = SWESubmissionAuthority(trusted_root).load(matches[0])
+        if (
+            frozen.submission.case_token != expected_case_token
+            or frozen.submission.subject_sha != expected_subject_sha
+            or frozen.submission.subject_tree != expected_subject_tree
+            or frozen.submission.record["record_digest"] != submission_digest
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 frozen submission differs from its case intent"
+            )
+        changed_files = []
+        additions = 0
+        deletions = 0
+        for line in frozen.submission.patch.splitlines():
+            if line.startswith("diff --git a/") and " b/" in line:
+                changed_files.append(line.split(" b/", 1)[1])
+            elif line.startswith("+") and not line.startswith("+++"):
+                additions += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                deletions += 1
+        return record_with_digest(
+            {
+                "schema": "autobugfix-exp2-frozen-submission-verification-v2",
+                "submission_digest": submission_digest,
+                "case_token": frozen.submission.case_token,
+                "subject_sha": frozen.submission.subject_sha,
+                "subject_tree": frozen.submission.subject_tree,
+                "patch_summary": {
+                    "changed_files": len(set(changed_files)),
+                    "additions": additions,
+                    "deletions": deletions,
+                    "changed_lines": additions + deletions,
+                    "empty_patch": not bool(frozen.submission.patch.strip()),
+                    "patch_sha256": frozen.submission.patch_sha256,
+                },
+                "frozen_identity": frozen.identity(),
+            }
         )
 
     def _doctor_runtime(
@@ -621,6 +715,21 @@ class EvalBenchmarkService:
         return "bugfix"
 
     @staticmethod
+    def _exp2_failure_stage(
+        broker_result: Mapping[str, Any],
+        *,
+        resolved: bool,
+    ) -> str:
+        if resolved:
+            return "unknown"
+        state = str(broker_result.get("execution_state") or "")
+        if state == "writer_rework_required":
+            return "visible_verifier"
+        if state == "blocked":
+            return "execution"
+        return "official_eval"
+
+    @staticmethod
     def _swe_public_attachments(*texts: str) -> tuple[SWEAttachment, ...]:
         references: list[str] = []
         patterns = (
@@ -666,6 +775,8 @@ class EvalBenchmarkService:
         timeout_seconds: int = 900,
         execution_mode: SWEExecutionMode = "protected",
         disposable_root: Path | None = None,
+        out_root: Path | None = None,
+        additional_hidden_paths: tuple[Path, ...] = (),
     ) -> dict[str, Any]:
         protocol = SWEExperimentProtocol.from_yaml(protocol_path)
         if (
@@ -689,14 +800,23 @@ class EvalBenchmarkService:
                 "SWE-bench-Live identity belongs to the sealed Guard"
             )
         runner = self._swe_adapter(adapter)
-        root = (
-            self.config.eval.benchmarks.trusted_case_root
-            / "swe"
-            / "development-runs"
-            / adapter
-            / identity
-            / run_name
-        )
+        if out_root is None:
+            root = (
+                self.config.eval.benchmarks.trusted_case_root
+                / "swe"
+                / "development-runs"
+                / adapter
+                / identity
+                / run_name
+            )
+        else:
+            output = out_root.resolve()
+            trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
+            if not output.is_relative_to(trusted_root):
+                raise EvalBenchmarkServiceError(
+                    "SWE development output must remain in trusted Eval state"
+                )
+            root = output / run_name
         if root.exists():
             raise EvalBenchmarkServiceError("SWE development run_id already exists")
         inspection_root = root / "inspection"
@@ -757,6 +877,7 @@ class EvalBenchmarkService:
             experiment_role="optimization",
             execution_mode=execution_mode,
             disposable_root=disposable_root,
+            additional_hidden_paths=additional_hidden_paths,
         )
         broker_result_path = root / "subject-run" / "broker-result.yaml"
         if broker_result_path.is_symlink() or not broker_result_path.is_file():
@@ -815,6 +936,12 @@ class EvalBenchmarkService:
                 "broker_result_digest": broker_result["record_digest"],
                 "task_worktree_path": broker_result.get("task_worktree_path"),
                 "workspace_only_preflight_digest": preflight_digest,
+                "execution_ledger_digest": broker_result.get(
+                    "execution_ledger_digest"
+                ),
+                "sdk_call_receipt_digests": list(
+                    broker_result.get("sdk_call_receipt_digests") or []
+                ),
             }
         )
         development_binding_path = root / "subject-run" / "subject-binding.yaml"
@@ -878,6 +1005,11 @@ class EvalBenchmarkService:
                 "noninterference_digest": noninterference["record_digest"],
                 "noninterference_path": str(noninterference_path),
                 "execution_receipt": execution_receipt,
+                "image_digest": image_id.removeprefix("sha256:"),
+                "failure_stage": self._exp2_failure_stage(
+                    broker_result,
+                    resolved=official.resolved,
+                ),
                 "resolved": official.resolved,
                 "harness_error": official.harness_error,
             }
@@ -899,6 +1031,8 @@ class EvalBenchmarkService:
         run_id: str,
         execution_mode: SWEExecutionMode = "protected",
         disposable_root: Path | None = None,
+        out_root: Path | None = None,
+        additional_hidden_paths: tuple[Path, ...] = (),
     ) -> dict[str, Any]:
         """Adapt an existing H0 development run into Exp2 calibration input.
 
@@ -915,6 +1049,8 @@ class EvalBenchmarkService:
             run_id=run_id,
             execution_mode=execution_mode,
             disposable_root=disposable_root,
+            out_root=out_root,
+            additional_hidden_paths=additional_hidden_paths,
         )
         trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
         official_source = Path(str(report.get("official_result_path") or ""))
@@ -970,7 +1106,7 @@ class EvalBenchmarkService:
                 "subject_sha": report["executed_subject_sha"],
             }
         )
-        return record_with_digest(
+        result = record_with_digest(
             {
                 "schema": "autobugfix-exp2-calibration-case-v1",
                 "source_report_digest": report["record_digest"],
@@ -993,9 +1129,218 @@ class EvalBenchmarkService:
                 "execution_receipt": dict(
                     report.get("execution_receipt") or {}
                 ),
+                "image_digest": report.get("image_digest"),
+                "failure_stage": report.get("failure_stage"),
                 "harness_error": report["harness_error"],
             }
         )
+        run_root = Path(str(report.get("run_root") or "")).resolve()
+        trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
+        if not run_root.is_relative_to(trusted_root) or not run_root.is_dir():
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration run root is outside trusted Eval state"
+            )
+        write_yaml(run_root / "exp2-calibration-case-report.yaml", result)
+        return result
+
+    def rescore_swe_exp2_submission(
+        self,
+        protocol_path: Path,
+        *,
+        instance_id: str,
+        submission_digest: str,
+        source_run_root: Path,
+        out_root: Path,
+        run_id: str,
+    ) -> dict[str, Any]:
+        """Retry only the official scorer for one verified frozen submission."""
+
+        protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+        identity = safe_component(instance_id, "instance_id")
+        run_name = safe_component(run_id, "run_id")
+        if not re.fullmatch(r"[0-9a-f]{64}", submission_digest):
+            raise EvalBenchmarkServiceError(
+                "Exp2 scorer retry submission digest is invalid"
+            )
+        trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
+        source_root = source_run_root.resolve()
+        output = out_root.resolve()
+        if (
+            not source_root.is_relative_to(trusted_root)
+            or not source_root.is_dir()
+            or not output.is_relative_to(trusted_root)
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 scorer retry roots must remain in trusted Eval state"
+            )
+        root = output / run_name
+        if root.exists():
+            raise EvalBenchmarkServiceError(
+                "Exp2 scorer retry run_id already exists"
+            )
+
+        runner = self._swe_adapter("swebench_verified")
+        instance = runner.load_instance(identity, root / "inspection")
+        image_id = runner.image_id(instance, root / "image", allow_pull=False)
+        matches = tuple(
+            (trusted_root / "swe" / "submissions" / "swebench_verified").glob(
+                f"*/{submission_digest}"
+            )
+        )
+        if len(matches) != 1:
+            raise EvalBenchmarkServiceError(
+                "Exp2 scorer retry cannot resolve one frozen submission"
+            )
+        frozen = SWESubmissionAuthority(trusted_root).load(matches[0])
+        if (
+            frozen.submission.record["record_digest"] != submission_digest
+            or frozen.submission.base_commit != instance.base_commit
+            or not frozen.submission.subject_sha
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 scorer retry frozen submission identity drift"
+            )
+
+        broker_path = source_root / "subject-run" / "broker-result.yaml"
+        preflight_path = (
+            source_root / "subject-run" / "workspace-only-preflight.json"
+        )
+        evidence_root = (
+            source_root / "subject-run" / "frozen-execution-evidence"
+        )
+        ledger_path = evidence_root / "execution-ledger.json"
+        subject_binding_path = evidence_root / "subject-binding.yaml"
+        if (
+            broker_path.is_symlink()
+            or ledger_path.is_symlink()
+            or subject_binding_path.is_symlink()
+            or not broker_path.is_file()
+            or not ledger_path.is_file()
+            or not subject_binding_path.is_file()
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 scorer retry lacks frozen Execution evidence"
+            )
+        broker = yaml.safe_load(broker_path.read_text(encoding="utf-8")) or {}
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        subject_binding = yaml.safe_load(
+            subject_binding_path.read_text(encoding="utf-8")
+        ) or {}
+        execution_mode = str(
+            broker.get("execution_mode") if isinstance(broker, Mapping) else ""
+        )
+        preflight: Mapping[str, Any] | None = None
+        if execution_mode == "workspace_only":
+            if preflight_path.is_symlink() or not preflight_path.is_file():
+                raise EvalBenchmarkServiceError(
+                    "Exp2 scorer retry lacks workspace-only preflight evidence"
+                )
+            loaded_preflight = json.loads(
+                preflight_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(loaded_preflight, Mapping):
+                raise EvalBenchmarkServiceError(
+                    "Exp2 scorer retry preflight evidence is invalid"
+                )
+            preflight = loaded_preflight
+        if not all(
+            isinstance(item, Mapping)
+            for item in (broker, ledger, subject_binding)
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 scorer retry Execution evidence is invalid"
+            )
+        for record in (broker, ledger, subject_binding):
+            verify_record(record)
+        if preflight is not None:
+            verify_record(preflight)
+        if (
+            broker.get("submission_digest") != submission_digest
+            or broker.get("executed_subject_sha") != frozen.submission.subject_sha
+            or broker.get("executed_subject_tree") != frozen.submission.subject_tree
+            or execution_mode not in {"protected", "workspace_only"}
+            or (
+                execution_mode == "workspace_only"
+                and (
+                    preflight is None
+                    or preflight.get("direct_sdk_in_process") is not True
+                    or preflight.get("sdk_bubblewrap") is not False
+                    or preflight.get("outer_bubblewrap") is not False
+                )
+            )
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 scorer retry Execution evidence binding drift"
+            )
+        sdk_receipts = broker.get("sdk_call_receipt_digests")
+        if not isinstance(sdk_receipts, list) or not sdk_receipts:
+            raise EvalBenchmarkServiceError(
+                "Exp2 scorer retry source has no Writer SDK receipt"
+            )
+        command = broker.get("command")
+        if not isinstance(command, Mapping):
+            raise EvalBenchmarkServiceError(
+                "Exp2 scorer retry source command receipt is invalid"
+            )
+        execution_receipt = record_with_digest(
+            {
+                "schema": "autobugfix-exp2-execution-receipt-v1",
+                "execution_mode": execution_mode,
+                "direct_sdk_in_process": execution_mode == "workspace_only",
+                "outer_bubblewrap": execution_mode == "protected",
+                "broker_command_digest": command.get("record_digest"),
+                "broker_result_digest": broker.get("record_digest"),
+                "task_worktree_path": broker.get("task_worktree_path"),
+                "workspace_only_preflight_digest": (
+                    preflight.get("record_digest")
+                    if preflight is not None
+                    else None
+                ),
+                "execution_ledger_digest": ledger.get("record_digest"),
+                "sdk_call_receipt_digests": list(sdk_receipts),
+            }
+        )
+        before = frozen.identity()
+        official = runner.score(
+            instance,
+            root / "official-score",
+            run_id=f"retry-{run_name}",
+            submission=frozen.submission,
+            expected_image_id=image_id,
+        )
+        official_record = official.to_dict()
+        noninterference = self.submission_noninterference(
+            frozen,
+            before,
+            official_result_digest=str(official_record["record_digest"]),
+        )
+        subject_runtime = runner.runtime.subject_runtime_identity(
+            protocol.codex_runtime
+        )
+        report = record_with_digest(
+            {
+                "schema": "autobugfix-exp2-scorer-retry-report-v2",
+                "instance_id": identity,
+                "source_run_root": str(source_root),
+                "executed_subject_sha": frozen.submission.subject_sha,
+                "executed_subject_tree": frozen.submission.subject_tree,
+                "submission_digest": submission_digest,
+                "subject_runtime_digest": subject_runtime["record_digest"],
+                "memory_digest": subject_binding.get("memory_digest"),
+                "image_digest": image_id.removeprefix("sha256:"),
+                "failure_stage": self._exp2_failure_stage(
+                    broker,
+                    resolved=official.resolved,
+                ),
+                "official_result": official_record,
+                "noninterference": noninterference,
+                "execution_receipt": execution_receipt,
+                "resolved": official.resolved,
+                "harness_error": official.harness_error,
+            }
+        )
+        write_yaml(root / "scorer-retry-report.yaml", report)
+        return report
 
     @staticmethod
     def submission_noninterference(
@@ -1107,6 +1452,7 @@ class EvalBenchmarkService:
         authority_root: Path,
         execution_mode: SWEExecutionMode = "protected",
         disposable_root: Path | None = None,
+        additional_hidden_paths: tuple[Path, ...] = (),
     ) -> dict[str, Any]:
         current_subject_runtime = runner.runtime.subject_runtime_identity(treatment)
         if current_subject_runtime.get("record_digest") != subject_runtime.get(
@@ -1203,6 +1549,7 @@ class EvalBenchmarkService:
             codex_backend_factory=codex_backend_factory,
             execution_mode=execution_mode,
             disposable_root=disposable_root,
+            additional_hidden_paths=additional_hidden_paths,
         )
         broker_result_path = run_root / "subject-run" / "broker-result.yaml"
         if broker_result_path.is_symlink() or not broker_result_path.is_file():
@@ -1271,6 +1618,12 @@ class EvalBenchmarkService:
                 "broker_result_digest": broker_result["record_digest"],
                 "task_worktree_path": broker_result.get("task_worktree_path"),
                 "workspace_only_preflight_digest": preflight_digest,
+                "execution_ledger_digest": broker_result.get(
+                    "execution_ledger_digest"
+                ),
+                "sdk_call_receipt_digests": list(
+                    broker_result.get("sdk_call_receipt_digests") or []
+                ),
             }
         )
         frozen_before = frozen.identity()
@@ -1312,6 +1665,11 @@ class EvalBenchmarkService:
                 "resolved": official.resolved,
                 "harness_error": official.harness_error,
                 "execution_receipt": execution_receipt,
+                "image_digest": image_id.removeprefix("sha256:"),
+                "failure_stage": self._exp2_failure_stage(
+                    broker_result,
+                    resolved=official.resolved,
+                ),
             }
         )
         write_yaml(run_root / "formal-case-report.yaml", report)
@@ -1422,6 +1780,7 @@ class EvalBenchmarkService:
         expected_binding_kinds: set[str],
         execution_mode: SWEExecutionMode = "protected",
         disposable_root: Path | None = None,
+        additional_hidden_paths: tuple[Path, ...] = (),
     ) -> dict[str, Any]:
         """Run one explicitly bound Exp2 public case.
 
@@ -1510,6 +1869,7 @@ class EvalBenchmarkService:
             authority_root=trusted_root,
             execution_mode=execution_mode,
             disposable_root=disposable_root,
+            additional_hidden_paths=additional_hidden_paths,
         )
 
     @staticmethod
@@ -1814,6 +2174,29 @@ class EvalBenchmarkService:
             if record.get("schema") == "autobugfix-swe-qualification-v4"
             and record.get("eligible")
         ]
+
+    def exp2_qualification_receipt(
+        self,
+        protocol_path: Path,
+        instance_id: str,
+    ) -> dict[str, Any]:
+        """Return one current eligible Verified qualification for Exp2."""
+
+        protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+        identity = safe_component(instance_id, "instance_id")
+        matches = [
+            record
+            for record in self._swe_qualification_pool(
+                protocol,
+                "swebench_verified",
+            )
+            if record.get("instance_id") == identity
+        ]
+        if len(matches) != 1:
+            raise EvalBenchmarkServiceError(
+                f"Exp2 case lacks one current eligible qualification: {identity}"
+            )
+        return dict(matches[0])
 
     @staticmethod
     def _swe_first_wave(index: int, *, role: str) -> int:
@@ -2345,6 +2728,184 @@ class EvalBenchmarkService:
             "encrypted_bundle_sha256": bundle_digest,
             "waves": {3: 3, 8: 8, 16: 16},
             "wave_tokens": wave_tokens,
+        }
+
+    def prepare_exp2_resume_manifest(
+        self,
+        protocol_path: Path,
+    ) -> dict[str, Any]:
+        """Prepare the ten-case Verified-only visible manifest for Exp2 MVP."""
+
+        protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+        runner = self._swe_adapter("swebench_verified")
+        evaluator_runtime_id = runner.runtime.evaluator_runtime_id
+        if not evaluator_runtime_id.startswith("sha256:"):
+            raise EvalBenchmarkServiceError(
+                "Exp2 evaluator runtime identity is unavailable"
+            )
+        subject_runtime = runner.runtime.subject_runtime_identity(
+            protocol.codex_runtime
+        )
+        qualifications = {
+            str(record["instance_id"]): record
+            for record in self._swe_qualification_pool(
+                protocol,
+                "swebench_verified",
+            )
+        }
+        selected = tuple(
+            item.instance_id for item in protocol.optimization_cases
+        )
+        if set(qualifications) & set(selected) != set(selected):
+            missing = sorted(set(selected) - set(qualifications))
+            raise EvalBenchmarkServiceError(
+                "Exp2 visible manifest lacks current qualifications: "
+                + ", ".join(missing)
+            )
+        task_types = {
+            item.instance_id: item.task_type
+            for item in protocol.optimization_cases
+        }
+        preparation_id = "exp2-prep-" + digest_payload(
+            {
+                "protocol_digest": protocol.protocol_digest,
+                "qualification_digests": [
+                    qualifications[case_id]["record_digest"]
+                    for case_id in selected
+                ],
+                "evaluator_runtime_id": evaluator_runtime_id,
+                "subject_runtime_digest": subject_runtime["record_digest"],
+            }
+        )[:24]
+        validation_root = (
+            self.config.eval.benchmarks.trusted_case_root
+            / "swe"
+            / "exp2-preparation-runs"
+            / preparation_id
+        )
+        visible_cases = []
+        for index, case_id in enumerate(selected):
+            record = qualifications[case_id]
+            instance = runner.load_instance(
+                case_id,
+                validation_root / "inspection" / case_id,
+            )
+            materialized = self._validate_swe_qualification_source(
+                runner,
+                instance,
+                record,
+                validation_root / "materialization" / case_id,
+            )
+            token = "opt-" + hashlib.sha256(
+                f"{protocol.protocol_digest}:{case_id}".encode("utf-8")
+            ).hexdigest()[:24]
+            visible = self._swe_visible_case(
+                runner,
+                instance,
+                record,
+                case_token=token,
+                first_wave=self._swe_first_wave(index, role="optimization"),
+                task_type=task_types[case_id],
+            )
+            if (
+                visible.source_snapshot_digest != materialized.source_digest
+                or materialized.image_id != record.get("image_id")
+            ):
+                raise EvalBenchmarkServiceError(
+                    f"Exp2 qualification materialization drift: {case_id}"
+                )
+            visible_cases.append(
+                record_with_digest(
+                    {
+                        "schema": "autobugfix-swe-optimization-case-v1",
+                        "benchmark_instance_id": case_id,
+                        "visible_case": visible.to_dict(),
+                    }
+                )
+            )
+        code_identity = self.guard_authority()
+        preparation = record_with_digest(
+            {
+                "schema": "autobugfix-exp2-visible-preparation-v2",
+                "preparation_id": preparation_id,
+                "protocol_digest": protocol.protocol_digest,
+                "runtime_id": evaluator_runtime_id,
+                "qualification_contract_digest": protocol.qualification_contract_digest,
+                "evaluator_runtime_id": evaluator_runtime_id,
+                "codex_runtime": protocol.codex_runtime.to_dict(),
+                "subject_runtime": subject_runtime,
+                "h0_subject": protocol.h0_subject,
+                "h0_tree": rev_parse(
+                    self.project_root,
+                    f"{protocol.h0_subject}^{{tree}}",
+                ),
+                "optimization_cases": visible_cases,
+                "optimization_count": len(visible_cases),
+                "qualification_digests": [
+                    qualifications[case_id]["record_digest"]
+                    for case_id in selected
+                ],
+                "code_identity": code_identity.to_dict(),
+            }
+        )
+        public_manifest = record_with_digest(
+            {
+                "schema": "autobugfix-swe-sealed-manifest-v2",
+                "manifest_id": f"exp2-resume-{preparation_id}",
+                "preparation_digest": preparation["record_digest"],
+                "protocol_digest": protocol.protocol_digest,
+                "runtime_id": evaluator_runtime_id,
+                "guard_runtime_id": "not_run",
+                "docker_authority_digest": qualifications[selected[0]][
+                    "docker_authority_digest"
+                ],
+                "qualification_contract_digest": protocol.qualification_contract_digest,
+                "evaluator_runtime_id": evaluator_runtime_id,
+                "codex_runtime": protocol.codex_runtime.to_dict(),
+                "subject_runtime": subject_runtime,
+                "h0_subject": protocol.h0_subject,
+                "h0_tree": preparation["h0_tree"],
+                "optimization_cases": visible_cases,
+                "optimization_count": len(visible_cases),
+                "guard": {
+                    "guard_id": "not_run",
+                    "code_identity": code_identity.to_dict(),
+                    "bundle_sha256": "not_run",
+                    "holdout_count": 0,
+                    "waves": {"3": 3, "8": 8, "16": 16},
+                },
+                "reserve_execution": "not_run",
+                "live_execution": "not_run",
+                "pro_execution": "not_run",
+            }
+        )
+        manifest_id = str(public_manifest["manifest_id"])
+        manifest_path = self.store.write_visible_yaml(
+            manifest_id,
+            "manifest.yaml",
+            public_manifest,
+        )
+        optimization_path = self.store.write_visible_jsonl_rows(
+            manifest_id,
+            "optimization.jsonl",
+            visible_cases,
+        )
+        preparation_path = self.store.write_swe_record(
+            "exp2-preparations",
+            "swebench_verified",
+            preparation_id,
+            preparation,
+        )
+        return {
+            "manifest_id": manifest_id,
+            "manifest_digest": public_manifest["record_digest"],
+            "visible_manifest": str(manifest_path),
+            "optimization_dataset": str(optimization_path),
+            "optimization_count": len(visible_cases),
+            "preparation_path": str(preparation_path),
+            "reserve": "not_run",
+            "live": "not_run",
+            "pro": "not_run",
         }
 
     @staticmethod

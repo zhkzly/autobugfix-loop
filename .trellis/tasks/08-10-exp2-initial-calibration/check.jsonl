@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/autobugfix-loop-harness-contract.md", "reason": "Check that real Execution, official Eval, artifacts, isolation, terminal states, and validation are implemented rather than represented by fake or schema-only paths."}
+{"file": ".trellis/spec/backend/operator-governance-policy.md", "reason": "Check that candidate provenance and rollback come from service-owned Operator state and that caller YAML never supplies authority."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Check role configuration resolution, frozen role behavior, and required tests for code that launches SDK roles."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Check event typing, reducer ownership, round-trip survival, predecessor binding, and no private consumer-specific parsing."}
+{"file": ".trellis/tasks/archive/2026-08/08-09-exp2-workspace-only-runner/research.md", "reason": "Check that the reduced MVP preserves the original experimental boundaries, namespace separation, and prohibited claims."}
+{"file": ".trellis/tasks/08-10-exp2-initial-calibration/reviews/independent-paper-audit-synthesis-20260817.md", "reason": "Use the independently source-verified gaps as release-blocking review cases, while excluding unsupported fixed sample-size and paper claims."}

@@ -1,0 +1,62 @@
+schema_version: 3
+protocol_id: swe-exp2-resume-mvp-v2
+h0_subject: f529f09de53183d7ddbf9e05b31a9d3b3fbde008
+codex_runtime:
+  model: gpt-5.4-mini
+  reasoning_effort: low
+  service_tier: null
+  sdk_package: openai-codex
+  sdk_version: 0.144.4
+  cli_package: openai-codex-cli-bin
+  cli_version: 0.144.4
+  max_attempts: 2
+  timeout_seconds: 900
+case_concurrency: 1
+qualification_repeats: 2
+optimization:
+  dataset: princeton-nlp/SWE-bench_Verified
+  count: 10
+  cases:
+    - instance_id: astropy__astropy-13398
+      task_type: feature
+    - instance_id: django__django-10097
+      task_type: bugfix
+    - instance_id: matplotlib__matplotlib-24627
+      task_type: bugfix
+    - instance_id: pydata__xarray-2905
+      task_type: bugfix
+    - instance_id: sympy__sympy-13091
+      task_type: feature
+    - instance_id: mwaskom__seaborn-3187
+      task_type: bugfix
+    - instance_id: psf__requests-6028
+      task_type: bugfix
+    - instance_id: pytest-dev__pytest-10051
+      task_type: bugfix
+    - instance_id: scikit-learn__scikit-learn-13439
+      task_type: feature
+    - instance_id: sphinx-doc__sphinx-9229
+      task_type: maintenance
+holdout:
+  dataset: SWE-bench-Live/MultiLang
+  count: 6
+  excluded_instances:
+    - formbricks__formbricks-6413
+waves:
+  "3": 3
+  "8": 8
+  "16": 16
+upstreams:
+  swebench_version: 4.1.0
+  swebench_commit: 726c5461e2ef52d83cf1ea2107870a8bb3328d57
+  swebench_tree: f178530b37202c549b1b2b3300db2da90da648db
+  verified_dataset_revision: c104f840cc67f8b6eec6f759ebc8b2693d585d4a
+  live_repository: https://github.com/microsoft/SWE-bench-Live.git
+  live_commit: c5ea7e48b7b8bb0f4bcbbceb182a09dadfabfc2c
+  live_tree: aaa2c4a59dab49c54ef6576d1190dfb590c2fd1d
+  live_launch_repository: https://github.com/microsoft/RepoLaunch
+  live_launch_commit: ff359c6edb9aaa400fff3fe819fa483a5cc2ee23
+  live_launch_tree: 1491dbf642336270565700707393f24dadbe190a
+  live_dataset_revision: 608f7ae9ab8ea1f9f0d030fe04562cf6bd1a0c8b
+  platform: linux/amd64
+  verified_image_mode: local-build

@@ -92,6 +92,15 @@ def initialized_study(tmp_path: Path):
     return root, service
 
 
+def test_empty_study_memory_matches_exp2_fixture_digest(tmp_path: Path) -> None:
+    _, service = initialized_study(tmp_path)
+
+    assert (
+        service.store.read_study("budget-study").memory_digest
+        == service.exp2_empty_memory_digest()
+    )
+
+
 def test_study_rejects_arbitrary_memory_snapshot_root(tmp_path: Path):
     root = make_operator_repo(tmp_path)
     service = service_for(root, tmp_path)

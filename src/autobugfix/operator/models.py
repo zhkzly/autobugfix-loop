@@ -39,7 +39,10 @@ VALID_CHECKPOINT_NAMES: tuple[str, ...] = ("H0", "H_bug", "H_general")
 VALID_BUDGET_WAVES: tuple[int, ...] = (3, 8, 16)
 VALID_USAGE_STATUSES: tuple[str, ...] = ("RESERVED", "COMPLETED", "INDETERMINATE")
 VALID_STUDY_METRIC_KINDS: tuple[str, ...] = ("BASELINE", "CANDIDATE")
-VALID_STUDY_EVIDENCE_KINDS: tuple[str, ...] = ("optimization_case",)
+VALID_STUDY_EVIDENCE_KINDS: tuple[str, ...] = (
+    "optimization_case",
+    "exp2_source_projection",
+)
 
 
 class OperatorModelError(ValueError):
