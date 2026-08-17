@@ -1332,7 +1332,7 @@ def build_exp2_resume_protocol(
     execution_allowlist: tuple[str, ...],
     artifact_root: Path,
 ) -> Exp2ResumeProtocol:
-    """Build a qualified v2 protocol from trusted runtime and local OCI state."""
+    """Build a qualified v2 protocol from replayed receipts and local OCI state."""
 
     root = project_root.resolve()
     service = EvalBenchmarkService(root)
@@ -1423,15 +1423,30 @@ def build_exp2_resume_protocol(
             swe_protocol_path,
             case.case_id,
         )
-        inspection = service.inspect_swe("swebench_verified", case.case_id)
+        try:
+            verify_record(qualification)
+        except BenchmarkContractError as exc:
+            raise Exp2EvalAuthorityError(
+                f"Exp2 qualification receipt is invalid for {case.case_id}"
+            ) from exc
+        base_commit = str(qualification.get("base_commit") or "")
+        source_tree = str(qualification.get("source_tree") or "")
+        source_digest = str(qualification.get("source_digest") or "")
+        image = str(qualification.get("image") or "")
         if (
-            inspection.get("dataset_revision") != pending.dataset_revision
-            or inspection.get("repository") != case.repository
+            qualification.get("schema") != "autobugfix-swe-qualification-v5"
+            or qualification.get("instance_id") != case.case_id
+            or qualification.get("dataset_revision") != pending.dataset_revision
+            or qualification.get("repository") != case.repository
+            or qualification.get("eligible") is not True
+            or not re.fullmatch(r"[0-9a-f]{40}", base_commit)
+            or not re.fullmatch(r"[0-9a-f]{40}", source_tree)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_digest)
+            or not image
         ):
             raise Exp2EvalAuthorityError(
-                f"Exp2 dataset identity drift for {case.case_id}"
+                f"Exp2 replay-qualified case metadata drift for {case.case_id}"
             )
-        image = str(inspection.get("docker_image") or "")
         command = run_command(
             [docker, "image", "inspect", image, "--format", "{{json .}}"],
             cwd=root,

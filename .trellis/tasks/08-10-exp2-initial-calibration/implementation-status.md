@@ -50,9 +50,12 @@ The remediation now:
 - holds a process-exclusive study lease across dispatch/reconciliation so a
   second resume cannot invalidate a live attempt.
 
-Focused tests pass and the latest full post-remediation run completed with
-`375 passed, 1 skipped`. A clean remediation commit, refreshed source-check
-receipts, and all-twelve v5 qualification are still required before freeze.
+All twelve v5 qualifications now pass. The latest full source run completed
+with `378 passed, 1 skipped`; compileall, role-skill validation, fatal Ruff,
+diff-check, and SWE doctor pass. Protocol construction was also hardened to
+replay the current qualification metadata rather than refetching historical
+requirements through `make_test_spec`; a real twelve-image protocol build
+succeeded.
 
 A fresh independent `gpt-5.6-terra`/`max` recheck returned `PROCEED` for the
 source gate after verifying exact per-case pins, null error handling, the
@@ -61,11 +64,10 @@ registry/local identity fields.
 
 ## Remaining execution sequence
 
-1. Commit the qualification-remediated source snapshot.
-2. Rerun structured source checks on the clean commit and issue the apparatus
-   receipt.
-3. Qualify only the selected 12 Verified cases and build the v2 protocol.
-4. Build/init/run the two-case calibration, including forced resume proof.
-5. If calibration succeeds, prepare the ten-case visible manifest and H0 Study.
-6. Stop at the human budget approval gate before any governed candidate Writer
+1. Commit the final protocol-freeze hardening and rerun structured source
+   checks on that clean commit.
+2. Rebuild/freeze the final v2 protocol and apparatus receipt.
+3. Build/init/run the two-case calibration, including forced resume proof.
+4. If calibration succeeds, prepare the ten-case visible manifest and H0 Study.
+5. Stop at the human budget approval gate before any governed candidate Writer
    call; never synthesize approval.

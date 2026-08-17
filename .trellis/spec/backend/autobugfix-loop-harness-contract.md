@@ -448,6 +448,11 @@ projection -> advance the append-only coordinator from typed receipts.
 - OCI evidence keeps registry manifest/config/compressed-layer digests distinct
   from Docker's local image ID and rootfs diff IDs. In particular, `.Id` must
   not be relabelled as the config digest on containerd-backed Docker stores.
+- Protocol freeze replays the current service-validated qualification receipt
+  for case/repository/base/image/source metadata. It must not call upstream
+  `make_test_spec` or refetch historical requirements after qualification;
+  those network-dependent inputs were already consumed and bound by the
+  qualification and pinned-image import receipts.
 - A v5 qualification is eligible only when two official gold submissions
   resolve, one explicit null/base submission remains unresolved without a
   harness error, all three observations use one image ID, and source
@@ -509,6 +514,7 @@ projection -> advance the append-only coordinator from typed receipts.
 | Apparatus checkout has any tracked or untracked change at dispatch | reject before Eval case call |
 | OCI identity or eligible qualification differs | block before case intent/SDK |
 | Selected image is not imported from its pinned official manifest digest, gold is unstable, or null/base resolves | mark qualification ineligible; do not freeze protocol |
+| Protocol freeze attempts a fresh remote instance/test-spec inspection | reject/fix the apparatus; replay the validated qualification metadata instead |
 | Real broker evidence is absent, redirected, manifest-invalid, or stored in an unexpected layout | leave/reconcile intent as infrastructure-invalid; never synthesize official truth |
 | State root escapes configured trusted Eval root | CLI error before read/write |
 | Event predecessor changes between replay and append | CAS error; caller retries from current state |

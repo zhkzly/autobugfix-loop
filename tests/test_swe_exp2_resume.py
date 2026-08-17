@@ -30,7 +30,9 @@ from autobugfix.eval.benchmarks.exp2_resume import (
 from autobugfix.eval.benchmarks.exp2_runtime import (
     Exp2EvalAuthority,
     Exp2EvalAuthorityError,
+    build_exp2_resume_protocol,
 )
+import autobugfix.eval.benchmarks.exp2_runtime as exp2_runtime
 from autobugfix.eval.benchmarks.models import (
     digest_file,
     digest_payload,
@@ -230,6 +232,233 @@ def _protocol(*, qualified: bool = True) -> Exp2ResumeProtocol:
         oci_images=images,
         qualification_status="qualified",
     )
+
+
+class _ProtocolBuildService:
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        overrides: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
+        pending = _protocol(qualified=False)
+        cases = (*pending.calibration_cases, *pending.h0_cases)
+        self.case_ids = tuple(case.case_id for case in cases)
+        self.dataset_revision = _sha("qualified-dataset")
+        self.manifest_record_digest = _digest("verified-image-manifest")
+        self.config = SimpleNamespace(
+            eval=SimpleNamespace(
+                benchmarks=SimpleNamespace(
+                    trusted_case_root=(tmp_path / "trusted-eval").resolve()
+                )
+            )
+        )
+        self.inspect_calls: list[tuple[str, str]] = []
+        self.image_cases: dict[str, str] = {}
+        self.qualifications: dict[str, dict[str, Any]] = {}
+        self.pins: dict[str, dict[str, str]] = {}
+        self.docker_data: dict[str, dict[str, Any]] = {}
+        self.overrides = dict(overrides or {})
+        trusted_root = self.config.eval.benchmarks.trusted_case_root
+        for case in cases:
+            case_id = case.case_id
+            image = f"sweb.eval.x86_64.{case_id}:latest"
+            manifest_digest = _digest(f"manifest:{case_id}")
+            local_image_id = _digest(f"local:{case_id}")
+            config_digest = _digest(f"config:{case_id}")
+            layer_digest = _digest(f"layer:{case_id}")
+            diff_id = _digest(f"diff:{case_id}")
+            source_ref = f"registry.example/{case_id}@sha256:{manifest_digest}"
+            receipt_path = trusted_root / "imports" / case_id / "receipt.yaml"
+            import_receipt = record_with_digest(
+                {
+                    "schema": "autobugfix-swe-pinned-image-import-v1",
+                    "instance_id": case_id,
+                    "source_ref": source_ref,
+                    "manifest_digest": manifest_digest,
+                    "manifest_record_digest": self.manifest_record_digest,
+                    "local_image": image,
+                    "local_image_id": f"sha256:{local_image_id}",
+                    "config_digest": config_digest,
+                    "layer_digests": [layer_digest],
+                    "rootfs_diff_ids": [diff_id],
+                    "platform": "linux/amd64",
+                }
+            )
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            receipt_path.write_text(
+                yaml.safe_dump(import_receipt, sort_keys=False), encoding="utf-8"
+            )
+            qualification = record_with_digest(
+                {
+                    "schema": "autobugfix-swe-qualification-v5",
+                    "instance_id": case_id,
+                    "repository": case.repository,
+                    "base_commit": _sha(f"base:{case_id}"),
+                    "dataset_revision": self.dataset_revision,
+                    "image": image,
+                    "image_id": f"sha256:{local_image_id}",
+                    "eligible": True,
+                    "source_tree": _sha(f"tree:{case_id}"),
+                    "source_digest": _digest(f"source:{case_id}"),
+                    "image_source_mode": "pinned-official-import",
+                    "image_source_ref": source_ref,
+                    "image_source_manifest_digest": manifest_digest,
+                    "image_source_receipt_digest": import_receipt["record_digest"],
+                    "image_source_receipt_path": str(receipt_path),
+                }
+            )
+            self.qualifications[case_id] = qualification
+            self.pins[case_id] = {
+                "source_ref": source_ref,
+                "manifest_digest": manifest_digest,
+            }
+            self.image_cases[image] = case_id
+            self.docker_data[case_id] = {
+                "manifest_digest": manifest_digest,
+                "local_image_id": local_image_id,
+                "config_digest": config_digest,
+                "layer_digest": layer_digest,
+                "diff_id": diff_id,
+            }
+
+    def exp2_runtime_identity(self, protocol_path: Path) -> dict[str, Any]:
+        return record_with_digest(
+            {
+                "schema": "autobugfix-exp2-eval-runtime-identity-v2",
+                "swe_protocol_sha256": digest_file(protocol_path),
+                "dataset_revision": self.dataset_revision,
+                "scorer_digest": _digest("scorer"),
+                "runtime_digest": _digest("runtime"),
+                "verified_image_instance_ids": list(self.case_ids),
+                "verified_image_pins": [
+                    {"instance_id": case_id, **self.pins[case_id]}
+                    for case_id in self.case_ids
+                ],
+                "verified_image_manifest_digest": self.manifest_record_digest,
+            }
+        )
+
+    def exp2_qualification_receipt(
+        self,
+        protocol_path: Path,
+        instance_id: str,
+    ) -> dict[str, Any]:
+        del protocol_path
+        payload = dict(self.qualifications[instance_id])
+        payload.pop("record_digest")
+        payload.update(self.overrides.get(instance_id, {}))
+        return record_with_digest(payload)
+
+    def inspect_swe(self, adapter: str, instance_id: str) -> dict[str, Any]:
+        self.inspect_calls.append((adapter, instance_id))
+        raise AssertionError("protocol construction must not inspect SWE instances")
+
+
+def _build_protocol_from_qualified_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    overrides: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[Exp2ResumeProtocol, _ProtocolBuildService, list[str]]:
+    service = _ProtocolBuildService(tmp_path, overrides=overrides)
+
+    class _ProtocolBuildOperator:
+        def __init__(self, project_root: Path) -> None:
+            del project_root
+
+        def exp2_role_skill_digests(self, **_: Any) -> dict[str, str]:
+            return {
+                "operator_role_skill_digest": _digest("operator-role-skill"),
+                "execution_role_skill_digest": _digest("execution-role-skill"),
+            }
+
+        def exp2_empty_memory_digest(self) -> str:
+            return _digest("empty-memory")
+
+        def governance_context(self) -> dict[str, str]:
+            return {"digest": _digest("operator-policy")}
+
+    docker_images: list[str] = []
+
+    def fake_run_command(command: list[str], **kwargs: Any) -> SimpleNamespace:
+        image = command[3]
+        docker_images.append(image)
+        case_id = service.image_cases[image]
+        metadata = service.docker_data[case_id]
+        stdout_path = Path(kwargs["artifact_dir"]) / "stdout.json"
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stdout_path.write_text(
+            json.dumps(
+                {
+                    "Id": f"sha256:{metadata['local_image_id']}",
+                    "Descriptor": {
+                        "digest": f"sha256:{metadata['manifest_digest']}"
+                    },
+                    "RootFS": {"Layers": [f"sha256:{metadata['diff_id']}"]},
+                    "Os": "linux",
+                    "Architecture": "amd64",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(passed=True, stdout_path=stdout_path)
+
+    monkeypatch.setattr(exp2_runtime, "EvalBenchmarkService", lambda _: service)
+    monkeypatch.setattr(
+        exp2_runtime, "OperatorGovernanceService", _ProtocolBuildOperator
+    )
+    monkeypatch.setattr(exp2_runtime.shutil, "which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr(exp2_runtime, "run_command", fake_run_command)
+    memory_fixture = tmp_path / "empty-memory.yaml"
+    memory_fixture.write_text(_EMPTY_MEMORY_SPEC, encoding="utf-8")
+    protocol = build_exp2_resume_protocol(
+        tmp_path,
+        protocol_id="receipt-only-build",
+        swe_protocol_path=(
+            Path(__file__).resolve().parents[1]
+            / "benchmarks/swe-experiment-2-resume-mvp-v2.yaml"
+        ),
+        empty_memory_fixture_path=memory_fixture,
+        execution_allowlist=(EXP2_WRITER_SKILL_PATH,),
+        artifact_root=tmp_path / "protocol-artifacts",
+    )
+    return protocol, service, docker_images
+
+
+def test_protocol_build_uses_replayed_qualification_metadata_without_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol, service, docker_images = _build_protocol_from_qualified_receipts(
+        tmp_path, monkeypatch
+    )
+
+    assert protocol.qualification_status == "qualified"
+    assert service.inspect_calls == []
+    assert docker_images == [
+        service.qualifications[case_id]["image"] for case_id in service.case_ids
+    ]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"pallets__flask-5014": {"repository": "wrong/repository"}},
+        {"pallets__flask-5014": {"dataset_revision": _sha("wrong-dataset")}},
+    ],
+)
+def test_protocol_build_rejects_mismatched_qualification_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: Mapping[str, Mapping[str, Any]],
+) -> None:
+    with pytest.raises(
+        Exp2EvalAuthorityError, match="replay-qualified case metadata drift"
+    ):
+        _build_protocol_from_qualified_receipts(
+            tmp_path, monkeypatch, overrides=overrides
+        )
 
 
 def _write_protocol(tmp_path: Path, protocol: Exp2ResumeProtocol) -> Path:
