@@ -40,7 +40,11 @@ from autobugfix.eval.benchmarks.service import (
 from autobugfix.eval.benchmarks.swe_models import SWEExperimentProtocol
 from autobugfix.eval.benchmarks.swe_submission import verify_evidence_manifest
 from autobugfix.git_utils import rev_parse, run_git
-from autobugfix.operator.service import OperatorGovernanceService
+from autobugfix.operator.service import (
+    OperatorGovernanceError,
+    OperatorGovernanceService,
+    exp2_protected_memory_roots,
+)
 
 
 class Exp2EvalAuthorityError(RuntimeError):
@@ -145,23 +149,48 @@ class Exp2EvalAuthority:
             raise Exp2EvalAuthorityError(
                 "Exp2 Operator root differs from configured governance state"
             )
-        if Path(self.plan.memory_root).resolve() != (
-            self.project_root / ".autobugfix-memory"
-        ).resolve():
+        memory_source = Path(self.plan.memory_root).expanduser()
+        memory_root = memory_source.resolve()
+        guard_source = Path(self.plan.guard_root).expanduser()
+        try:
+            resolved_guard_root = guard_source.resolve(strict=True)
+        except OSError as exc:
             raise Exp2EvalAuthorityError(
-                "Exp2 Memory root differs from the configured frozen Memory state"
+                "Exp2 Guard root must be an absolute real protected directory"
+            ) from exc
+        if (
+            not guard_source.is_absolute()
+            or guard_source != resolved_guard_root
+            or not resolved_guard_root.is_dir()
+        ):
+            raise Exp2EvalAuthorityError(
+                "Exp2 Guard root must be an absolute real protected directory"
             )
-        memory_root = Path(self.plan.memory_root).resolve()
-        for relative in (Path("active"), Path("skills/approved")):
-            approved = memory_root / relative
-            if approved.exists() and any(approved.rglob("*")):
-                raise Exp2EvalAuthorityError(
-                    "Exp2 requires an empty active/approved Memory fixture"
-                )
-        guard_root = Path(self.plan.guard_root)
-        if guard_root.is_symlink() or not guard_root.resolve().is_dir():
+        protected_memory_roots = exp2_protected_memory_roots(
+            self.project_root,
+            self.config,
+            guard_root=resolved_guard_root,
+        )
+        if any(
+            memory_root == protected
+            or memory_root.is_relative_to(protected)
+            or protected.is_relative_to(memory_root)
+            for protected in protected_memory_roots
+        ):
             raise Exp2EvalAuthorityError(
-                "Exp2 Guard root must be a real protected directory"
+                "Exp2 empty Memory root overlaps protected or canonical state"
+            )
+        try:
+            memory_digest = (
+                self.operator_service.validate_exp2_empty_memory_root(
+                    memory_source
+                )
+            )
+        except OperatorGovernanceError as exc:
+            raise Exp2EvalAuthorityError(str(exc)) from exc
+        if memory_digest != self.plan.memory_fixture_digest:
+            raise Exp2EvalAuthorityError(
+                "Exp2 empty Memory root differs from the frozen fixture digest"
             )
         if self.plan.public_manifest_path is not None and not Path(
             self.plan.public_manifest_path
@@ -554,15 +583,24 @@ class Exp2EvalAuthority:
                 if item == "--tmpfs"
             }
             guard_root = Path(self.plan.guard_root).resolve()
+            dedicated_memory_root = Path(self.plan.memory_root).resolve()
+            additional_hidden_roots = {
+                dedicated_memory_root,
+                guard_root,
+            }
             if (
                 execution.get("direct_sdk_in_process") is not False
                 or execution.get("outer_bubblewrap") is not True
                 or execution.get("workspace_only_preflight_digest") is not None
                 or not any(Path(str(item)).name == "bwrap" for item in command_argv)
-                or broker.get("additional_hidden_paths") != [str(guard_root)]
-                or not any(
-                    guard_root == root or guard_root.is_relative_to(root)
-                    for root in masked_roots
+                or broker.get("additional_hidden_paths")
+                != sorted(str(root) for root in additional_hidden_roots)
+                or any(
+                    not any(
+                        hidden == root or hidden.is_relative_to(root)
+                        for root in masked_roots
+                    )
+                    for hidden in additional_hidden_roots
                 )
                 or not task_worktree.is_relative_to(
                     source_root / "subject-run" / "target" / "worktrees"
@@ -823,7 +861,10 @@ class Exp2EvalAuthority:
                 execution_mode=self.protocol.execution_mode,
                 disposable_root=Path(self.plan.disposable_root),
                 out_root=output_parent,
-                additional_hidden_paths=(Path(self.plan.guard_root),),
+                additional_hidden_paths=(
+                    Path(self.plan.memory_root),
+                    Path(self.plan.guard_root),
+                ),
             )
         else:
             if self.plan.public_manifest_path is None:
@@ -854,7 +895,10 @@ class Exp2EvalAuthority:
                 expected_binding_kinds=expected_kinds,
                 execution_mode=self.protocol.execution_mode,
                 disposable_root=Path(self.plan.disposable_root),
-                additional_hidden_paths=(Path(self.plan.guard_root),),
+                additional_hidden_paths=(
+                    Path(self.plan.memory_root),
+                    Path(self.plan.guard_root),
+                ),
             )
         return self._adopt_report(intent, image_gate)
 
@@ -1604,6 +1648,7 @@ def build_exp2_study_plan(
     swe_protocol_path: Path,
     apparatus_receipt_path: Path,
     memory_fixture_spec_path: Path,
+    memory_root: Path,
     disposable_root: Path,
     guard_root: Path,
     public_manifest_path: Path | None = None,
@@ -1625,6 +1670,46 @@ def build_exp2_study_plan(
     if memory_fixture.fixture_file_digest != protocol.memory_fixture_spec_digest:
         raise Exp2EvalAuthorityError(
             "Exp2 Memory fixture spec differs from protocol"
+        )
+    operator = OperatorGovernanceService(root)
+    memory_source = memory_root.expanduser()
+    resolved_memory_root = memory_source.resolve()
+    guard_source = guard_root.expanduser()
+    try:
+        resolved_guard_root = guard_source.resolve(strict=True)
+    except OSError as exc:
+        raise Exp2EvalAuthorityError(
+            "Exp2 Guard root must be an absolute real protected directory"
+        ) from exc
+    if (
+        not guard_source.is_absolute()
+        or guard_source != resolved_guard_root
+        or not resolved_guard_root.is_dir()
+    ):
+        raise Exp2EvalAuthorityError(
+            "Exp2 Guard root must be an absolute real protected directory"
+        )
+    protected_memory_roots = exp2_protected_memory_roots(
+        root,
+        config,
+        guard_root=resolved_guard_root,
+    )
+    if any(
+        resolved_memory_root == protected
+        or resolved_memory_root.is_relative_to(protected)
+        or protected.is_relative_to(resolved_memory_root)
+        for protected in protected_memory_roots
+    ):
+        raise Exp2EvalAuthorityError(
+            "Exp2 empty Memory root overlaps protected or canonical state"
+        )
+    try:
+        memory_digest = operator.validate_exp2_empty_memory_root(memory_source)
+    except OperatorGovernanceError as exc:
+        raise Exp2EvalAuthorityError(str(exc)) from exc
+    if memory_digest != protocol.memory_fixture_digest:
+        raise Exp2EvalAuthorityError(
+            "Exp2 empty Memory root differs from protocol"
         )
     swe_protocol = SWEExperimentProtocol.from_yaml(swe_protocol_path)
     apparatus = Exp2EvalAuthority._read_yaml_record(
@@ -1726,8 +1811,8 @@ def build_exp2_study_plan(
         ),
         eval_root=str(config.eval.benchmarks.trusted_case_root.resolve()),
         operator_root=str(config.operator.state.root.resolve()),
-        memory_root=str((root / ".autobugfix-memory").resolve()),
-        guard_root=str(guard_root.resolve()),
+        memory_root=str(resolved_memory_root),
+        guard_root=str(guard_source),
         public_manifest_path=public_path,
         public_manifest_digest=public_digest,
         h0_binding_path=h0_path,

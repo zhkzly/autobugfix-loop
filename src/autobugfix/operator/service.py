@@ -164,6 +164,35 @@ def _path_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def exp2_protected_memory_roots(
+    project_root: Path,
+    config: Any,
+    *,
+    guard_root: Path | None = None,
+) -> tuple[Path, ...]:
+    """Return every authority root that an Exp2 Memory fixture must avoid."""
+
+    benchmark = config.eval.benchmarks
+    operator = config.operator
+    roots = [
+        project_root,
+        project_root / ".autobugfix-memory",
+        benchmark.cache_root,
+        benchmark.trusted_case_root,
+        benchmark.visible_manifest_root,
+        benchmark.raw_codex.runtime_root,
+        operator.state.root,
+        operator.artifacts.root,
+        operator.worktrees.root,
+        operator.experiment_lines.root,
+        operator.experiment_lines.checkpoint_root,
+        operator.experiment_lines.active_release_root,
+    ]
+    if guard_root is not None:
+        roots.append(guard_root)
+    return tuple(dict.fromkeys(path.resolve() for path in roots))
+
+
 def _manifest_digest(path: Path) -> str:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -452,6 +481,58 @@ class OperatorGovernanceService:
             (root / "active").mkdir()
             (root / "skills/approved").mkdir(parents=True)
             return _path_digest(root)
+
+    @classmethod
+    def validate_exp2_empty_memory_root(
+        cls,
+        memory_root: Path | str,
+    ) -> str:
+        """Validate a private, exact empty-Memory tree without canonical data."""
+
+        source = Path(memory_root).expanduser()
+        try:
+            root = source.resolve(strict=True)
+        except OSError as exc:
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory root must be an absolute real directory"
+            ) from exc
+        if not source.is_absolute() or source != root or not root.is_dir():
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory root must be an absolute real directory"
+            )
+        expected_uid = getattr(os, "geteuid", lambda: root.stat().st_uid)()
+        entries = tuple(
+            sorted(
+                root.rglob("*"),
+                key=lambda item: item.relative_to(root).as_posix(),
+            )
+        )
+        if {
+            item.relative_to(root).as_posix() for item in entries
+        } != {"active", "skills", "skills/approved"}:
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory root differs from the frozen empty fixture"
+            )
+        for item in (root, *entries):
+            if item.is_symlink():
+                raise OperatorGovernanceError(
+                    "Exp2 empty Memory root must not contain symlinks"
+                )
+            if item != root and not item.is_dir():
+                raise OperatorGovernanceError(
+                    "Exp2 empty Memory root differs from the frozen empty fixture"
+                )
+            observed = item.stat()
+            if observed.st_uid != expected_uid or observed.st_mode & 0o077:
+                raise OperatorGovernanceError(
+                    "Exp2 empty Memory root must be current-user private"
+                )
+        digest = _path_digest(root)
+        if digest != cls.exp2_empty_memory_digest():
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory root differs from the frozen empty fixture"
+            )
+        return digest
 
     @staticmethod
     def _remove_release_tree(path: Path) -> None:
@@ -1738,6 +1819,8 @@ class OperatorGovernanceService:
         primary_model: str = "gpt-5.4-mini",
         target_checkpoint_name: str = "H_bug",
         memory_root: Path | str | None = None,
+        empty_memory_fixture: bool = False,
+        guard_root: Path | str | None = None,
     ) -> StudyRecord:
         policy = self.policy()
         if not policy.trusted:
@@ -1782,18 +1865,63 @@ class OperatorGovernanceService:
                 "canonical approved active Memory root must not be a symlink"
             )
         canonical_memory = canonical_memory_path.resolve()
-        memory = Path(memory_root) if memory_root is not None else canonical_memory_path
-        if not memory.is_absolute():
-            memory = self.project_root / memory
-        if memory.is_symlink():
+        if empty_memory_fixture and memory_root is None:
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory fixture requires an explicit Memory root"
+            )
+        if empty_memory_fixture and guard_root is None:
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory fixture requires an explicit Guard root"
+            )
+        memory_source = (
+            Path(memory_root) if memory_root is not None else canonical_memory_path
+        )
+        if not memory_source.is_absolute():
+            memory_source = self.project_root / memory_source
+        if memory_source.is_symlink():
             raise OperatorGovernanceError(
                 "study Memory root must not be a symlink"
             )
-        memory = memory.resolve()
-        if memory != canonical_memory:
+        memory = memory_source.resolve()
+        if empty_memory_fixture:
+            guard_source = Path(guard_root).expanduser()
+            try:
+                resolved_guard_root = guard_source.resolve(strict=True)
+            except OSError as exc:
+                raise OperatorGovernanceError(
+                    "Exp2 Guard root must be an absolute real directory"
+                ) from exc
+            if (
+                not guard_source.is_absolute()
+                or guard_source != resolved_guard_root
+                or not resolved_guard_root.is_dir()
+            ):
+                raise OperatorGovernanceError(
+                    "Exp2 Guard root must be an absolute real directory"
+                )
+            protected_memory_roots = exp2_protected_memory_roots(
+                self.project_root,
+                self.config,
+                guard_root=resolved_guard_root,
+            )
+            if any(
+                memory == protected
+                or memory.is_relative_to(protected)
+                or protected.is_relative_to(memory)
+                for protected in protected_memory_roots
+            ):
+                raise OperatorGovernanceError(
+                    "Exp2 empty Memory root overlaps protected or canonical state"
+                )
+            expected_memory_digest = self.validate_exp2_empty_memory_root(
+                memory_source
+            )
+        elif memory != canonical_memory:
             raise OperatorGovernanceError(
                 "study Memory must use the canonical approved active Memory root"
             )
+        else:
+            expected_memory_digest = None
         memory_snapshot: Path | None = None
         manifest_snapshot: Path | None = None
         try:
@@ -1806,6 +1934,13 @@ class OperatorGovernanceService:
                 source=manifest,
             )
             memory_digest = _path_digest(memory_snapshot)
+            if (
+                expected_memory_digest is not None
+                and memory_digest != expected_memory_digest
+            ):
+                raise OperatorGovernanceError(
+                    "Exp2 Study Memory snapshot differs from the empty fixture"
+                )
             cohort_fields = {
                 "base_subject_sha": base_sha,
                 "harness_sha": harness_sha,

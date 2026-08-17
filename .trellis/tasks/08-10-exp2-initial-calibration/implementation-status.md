@@ -62,12 +62,42 @@ source gate after verifying exact per-case pins, null error handling, the
 single Writer-skill treatment, process-exclusive resume, and the separated OCI
 registry/local identity fields.
 
+## Empty-Memory isolation remediation
+
+The first real calibration initialization at apparatus `c472e5d` stopped
+before any model call because the project's canonical `.autobugfix-memory`
+contains an approved user-preference entry. That stop is correct: Exp2's
+frozen input is empty, but deleting or moving user Memory would violate the
+project boundary. Study `exp2-calibration-c472e5d` is retained as a blocked
+pre-dispatch audit artifact and will not be reused.
+
+The current remediation adds an explicit dedicated empty-Memory capability:
+
+- `build-plan-v2` requires an external `--memory-root`;
+- the root must be absolute, unredirected, private, current-user owned,
+  exactly empty in the frozen shape, and disjoint from protected/canonical
+  state;
+- Eval checks the root and digest at plan build and authority reopen;
+- Operator accepts it only with `empty_memory_fixture=True` and the same
+  explicit Guard root, then rechecks disjointness and the immutable snapshot
+  digest; and
+- tests prove canonical Memory remains unchanged and reject nonempty,
+  permissive, redirected, or overlapping trees.
+
+Focused tests pass `51/51`; the full source suite passes
+`388 passed, 1 skipped`. Compileall, role-skill validation, and diff-check
+pass. An independent `gpt-5.6-terra`/`max` recheck returned `PROCEED` after
+its Guard-path, special-entry, and broker-proof findings were fixed and
+retested. The remediation is not yet frozen into a clean apparatus commit, so
+no replacement calibration study has been initialized yet.
+
 ## Remaining execution sequence
 
-1. Commit the final protocol-freeze hardening and rerun structured source
-   checks on that clean commit.
-2. Rebuild/freeze the final v2 protocol and apparatus receipt.
-3. Build/init/run the two-case calibration, including forced resume proof.
+1. Independently review and commit the empty-Memory isolation remediation,
+   then rerun structured source checks on that clean commit.
+2. Rebuild/freeze the final v2 protocol and apparatus receipt and materialize
+   a dedicated private empty-Memory root.
+3. Build/init/run a new-ID two-case calibration, including forced resume proof.
 4. If calibration succeeds, prepare the ten-case visible manifest and H0 Study.
 5. Stop at the human budget approval gate before any governed candidate Writer
    call; never synthesize approval.

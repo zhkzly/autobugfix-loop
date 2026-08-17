@@ -425,6 +425,9 @@ projection -> advance the append-only coordinator from typed receipts.
 - `EvalBenchmarkService.run_swe_exp2_case(...,
   execution_mode="protected", out_root=...) -> Mapping`
 - `OperatorGovernanceService.export_exp2_attribution(...) -> Mapping`
+- `OperatorGovernanceService.validate_exp2_empty_memory_root(path) -> digest`
+- `OperatorGovernanceService.create_study(..., memory_root=path,
+  empty_memory_fixture=True, guard_root=path) -> StudyRecord`
 - `OperatorGovernanceService.export_exp2_candidate_transition(
   operator_study_id, request_id, attribution_digest) -> Mapping`
 - `Exp2ResumeCoordinator.rollback_authorization() -> Mapping`
@@ -438,6 +441,14 @@ projection -> advance the append-only coordinator from typed receipts.
   apparatus receipt, passing source-check receipts, empty-Memory fixture spec,
   calibration receipt (pilot only), public manifest (pilot only), and H0 Study
   binding (pilot only). Paths and semantic digests are both authority.
+- Exp2 uses a dedicated external empty-Memory root, not the project's
+  canonical `.autobugfix-memory`. The root must be an absolute, unredirected,
+  current-user-owned `0700`-style tree containing exactly `active/` and
+  `skills/approved/`, must be disjoint from project/Eval/Operator/Guard state,
+  and must match the frozen materialized-tree digest. Eval validates it when
+  building and reopening a plan; Operator validates it again before taking
+  the immutable Study snapshot. The canonical Memory tree is neither read nor
+  mutated by Exp2.
 - Protocol image entries bind one eligible official qualification plus current
   OCI manifest/config/layers/platform. A tag alone is never execution-ready.
 - Resume-MVP Verified qualification imports only the selected official images
@@ -517,6 +528,7 @@ projection -> advance the append-only coordinator from typed receipts.
 | Protocol freeze attempts a fresh remote instance/test-spec inspection | reject/fix the apparatus; replay the validated qualification metadata instead |
 | Real broker evidence is absent, redirected, manifest-invalid, or stored in an unexpected layout | leave/reconcile intent as infrastructure-invalid; never synthesize official truth |
 | State root escapes configured trusted Eval root | CLI error before read/write |
+| Empty-Memory root is omitted, relative, redirected, nonempty, permissive, digest-mismatched, or overlaps protected/canonical state | reject before SDK/Writer dispatch; preserve canonical Memory |
 | Event predecessor changes between replay and append | CAS error; caller retries from current state |
 | Another process holds the study execution lease | return `in_progress`; do not dispatch or reconcile |
 | Final JSONL fragment has no newline | ignore on replay; preserve/truncate under lock before next append |
@@ -534,6 +546,8 @@ projection -> advance the append-only coordinator from typed receipts.
   evidence -> official score -> terminal receipt -> next case.
 - Good: process dies after report publication; resume adopts the report and
   canonical evidence without a second Writer call.
+- Good: a private external empty-Memory tree is content-bound by the plan and
+  Operator snapshot while a nonempty canonical Memory tree remains unchanged.
 - Base: process dies before a complete event line; replay returns the prior
   state and the next locked append repairs the torn tail.
 - Bad: a fake service writes ledger/SDK receipts directly under
@@ -542,6 +556,8 @@ projection -> advance the append-only coordinator from typed receipts.
   candidate scope, or rollback authorization.
 - Bad: mutate the Operator line first, then ask the coordinator whether
   rollback was allowed.
+- Bad: empty, move, or reuse the project's canonical Memory tree to make Exp2
+  pass its fixed-empty fixture check.
 
 ### 6. Tests Required
 
@@ -557,6 +573,9 @@ projection -> advance the append-only coordinator from typed receipts.
   hidden authorities/Guard/home, and no workspace-only claim.
 - Dirty-apparatus tests modify one tracked or untracked source file after
   authority construction and assert the service receives zero case calls.
+- Empty-Memory tests cover a valid dedicated tree plus nonempty, permissive,
+  symlinked, digest-mismatched, and protected-root-overlap cases; they assert
+  the canonical Memory tree is unchanged.
 - Operator tests reject forged attribution/source/runtime/scope, a second
   revision, audience-leaking H0 metrics, and rollback without Eval
   authorization.

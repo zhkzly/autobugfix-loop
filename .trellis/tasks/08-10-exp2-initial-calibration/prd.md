@@ -26,6 +26,9 @@ Autobugfix is a local, repo-agnostic loop/harness control system.
   integration, and rollback.
 - Memory remains a fixed empty fixture and performs no collection,
   maintenance, approval, retrieval, or evolution.
+- The fixture is a dedicated private root outside project/Eval/Operator/Guard
+  state. Existing `.autobugfix-memory` content is preserved and excluded from
+  both treatment and execution context.
 - The trusted Exp2 coordinator owns only experiment scheduling, visibility,
   handoff receipts, and report state. It must not become a second Execution,
   Eval, or Operator state machine.
@@ -110,6 +113,9 @@ reserve case contents/outcomes remain unavailable to the Operator.
 - Freeze exact case IDs/order, dataset/scorer/runtime/model/attempt/timeout,
   selected OCI image digests, empty Memory fixture, Operator skill/policy
   digests, source visibility, allowlist, and one-revision cap.
+- Bind one explicit external empty-Memory root in the plan and revalidate its
+  exact tree digest at Eval readiness and Operator Study creation; never
+  clear, relocate, or substitute the project's canonical Memory.
 - Acquire only selected instance images and required shared layers.
 
 ### R2 — Per-case durable execution and resume
@@ -207,6 +213,8 @@ scorer-private diagnosis remain excluded.
 - [ ] Protected receipts prove outer and SDK-worker Bubblewrap, exact task
   worktree cwd, and hidden authority/credential roots; missing isolation proof
   produces no SDK call.
+- [ ] Plan/readiness/Operator all bind the same dedicated empty-Memory digest,
+  while the pre-existing canonical Memory tree remains byte-for-byte intact.
 - [ ] H0 produces ten fixed-denominator, apparatus-valid terminal reports or
   an honest feasibility stop.
 - [ ] Only source projections are released before candidate lock.

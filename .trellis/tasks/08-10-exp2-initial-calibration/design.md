@@ -21,7 +21,7 @@ The design deliberately optimizes time-to-evidence:
 | Execution | `AutobugfixService` and target task worktree | Real repair attempts, verifier, task/event/diff evidence |
 | Eval | `EvalBenchmarkService`, official SWE scorer, trusted Eval store | Materialization, submission freeze, score, noninterference, H0/H1 reports |
 | Operator | `OperatorGovernanceService`, Git, governance store | Attribution-backed request, Writer/check, candidate commit/integration, rollback |
-| Memory | Memory service plus human authority | Fixed empty input only; no action |
+| Memory | fixed-fixture authority | Dedicated external empty input only; canonical Memory is untouched |
 | Exp2 coordination | trusted operator-host coordinator | Schedule, per-case journal, visibility, handoff validation, paired report |
 
 The coordinator may reference another plane's receipts. It may not synthesize
@@ -72,6 +72,9 @@ The content-addressed manifest binds:
 - H0 subject SHA/tree;
 - model, reasoning, two-attempt loop budget, 900-second timeout, concurrency 1;
 - empty Memory fixture and materialized empty-tree digest;
+- absolute dedicated Memory root, private ownership/mode, no symlink
+  components, and disjointness from project/Eval/Operator/Guard/canonical
+  roots;
 - Operator role-skill/config/policy digests;
 - Execution allowlist and one-used-revision policy;
 - result-visibility schedule;
@@ -81,6 +84,14 @@ The content-addressed manifest binds:
 
 Paths alone are not frozen identity. Initialization copies or references
 content-addressed records and stores their digests in the plan.
+
+The project `.autobugfix-memory` may be nonempty and is not an Exp2 input.
+Plan construction requires a separately materialized tree containing only
+`active/`, `skills/`, and `skills/approved/`. Eval validates its exact digest
+before initialization and at every authority reopen. Operator accepts this
+noncanonical root only with the explicit `empty_memory_fixture` capability,
+revalidates isolation and digest, then snapshots it. A pre-dispatch failure
+burns the study ID; repair uses a new ID rather than mutating prior state.
 
 ## 5. Per-case journal and recovery
 

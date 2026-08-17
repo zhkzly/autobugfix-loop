@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -13,9 +14,24 @@ from autobugfix.cli import main
 from autobugfix.eval.benchmarks.authority import GuardCodeIdentity
 from autobugfix.eval.benchmarks.guard import metric_payload, signed_metric
 from autobugfix.operator.models import digest_payload
-from autobugfix.operator.service import OperatorGovernanceError
+from autobugfix.operator.service import (
+    OperatorGovernanceError,
+    OperatorGovernanceService,
+)
 from autobugfix.operator.store import OperatorStoreError
 from tests.test_operator_policy import make_operator_repo, run, service_for
+
+
+def private_empty_memory_root(path: Path) -> Path:
+    for directory in (
+        path,
+        path / "active",
+        path / "skills",
+        path / "skills/approved",
+    ):
+        directory.mkdir(exist_ok=True)
+        directory.chmod(0o700)
+    return path
 
 
 class StudyBackend:
@@ -117,6 +133,126 @@ def test_study_rejects_arbitrary_memory_snapshot_root(tmp_path: Path):
             success_contract={"visible_net_gain": ">0"},
             base_ref="main",
             memory_root=forged_memory,
+        )
+
+
+def test_exp2_study_uses_dedicated_empty_memory_without_touching_canonical(
+    tmp_path: Path,
+) -> None:
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    manifest = root / "manifest.yaml"
+    manifest.write_text("cases: [case-1]\n", encoding="utf-8")
+    canonical_entry = root / ".autobugfix-memory/active/user-preferences.md"
+    canonical_entry.parent.mkdir(parents=True)
+    canonical_entry.write_text("preserve me\n", encoding="utf-8")
+    dedicated = private_empty_memory_root(tmp_path / "exp2-empty-memory")
+    guard_root = tmp_path / "exp2-guard"
+    guard_root.mkdir(mode=0o700)
+
+    study = service.create_study(
+        study_id="dedicated-empty-memory-study",
+        purpose="Freeze an isolated empty Memory input",
+        manifest_path=manifest,
+        success_contract={"visible_net_gain": ">0"},
+        base_ref="main",
+        memory_root=dedicated,
+        empty_memory_fixture=True,
+        guard_root=guard_root,
+    )
+
+    snapshot = Path(study.memory_snapshot_path)
+    assert study.memory_digest == service.exp2_empty_memory_digest()
+    assert not any((snapshot / "active").iterdir())
+    assert not any((snapshot / "skills/approved").iterdir())
+    assert canonical_entry.read_text(encoding="utf-8") == "preserve me\n"
+
+
+def test_exp2_empty_memory_rejects_nonempty_or_permissive_tree(
+    tmp_path: Path,
+) -> None:
+    nonempty = private_empty_memory_root(tmp_path / "nonempty-memory")
+    unexpected = nonempty / "active/preference.md"
+    unexpected.write_text(
+        "must not enter Exp2\n", encoding="utf-8"
+    )
+    unexpected.chmod(0o600)
+    with pytest.raises(OperatorGovernanceError, match="frozen empty fixture"):
+        OperatorGovernanceService.validate_exp2_empty_memory_root(nonempty)
+
+    special = private_empty_memory_root(tmp_path / "special-memory")
+    os.mkfifo(special / "active" / "unexpected-pipe", 0o600)
+    with pytest.raises(OperatorGovernanceError, match="frozen empty fixture"):
+        OperatorGovernanceService.validate_exp2_empty_memory_root(special)
+
+    permissive = private_empty_memory_root(tmp_path / "permissive-memory")
+    permissive.chmod(0o755)
+    with pytest.raises(OperatorGovernanceError, match="current-user private"):
+        OperatorGovernanceService.validate_exp2_empty_memory_root(permissive)
+
+
+def test_exp2_empty_memory_rejects_redirected_or_protected_root(
+    tmp_path: Path,
+) -> None:
+    real = private_empty_memory_root(tmp_path / "real-empty-memory")
+    redirected = tmp_path / "redirected-empty-memory"
+    redirected.symlink_to(real, target_is_directory=True)
+    with pytest.raises(OperatorGovernanceError, match="absolute real directory"):
+        OperatorGovernanceService.validate_exp2_empty_memory_root(redirected)
+
+    protected_tmp = tmp_path / "protected"
+    protected_tmp.mkdir()
+    root = make_operator_repo(protected_tmp)
+    service = service_for(root, protected_tmp)
+    manifest = root / "manifest.yaml"
+    manifest.write_text("cases: [case-1]\n", encoding="utf-8")
+    canonical = private_empty_memory_root(root / ".autobugfix-memory")
+    guard_root = protected_tmp / "exp2-guard"
+    guard_root.mkdir(mode=0o700)
+    with pytest.raises(OperatorGovernanceError, match="overlaps protected"):
+        service.create_study(
+            study_id="protected-empty-memory-study",
+            purpose="Reject an in-project empty fixture",
+            manifest_path=manifest,
+            success_contract={"visible_net_gain": ">0"},
+            base_ref="main",
+            memory_root=canonical,
+            empty_memory_fixture=True,
+            guard_root=guard_root,
+        )
+
+
+def test_exp2_empty_memory_requires_a_disjoint_guard_root(tmp_path: Path) -> None:
+    root = make_operator_repo(tmp_path)
+    service = service_for(root, tmp_path)
+    manifest = root / "manifest.yaml"
+    manifest.write_text("cases: [case-1]\n", encoding="utf-8")
+    dedicated = private_empty_memory_root(tmp_path / "exp2-empty-memory")
+
+    with pytest.raises(OperatorGovernanceError, match="explicit Guard root"):
+        service.create_study(
+            study_id="missing-guard-root-study",
+            purpose="Require the Exp2 Guard boundary",
+            manifest_path=manifest,
+            success_contract={"visible_net_gain": ">0"},
+            base_ref="main",
+            memory_root=dedicated,
+            empty_memory_fixture=True,
+        )
+
+    guard_root = tmp_path / "exp2-guard"
+    guard_root.mkdir(mode=0o700)
+    guarded_fixture = private_empty_memory_root(guard_root / "fixture")
+    with pytest.raises(OperatorGovernanceError, match="overlaps protected"):
+        service.create_study(
+            study_id="guard-overlap-study",
+            purpose="Reject a fixture inside Guard state",
+            manifest_path=manifest,
+            success_contract={"visible_net_gain": ">0"},
+            base_ref="main",
+            memory_root=guarded_fixture,
+            empty_memory_fixture=True,
+            guard_root=guard_root,
         )
 
 

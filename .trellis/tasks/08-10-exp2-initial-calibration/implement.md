@@ -153,6 +153,8 @@ Freeze a clean apparatus commit/SHA/tree only after an independent
 ## Phase 7 — Execute two-case calibration
 
 1. Initialize the calibration study with the new apparatus receipt.
+   Materialize and bind a dedicated private empty-Memory root outside all
+   project/Eval/Operator/Guard roots; do not alter `.autobugfix-memory`.
 2. Inspect readiness without `--execute`.
 3. Execute Flask.
 4. Force one controlled interruption after its terminal receipt.
@@ -169,6 +171,12 @@ UV_CACHE_DIR=/tmp/autobugfix-uv-cache uv run autobugfix eval exp2 init ...
 
 UV_CACHE_DIR=/tmp/autobugfix-uv-cache uv run autobugfix eval exp2 resume --study-id <calibration-study-id> --state-root <trusted-state-root> --execute
 ```
+
+`build-plan-v2` must receive `--memory-root <dedicated-empty-root>`. Formal H0
+Operator Study creation must use that same root with
+`--empty-memory-fixture --guard-root <same-plan-guard-root>`. A study that
+stopped before dispatch because its Memory binding was invalid is preserved for
+audit and never reused.
 
 ## Phase 8 — Execute H0 baseline and feasibility gate
 
@@ -214,7 +222,8 @@ No reserve or Live execution occurs in this task.
 ## Rollback points
 
 - Source: abandon the new apparatus branch; never reset or modify v1/main.
-- Study: drift or invalid evidence burns the current study ID.
+- Study: drift, invalid evidence, or a failed pre-dispatch authority binding
+  burns the current study ID; preserve it and initialize a new ID.
 - Candidate: use the trusted Operator rollback transition; never force-reset
   the experiment line.
 - Dataset: no case replacement after freeze.

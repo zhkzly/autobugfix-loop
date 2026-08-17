@@ -371,6 +371,15 @@ def command_eval(args: argparse.Namespace) -> int:
             )
             return 0
         if args.exp2_action == "build-plan-v2":
+            memory_root = Path(args.memory_root).expanduser()
+            output = Path(args.out).resolve()
+            resolved_memory_root = memory_root.resolve()
+            if output == resolved_memory_root or output.is_relative_to(
+                resolved_memory_root
+            ):
+                raise Exp2ResumeError(
+                    "Exp2 plan output must not mutate the empty Memory root"
+                )
             plan = build_exp2_study_plan(
                 Path.cwd(),
                 study_id=args.study_id,
@@ -379,6 +388,7 @@ def command_eval(args: argparse.Namespace) -> int:
                 swe_protocol_path=Path(args.swe_protocol),
                 apparatus_receipt_path=Path(args.apparatus_receipt),
                 memory_fixture_spec_path=Path(args.empty_memory_fixture),
+                memory_root=memory_root,
                 disposable_root=Path(args.disposable_root),
                 guard_root=Path(args.guard_root),
                 public_manifest_path=(
@@ -395,7 +405,6 @@ def command_eval(args: argparse.Namespace) -> int:
                     else None
                 ),
             )
-            output = Path(args.out).resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
             if output.exists() or output.is_symlink():
                 raise Exp2ResumeError("Exp2 v2 plan output already exists")
@@ -1065,6 +1074,8 @@ def command_operator(args: argparse.Namespace) -> int:
                 primary_model=args.model,
                 target_checkpoint_name=args.target_checkpoint,
                 memory_root=args.memory_root,
+                empty_memory_fixture=args.empty_memory_fixture,
+                guard_root=args.guard_root,
             )
             _print_yaml(service.study_status(study.study_id)["study"])
         elif args.study_action == "show":
@@ -1607,6 +1618,7 @@ def build_parser() -> argparse.ArgumentParser:
     exp2_build_plan.add_argument("--swe-protocol", required=True)
     exp2_build_plan.add_argument("--apparatus-receipt", required=True)
     exp2_build_plan.add_argument("--empty-memory-fixture", required=True)
+    exp2_build_plan.add_argument("--memory-root", required=True)
     exp2_build_plan.add_argument("--disposable-root", required=True)
     exp2_build_plan.add_argument("--guard-root", required=True)
     exp2_build_plan.add_argument("--public-manifest")
@@ -1966,6 +1978,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="H_bug",
     )
     study_create.add_argument("--memory-root")
+    study_create.add_argument(
+        "--empty-memory-fixture", action="store_true"
+    )
+    study_create.add_argument("--guard-root")
     study_create.set_defaults(func=command_operator)
     study_show = study_sub.add_parser("show")
     governance_options(study_show)

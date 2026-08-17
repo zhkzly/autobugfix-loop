@@ -12,6 +12,7 @@ from typing import Any, Mapping
 import pytest
 import yaml
 
+from autobugfix.cli import build_parser, main
 from autobugfix.config import load_config
 from autobugfix.eval.benchmarks.exp2_records import Exp2ContractError
 from autobugfix.eval.benchmarks.exp2_resume import (
@@ -42,6 +43,7 @@ from autobugfix.eval.benchmarks.service import EvalBenchmarkServiceError
 from autobugfix.eval.benchmarks.subject_broker import SWESubjectBroker
 from autobugfix.eval.benchmarks.swe_models import SWEExperimentProtocol
 from autobugfix.git_utils import rev_parse
+from autobugfix.operator.service import OperatorGovernanceService
 from tests.helpers import make_service_project, run
 
 _EMPTY_MEMORY_SPEC = """schema: autobugfix-exp2-empty-memory-fixture-spec-v1
@@ -49,6 +51,19 @@ fixture_id: exp2-empty-memory-v1
 active_entries: []
 approved_skill_entries: []
 """
+_EMPTY_MEMORY_DIGEST = OperatorGovernanceService.exp2_empty_memory_digest()
+
+
+def _private_empty_memory_root(path: Path) -> Path:
+    for directory in (
+        path,
+        path / "active",
+        path / "skills",
+        path / "skills/approved",
+    ):
+        directory.mkdir(exist_ok=True)
+        directory.chmod(0o700)
+    return path
 
 
 def _digest(label: str) -> str:
@@ -93,7 +108,7 @@ def _candidate_transition(
             {"requested_paths": [path], "actual_paths": [path]}
         ),
         operator_policy_digest=_digest("operator-policy"),
-        memory_fixture_digest=_digest("empty-memory"),
+        memory_fixture_digest=_EMPTY_MEMORY_DIGEST,
         operator_role_skill_digest=_digest("operator-skill"),
         execution_role_skill_digest=execution_skill_digest,
         runtime_digest=_digest("runtime"),
@@ -150,7 +165,7 @@ def _candidate_transition(
             h0_subject_sha=_sha("h0"),
             h0_subject_tree=_sha("h0-tree"),
             operator_policy_digest=_digest("operator-policy"),
-            memory_fixture_digest=_digest("empty-memory"),
+            memory_fixture_digest=_EMPTY_MEMORY_DIGEST,
             operator_role_skill_digest=_digest("operator-skill"),
             execution_role_skill_digest=_digest("execution-skill"),
             runtime_digest=_digest("runtime"),
@@ -197,7 +212,7 @@ def _protocol(*, qualified: bool = True) -> Exp2ResumeProtocol:
         memory_fixture_spec_digest=hashlib.sha256(
             _EMPTY_MEMORY_SPEC.encode()
         ).hexdigest(),
-        memory_fixture_digest=_digest("empty-memory"),
+        memory_fixture_digest=_EMPTY_MEMORY_DIGEST,
         operator_policy_digest=_digest("operator-policy"),
         operator_role_skill_digest=_digest("operator-skill"),
         execution_role_skill_digest=_digest("execution-skill"),
@@ -374,7 +389,7 @@ def _build_protocol_from_qualified_receipts(
             }
 
         def exp2_empty_memory_digest(self) -> str:
-            return _digest("empty-memory")
+            return _EMPTY_MEMORY_DIGEST
 
         def governance_context(self) -> dict[str, str]:
             return {"digest": _digest("operator-policy")}
@@ -596,8 +611,9 @@ def _plan(
         )
         eval_root = config.eval.benchmarks.trusted_case_root
         operator_root = config.operator.state.root
-        memory_root = project_root / ".autobugfix-memory"
+        memory_root = tmp_path / "memory"
         guard_root = tmp_path / "guard"
+    _private_empty_memory_root(memory_root)
     return Exp2ResumeStudyPlan(
         study_id=study_id,
         study_kind=study_kind,  # type: ignore[arg-type]
@@ -710,7 +726,7 @@ def _official_report(
             "executed_subject_sha": intent.subject_sha,
             "executed_subject_tree": intent.subject_tree,
             "subject_runtime_digest": _digest("runtime"),
-            "memory_digest": _digest("empty-memory"),
+            "memory_digest": _EMPTY_MEMORY_DIGEST,
             "image_digest": _digest(f"local:{intent.case_id}"),
             "submission_digest": submission,
             "official_result": official,
@@ -784,6 +800,84 @@ def test_v2_record_parser_rejects_missing_fields() -> None:
 
     with pytest.raises(Exp2ContractError, match="missing fields"):
         Exp2ResumeProtocol.from_dict(raw)
+
+
+def test_build_plan_v2_cli_requires_dedicated_memory_root() -> None:
+    argv = [
+        "eval",
+        "exp2",
+        "build-plan-v2",
+        "--study-id",
+        "calibration-v2",
+        "--study-kind",
+        "calibration",
+        "--protocol-v2",
+        "protocol.yaml",
+        "--swe-protocol",
+        "swe-protocol.yaml",
+        "--apparatus-receipt",
+        "apparatus.yaml",
+        "--empty-memory-fixture",
+        "empty-memory.yaml",
+        "--disposable-root",
+        "/tmp/exp2-disposable",
+        "--guard-root",
+        "/tmp/exp2-guard",
+        "--out",
+        "plan.yaml",
+    ]
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(argv)
+
+    args = build_parser().parse_args(
+        [*argv, "--memory-root", "/tmp/exp2-empty-memory"]
+    )
+    assert args.memory_root == "/tmp/exp2-empty-memory"
+
+
+def test_build_plan_v2_cli_cannot_write_inside_empty_memory_root(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    memory_root = _private_empty_memory_root(tmp_path / "empty-memory")
+    output = memory_root / "plan.yaml"
+
+    result = main(
+        [
+            "eval",
+            "exp2",
+            "build-plan-v2",
+            "--study-id",
+            "calibration-v2",
+            "--study-kind",
+            "calibration",
+            "--protocol-v2",
+            "unused-protocol.yaml",
+            "--swe-protocol",
+            "unused-swe-protocol.yaml",
+            "--apparatus-receipt",
+            "unused-apparatus.yaml",
+            "--empty-memory-fixture",
+            "unused-empty-memory.yaml",
+            "--memory-root",
+            str(memory_root),
+            "--disposable-root",
+            str(tmp_path / "disposable"),
+            "--guard-root",
+            str(tmp_path / "guard"),
+            "--out",
+            str(output),
+        ]
+    )
+
+    assert result == 1
+    assert "must not mutate the empty Memory root" in capsys.readouterr().err
+    assert not output.exists()
+    assert (
+        OperatorGovernanceService.validate_exp2_empty_memory_root(memory_root)
+        == _EMPTY_MEMORY_DIGEST
+    )
 
 
 @pytest.mark.parametrize(
@@ -1183,6 +1277,7 @@ class _FakeExp2EvalService:
         self.project_root = project_root
         self.config = load_config(project_root)
         self.mode = mode
+        self.expected_additional_hidden_paths: set[Path] = set()
         self.execute_calls = 0
         self.rescore_calls = 0
         self.submissions: dict[str, dict[str, str]] = {}
@@ -1279,7 +1374,14 @@ class _FakeExp2EvalService:
         )
         hidden_paths = [
             *(str(path) for path in authority_roots),
-            *(str(path.resolve()) for path in additional_hidden_paths),
+            *(
+                str(path.resolve())
+                for path in (
+                    additional_hidden_paths[1:]
+                    if self.mode == "missing_dedicated_hidden"
+                    else additional_hidden_paths
+                )
+            ),
             str(Path.home().resolve()),
         ]
         sdk = record_with_digest(
@@ -1304,7 +1406,11 @@ class _FakeExp2EvalService:
                 "argv": [
                     "/usr/bin/bwrap",
                     "--tmpfs",
-                    "/tmp",
+                    (
+                        "/var/empty"
+                        if self.mode == "missing_additional_mask"
+                        else "/tmp"
+                    ),
                     "--",
                     "python",
                 ],
@@ -1327,7 +1433,12 @@ class _FakeExp2EvalService:
                 "execution_mode": "protected",
                 "sdk_call_receipt_digests": [sdk["record_digest"]],
                 "additional_hidden_paths": sorted(
-                    str(path.resolve()) for path in additional_hidden_paths
+                    str(path.resolve())
+                    for path in (
+                        additional_hidden_paths[1:]
+                        if self.mode == "missing_dedicated_hidden"
+                        else additional_hidden_paths
+                    )
                 ),
             }
         )
@@ -1406,7 +1517,7 @@ class _FakeExp2EvalService:
             "executed_subject_sha": _sha("h0"),
             "executed_subject_tree": _sha("h0-tree"),
             "subject_runtime_digest": _digest("runtime"),
-            "memory_digest": _digest("empty-memory"),
+            "memory_digest": _EMPTY_MEMORY_DIGEST,
             "image_digest": _digest(f"local:{case_id}"),
             "submission_digest": submission_digest,
             "official_result": official,
@@ -1432,7 +1543,9 @@ class _FakeExp2EvalService:
     ) -> dict[str, Any]:
         del protocol_path, adapter
         assert execution_mode == "protected"
-        assert len(additional_hidden_paths) == 1
+        assert {
+            path.resolve() for path in additional_hidden_paths
+        } == self.expected_additional_hidden_paths
         self.execute_calls += 1
         root = out_root / run_id
         submission = _digest(f"submission:{run_id}")
@@ -1562,6 +1675,12 @@ class _FakeExp2OperatorService:
             "execution_role_skill_digest": _digest("execution-skill"),
         }
 
+    @staticmethod
+    def validate_exp2_empty_memory_root(memory_root: Path) -> str:
+        return OperatorGovernanceService.validate_exp2_empty_memory_root(
+            memory_root
+        )
+
 
 def _fake_image_gate(
     intent: Exp2CaseAttemptIntent,
@@ -1635,6 +1754,10 @@ def _service_bound_authority(
     ):
         path.mkdir(parents=True, exist_ok=True)
     service = _FakeExp2EvalService(project_root, mode=mode)
+    service.expected_additional_hidden_paths = {
+        Path(plan.memory_root).resolve(),
+        Path(plan.guard_root).resolve(),
+    }
     authority = Exp2EvalAuthority(
         project_root,
         coordinator,
@@ -1723,3 +1846,64 @@ def test_service_bound_rejects_dirty_apparatus_before_dispatch(
         authority.resume(execute=True)
 
     assert service.execute_calls == 0
+
+
+def test_service_bound_rejects_redirected_empty_memory_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    coordinator, authority, service = _service_bound_authority(
+        tmp_path,
+        mode="normal",
+    )
+    del coordinator
+    memory_root = Path(authority.plan.memory_root)
+    redirected_target = memory_root.with_name("redirected-memory-target")
+    memory_root.rename(redirected_target)
+    memory_root.symlink_to(redirected_target, target_is_directory=True)
+
+    with pytest.raises(Exp2EvalAuthorityError, match="absolute real directory"):
+        authority.resume(execute=True)
+
+    assert service.execute_calls == 0
+
+
+def test_service_bound_rejects_redirected_guard_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    coordinator, authority, service = _service_bound_authority(
+        tmp_path,
+        mode="normal",
+    )
+    del coordinator
+    guard_root = Path(authority.plan.guard_root)
+    redirected_target = guard_root.with_name("redirected-guard-target")
+    guard_root.rename(redirected_target)
+    guard_root.symlink_to(redirected_target, target_is_directory=True)
+
+    with pytest.raises(
+        Exp2EvalAuthorityError,
+        match="absolute real protected directory",
+    ):
+        authority.resume(execute=True)
+
+    assert service.execute_calls == 0
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["missing_dedicated_hidden", "missing_additional_mask"],
+)
+def test_service_bound_rejects_missing_dedicated_memory_broker_proof(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    coordinator, authority, service = _service_bound_authority(
+        tmp_path,
+        mode=mode,
+    )
+    del coordinator
+
+    with pytest.raises(Exp2EvalAuthorityError, match="outer Bubblewrap proof"):
+        authority.resume(execute=True)
+
+    assert service.execute_calls == 1
