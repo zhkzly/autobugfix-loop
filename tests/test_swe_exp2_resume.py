@@ -12,6 +12,7 @@ from typing import Any, Mapping
 import pytest
 import yaml
 
+import autobugfix.eval.benchmarks.service as benchmark_service
 from autobugfix.cli import build_parser, main
 from autobugfix.config import load_config
 from autobugfix.eval.benchmarks.exp2_records import Exp2ContractError
@@ -39,9 +40,13 @@ from autobugfix.eval.benchmarks.models import (
     digest_payload,
     record_with_digest,
 )
-from autobugfix.eval.benchmarks.service import EvalBenchmarkServiceError
+from autobugfix.eval.benchmarks.service import (
+    EvalBenchmarkService,
+    EvalBenchmarkServiceError,
+)
 from autobugfix.eval.benchmarks.subject_broker import SWESubjectBroker
 from autobugfix.eval.benchmarks.swe_models import SWEExperimentProtocol
+from autobugfix.eval.benchmarks.swe_runtime import SWERuntimeError
 from autobugfix.git_utils import rev_parse
 from autobugfix.operator.service import OperatorGovernanceService
 from tests.helpers import make_service_project, run
@@ -474,6 +479,749 @@ def test_protocol_build_rejects_mismatched_qualification_metadata(
         _build_protocol_from_qualified_receipts(
             tmp_path, monkeypatch, overrides=overrides
         )
+
+
+def _exp2_qualified_instance_inputs(
+    *,
+    qualification_overrides: Mapping[str, Any] | None = None,
+) -> tuple[SimpleNamespace, dict[str, Any], str]:
+    instance_id = "pallets__flask-5014"
+    snapshot_sha = _digest("verified-snapshot")
+    row = {
+        "instance_id": instance_id,
+        "repo": "pallets/flask",
+        "base_commit": _sha("flask-base"),
+        "problem_statement": "Flask should preserve an explicit empty blueprint name.",
+        "hints_text": "Public reproduction steps.",
+        "created_at": "2023-01-01T00:00:00Z",
+        "patch": "diff --git a/flask/app.py b/flask/app.py\n",
+        "test_patch": "diff --git a/tests/test_blueprints.py b/tests/test_blueprints.py\n",
+        "FAIL_TO_PASS": ["tests/test_blueprints.py::test_empty_name"],
+        "PASS_TO_PASS": ["tests/test_basic.py::test_basic"],
+        "version": "2.2",
+    }
+
+    class _Runner:
+        adapter = "swebench_verified"
+        snapshot = SimpleNamespace(
+            dataset="princeton-nlp/SWE-bench_Verified",
+            revision=_sha("verified-revision"),
+            sha256=snapshot_sha,
+        )
+        runtime = SimpleNamespace(
+            evaluator_runtime_id="sha256:" + _digest("evaluator"),
+        )
+
+        def __init__(self) -> None:
+            self.load_instance_calls = 0
+
+        def _row(self, selected: str) -> dict[str, Any]:
+            assert selected == instance_id
+            return dict(row)
+
+        def load_instance(self, *_: Any, **__: Any) -> None:
+            self.load_instance_calls += 1
+            raise AssertionError("Exp2 must not re-run Verified inspection")
+
+    qualification_payload: dict[str, Any] = {
+        "schema": "autobugfix-swe-qualification-v5",
+        "qualification_contract_digest": _digest("qualification-contract"),
+        "adapter": "swebench_verified",
+        "role": "optimization",
+        "instance_id": instance_id,
+        "repository": row["repo"],
+        "base_commit": row["base_commit"],
+        "language": "py",
+        "dataset": _Runner.snapshot.dataset,
+        "dataset_revision": _Runner.snapshot.revision,
+        "dataset_snapshot_sha256": snapshot_sha,
+        "evaluator_runtime_id": _Runner.runtime.evaluator_runtime_id,
+        "image": f"sweb.eval.x86_64.{instance_id}:latest",
+        "eligible": True,
+    }
+    qualification_payload.update(qualification_overrides or {})
+    return _Runner(), record_with_digest(qualification_payload), instance_id
+
+
+def test_exp2_instance_reconstruction_never_calls_verified_inspection() -> None:
+    runner, qualification, instance_id = _exp2_qualified_instance_inputs()
+    service = EvalBenchmarkService.__new__(EvalBenchmarkService)
+
+    instance, replayed = service._exp2_verified_instance_from_qualification(
+        runner,
+        instance_id,
+        qualification,
+        expected_qualification_contract_digest=str(
+            qualification["qualification_contract_digest"]
+        ),
+    )
+
+    assert runner.load_instance_calls == 0
+    assert replayed == qualification
+    assert instance.instance_id == instance_id
+    assert instance.repository == qualification["repository"]
+    assert instance.base_commit == qualification["base_commit"]
+    assert instance.language == qualification["language"]
+    assert instance.docker_image == qualification["image"]
+    assert instance.problem_statement.startswith("Flask should preserve")
+    assert instance.fail_to_pass == (
+        "tests/test_blueprints.py::test_empty_name",
+    )
+
+
+@pytest.mark.parametrize(
+    "qualification_overrides",
+    [
+        {"repository": "wrong/repository"},
+        {"dataset_snapshot_sha256": _digest("drifted-snapshot")},
+        {"evaluator_runtime_id": "sha256:" + _digest("drifted-evaluator")},
+        {"image": "sweb.eval.x86_64.wrong:latest"},
+    ],
+)
+def test_exp2_instance_reconstruction_rejects_qualification_drift(
+    qualification_overrides: Mapping[str, Any],
+) -> None:
+    runner, qualification, instance_id = _exp2_qualified_instance_inputs(
+        qualification_overrides=qualification_overrides
+    )
+    service = EvalBenchmarkService.__new__(EvalBenchmarkService)
+
+    with pytest.raises(
+        EvalBenchmarkServiceError,
+        match="Exp2 qualification instance metadata drift",
+    ):
+        service._exp2_verified_instance_from_qualification(
+            runner,
+            instance_id,
+            qualification,
+            expected_qualification_contract_digest=_digest(
+                "qualification-contract"
+            ),
+        )
+
+    assert runner.load_instance_calls == 0
+
+
+def test_exp2_instance_reconstruction_wraps_snapshot_row_runtime_error() -> None:
+    runner, qualification, instance_id = _exp2_qualified_instance_inputs()
+    service = EvalBenchmarkService.__new__(EvalBenchmarkService)
+
+    def fail_row(_: str) -> dict[str, Any]:
+        raise SWERuntimeError("pinned dataset row is unavailable")
+
+    runner._row = fail_row
+    with pytest.raises(
+        EvalBenchmarkServiceError,
+        match="Exp2 qualification instance metadata is invalid",
+    ):
+        service._exp2_verified_instance_from_qualification(
+            runner,
+            instance_id,
+            qualification,
+            expected_qualification_contract_digest=_digest(
+                "qualification-contract"
+            ),
+        )
+
+    assert runner.load_instance_calls == 0
+
+
+def test_exp2_instance_reconstruction_wraps_snapshot_row_os_error() -> None:
+    runner, qualification, instance_id = _exp2_qualified_instance_inputs()
+    service = EvalBenchmarkService.__new__(EvalBenchmarkService)
+
+    def fail_row(_: str) -> dict[str, Any]:
+        raise OSError("pinned dataset snapshot cannot be read")
+
+    runner._row = fail_row
+    with pytest.raises(
+        EvalBenchmarkServiceError,
+        match="Exp2 qualification instance metadata is invalid",
+    ):
+        service._exp2_verified_instance_from_qualification(
+            runner,
+            instance_id,
+            qualification,
+            expected_qualification_contract_digest=_digest(
+                "qualification-contract"
+            ),
+        )
+
+    assert runner.load_instance_calls == 0
+
+
+def _real_exp2_swe_protocol_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "benchmarks/swe-experiment-2-resume-mvp-v2.yaml"
+    )
+
+
+def _exp2_replay_runner(
+    protocol: SWEExperimentProtocol,
+    case_ids: tuple[str, ...],
+) -> tuple[SimpleNamespace, dict[str, dict[str, Any]]]:
+    snapshot = SimpleNamespace(
+        dataset="princeton-nlp/SWE-bench_Verified",
+        revision=_sha("verified-revision"),
+        sha256=_digest("verified-snapshot"),
+    )
+    runtime = SimpleNamespace(
+        evaluator_runtime_id="sha256:" + _digest("evaluator"),
+        config=SimpleNamespace(swebench_commit=_sha("swebench-harness")),
+    )
+    rows: dict[str, dict[str, Any]] = {}
+    qualifications: dict[str, dict[str, Any]] = {}
+    for case_id in case_ids:
+        repository = f"example/{case_id}"
+        image = f"sweb.eval.x86_64.{case_id}:latest"
+        rows[case_id] = {
+            "instance_id": case_id,
+            "repo": repository,
+            "base_commit": _sha(f"base:{case_id}"),
+            "problem_statement": f"Public issue for {case_id}.",
+            "hints_text": "Public reproduction steps.",
+            "created_at": "2023-01-01T00:00:00Z",
+            "patch": "diff --git a/src.py b/src.py\n",
+            "test_patch": "diff --git a/tests.py b/tests.py\n",
+            "FAIL_TO_PASS": ["tests.py::test_case"],
+            "PASS_TO_PASS": ["tests.py::test_stable"],
+            "version": "1.0",
+        }
+        qualifications[case_id] = record_with_digest(
+            {
+                "schema": "autobugfix-swe-qualification-v5",
+                "qualification_contract_digest": protocol.qualification_contract_digest,
+                "adapter": "swebench_verified",
+                "role": "optimization",
+                "instance_id": case_id,
+                "repository": repository,
+                "base_commit": rows[case_id]["base_commit"],
+                "language": "py",
+                "dataset": snapshot.dataset,
+                "dataset_revision": snapshot.revision,
+                "dataset_snapshot_sha256": snapshot.sha256,
+                "evaluator_runtime_id": runtime.evaluator_runtime_id,
+                "image": image,
+                "image_id": "sha256:" + _digest(f"image:{case_id}"),
+                "source_path": f"/qualified/{case_id}",
+                "source_tree": _sha(f"source-tree:{case_id}"),
+                "source_digest": _digest(f"source:{case_id}"),
+                "docker_authority_digest": _digest("docker-authority"),
+                "eligible": True,
+            }
+        )
+    runner = SimpleNamespace(
+        adapter="swebench_verified",
+        snapshot=snapshot,
+        runtime=runtime,
+        load_instance_calls=0,
+        row_calls=[],
+    )
+
+    def row(selected: str) -> dict[str, Any]:
+        runner.row_calls.append(selected)
+        return dict(rows[selected])
+
+    def load_instance(*_: Any, **__: Any) -> None:
+        runner.load_instance_calls += 1
+        raise AssertionError("Exp2 must not invoke Verified inspection")
+
+    def subject_runtime_identity(_: Any) -> dict[str, Any]:
+        return record_with_digest(
+            {"schema": "test-exp2-subject-runtime-v1"}
+        )
+
+    runner._row = row
+    runner.load_instance = load_instance
+    runner.runtime.subject_runtime_identity = subject_runtime_identity
+    return runner, qualifications
+
+
+def test_exp2_development_replay_branch_skips_inspection_but_generic_path_keeps_it(
+    tmp_path: Path,
+) -> None:
+    protocol_path = _real_exp2_swe_protocol_path()
+    protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+    case_id = "pallets__flask-5014"
+    runner, qualifications = _exp2_replay_runner(protocol, (case_id,))
+    trusted_root = tmp_path / "trusted-eval"
+    service = EvalBenchmarkService.__new__(EvalBenchmarkService)
+    service.config = SimpleNamespace(
+        eval=SimpleNamespace(
+            benchmarks=SimpleNamespace(trusted_case_root=trusted_root)
+        )
+    )
+    service._swe_adapter = lambda _: runner
+    materialized_cases: list[str] = []
+
+    def validate_source(
+        _: Any,
+        instance: Any,
+        qualification: Mapping[str, Any],
+        __: Path,
+    ) -> SimpleNamespace:
+        materialized_cases.append(instance.instance_id)
+        return SimpleNamespace(
+            source_digest=qualification["source_digest"],
+            image_id=qualification["image_id"],
+        )
+
+    class _GenericInspectionCalled(RuntimeError):
+        pass
+
+    class _StopAfterReplay(RuntimeError):
+        pass
+
+    def generic_load_instance(*_: Any, **__: Any) -> None:
+        runner.load_instance_calls += 1
+        raise _GenericInspectionCalled
+
+    class _Store:
+        @staticmethod
+        def write_swe_record(*_: Any) -> Path:
+            raise _StopAfterReplay
+
+    runner.load_instance = generic_load_instance
+    service._validate_swe_qualification_source = validate_source
+    service.store = _Store()
+
+    with pytest.raises(_GenericInspectionCalled):
+        service._run_swe_development_case(
+            protocol_path,
+            "swebench_verified",
+            case_id,
+            run_id="generic-development",
+            out_root=trusted_root / "runs",
+            exp2_qualification=None,
+        )
+
+    with pytest.raises(_StopAfterReplay):
+        service._run_swe_development_case(
+            protocol_path,
+            "swebench_verified",
+            case_id,
+            run_id="exp2-calibration",
+            out_root=trusted_root / "runs",
+            exp2_qualification=qualifications[case_id],
+        )
+
+    observed_calibration_qualifications: list[Mapping[str, Any]] = []
+
+    def run_calibration_branch(*_: Any, **kwargs: Any) -> None:
+        observed_calibration_qualifications.append(
+            kwargs["exp2_qualification"]
+        )
+        raise _StopAfterReplay
+
+    service.exp2_qualification_receipt = lambda _path, _instance: qualifications[
+        case_id
+    ]
+    service._run_swe_development_case = run_calibration_branch
+    with pytest.raises(_StopAfterReplay):
+        service.run_swe_exp2_calibration_case(
+            protocol_path,
+            adapter="swebench_verified",
+            instance_id=case_id,
+            run_id="calibration-wrapper",
+        )
+
+    assert runner.load_instance_calls == 1
+    assert runner.row_calls == [case_id]
+    assert materialized_cases == [case_id]
+    assert observed_calibration_qualifications == [qualifications[case_id]]
+
+
+def test_exp2_manifest_preparation_replays_all_qualified_cases_without_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol_path = _real_exp2_swe_protocol_path()
+    protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+    selected = tuple(item.instance_id for item in protocol.optimization_cases)
+    runner, qualifications = _exp2_replay_runner(protocol, selected)
+    trusted_root = tmp_path / "trusted-eval"
+    source_checks: list[str] = []
+
+    def validate_source(
+        _: Any,
+        instance: Any,
+        qualification: Mapping[str, Any],
+        __: Path,
+    ) -> SimpleNamespace:
+        source_checks.append(instance.instance_id)
+        return SimpleNamespace(
+            source_digest=qualification["source_digest"],
+            image_id=qualification["image_id"],
+        )
+
+    class _Store:
+        manifest: dict[str, Any]
+        rows: list[dict[str, Any]]
+
+        def write_visible_yaml(
+            self,
+            _: str,
+            __: str,
+            payload: Mapping[str, Any],
+        ) -> Path:
+            self.manifest = dict(payload)
+            return trusted_root / "visible" / "manifest.yaml"
+
+        def write_visible_jsonl_rows(
+            self,
+            _: str,
+            __: str,
+            rows: list[dict[str, Any]],
+        ) -> Path:
+            self.rows = list(rows)
+            return trusted_root / "visible" / "optimization.jsonl"
+
+        @staticmethod
+        def write_swe_record(*_: Any) -> Path:
+            return trusted_root / "swe" / "preparation.yaml"
+
+    service = EvalBenchmarkService.__new__(EvalBenchmarkService)
+    service.project_root = tmp_path
+    service.config = SimpleNamespace(
+        eval=SimpleNamespace(
+            benchmarks=SimpleNamespace(trusted_case_root=trusted_root)
+        )
+    )
+    service._swe_adapter = lambda _: runner
+    service._swe_qualification_pool = lambda _protocol, _adapter: list(
+        qualifications.values()
+    )
+    service._validate_swe_qualification_source = validate_source
+    service.guard_authority = lambda: SimpleNamespace(
+        to_dict=lambda: record_with_digest(
+            {"schema": "test-exp2-guard-identity-v1"}
+        )
+    )
+    store = _Store()
+    service.store = store
+    monkeypatch.setattr(
+        benchmark_service,
+        "rev_parse",
+        lambda *_: _sha("h0-subject-tree"),
+    )
+
+    prepared = service.prepare_exp2_resume_manifest(protocol_path)
+
+    assert prepared["optimization_count"] == len(selected)
+    assert runner.load_instance_calls == 0
+    assert runner.row_calls == list(selected)
+    assert source_checks == list(selected)
+    assert all(
+        set(case)
+        == {
+            "schema",
+            "benchmark_instance_id",
+            "qualification_digest",
+            "visible_case",
+            "record_digest",
+        }
+        for case in store.rows
+    )
+    assert all(
+        "gold_patch" not in case["visible_case"]
+        and "test_patch" not in case["visible_case"]
+        for case in store.rows
+    )
+
+
+def test_exp2_formal_run_replays_current_qualification_and_binds_protocol(
+    tmp_path: Path,
+) -> None:
+    protocol_path = _real_exp2_swe_protocol_path()
+    protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+    case_id = protocol.optimization_cases[0].instance_id
+    runner, qualifications = _exp2_replay_runner(protocol, (case_id,))
+    qualification = qualifications[case_id]
+    trusted_root = tmp_path / "trusted-eval"
+    source_checks: list[str] = []
+
+    def validate_source(
+        _: Any,
+        instance: Any,
+        qualified: Mapping[str, Any],
+        __: Path,
+    ) -> SimpleNamespace:
+        source_checks.append(instance.instance_id)
+        return SimpleNamespace(
+            source_digest=qualified["source_digest"],
+            image_id=qualified["image_id"],
+        )
+
+    code_identity = benchmark_service.GuardCodeIdentity(
+        trusted_ref="refs/heads/main",
+        trusted_commit=_sha("trusted-commit"),
+        source_tree=_sha("trusted-tree"),
+        machine_constitution_digest=_digest("constitution"),
+        harness_digest=_digest("harness"),
+    )
+    visible = record_with_digest(
+        {
+            "schema_version": 1,
+            "case_token": "opt-replay-case",
+            "benchmark": "swebench_verified",
+            "dataset_revision": runner.snapshot.revision,
+            "harness_commit": runner.runtime.config.swebench_commit,
+            "repository": qualification["repository"],
+            "base_commit": qualification["base_commit"],
+            "language": qualification["language"],
+            "task_type": "bugfix",
+            "problem_statement": "Public issue for the formal replay.",
+            "public_hints": [],
+            "attachments": [],
+            "first_wave": 3,
+            "source_snapshot_digest": qualification["source_digest"],
+            "verifier_profile": "swe-visible-v1",
+        }
+    )
+    selected = record_with_digest(
+        {
+            "schema": "autobugfix-swe-optimization-case-v1",
+            "benchmark_instance_id": case_id,
+            "qualification_digest": qualification["record_digest"],
+            "visible_case": visible,
+        }
+    )
+    public = {
+        "protocol_digest": protocol.protocol_digest,
+        "qualification_contract_digest": protocol.qualification_contract_digest,
+        "codex_runtime": protocol.codex_runtime.to_dict(),
+        "subject_runtime": record_with_digest(
+            {"schema": "test-exp2-subject-runtime-v1"}
+        ),
+        "evaluator_runtime_id": runner.runtime.evaluator_runtime_id,
+        "guard": {"code_identity": code_identity.to_dict()},
+        "optimization_cases": [selected],
+    }
+    service = EvalBenchmarkService.__new__(EvalBenchmarkService)
+    service.config = SimpleNamespace(
+        eval=SimpleNamespace(
+            benchmarks=SimpleNamespace(trusted_case_root=trusted_root)
+        )
+    )
+    service._load_swe_public_manifest = lambda _: public
+    service._load_swe_study_binding = lambda *_args, **_kwargs: {
+        "kind": "BASELINE",
+        "study_id": "study",
+    }
+    service.guard_authority = lambda: code_identity
+    service._swe_adapter = lambda _: runner
+    service._swe_qualification_pool = lambda _protocol, _adapter: [qualification]
+    service._validate_swe_qualification_source = validate_source
+    captured: dict[str, Any] = {}
+
+    def execute_formal(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"status": "executed"}
+
+    service._execute_formal_swe_case = execute_formal
+
+    mismatched_payload = dict(selected)
+    mismatched_payload.pop("record_digest")
+    mismatched_payload["qualification_digest"] = _digest("different-record")
+    public["optimization_cases"] = [record_with_digest(mismatched_payload)]
+    with pytest.raises(EvalBenchmarkServiceError, match="qualification drift"):
+        service.run_swe_exp2_case(
+            tmp_path / "visible.yaml",
+            swe_protocol_path=protocol_path,
+            case_selector=case_id,
+            study_binding_path=tmp_path / "binding.yaml",
+            out_root=trusted_root / "formal-runs",
+            run_id="formal-mismatch",
+            expected_binding_kinds={"BASELINE"},
+        )
+
+    drifted_protocol_data = yaml.safe_load(
+        protocol_path.read_text(encoding="utf-8")
+    )
+    assert isinstance(drifted_protocol_data, dict)
+    drifted_protocol_data["protocol_id"] = "different-exp2-protocol"
+    drifted_protocol_path = tmp_path / "drifted-swe-protocol.yaml"
+    drifted_protocol_path.write_text(
+        yaml.safe_dump(drifted_protocol_data, sort_keys=False),
+        encoding="utf-8",
+    )
+    public["optimization_cases"] = [selected]
+    with pytest.raises(EvalBenchmarkServiceError, match="manifest protocol drift"):
+        service.run_swe_exp2_case(
+            tmp_path / "visible.yaml",
+            swe_protocol_path=drifted_protocol_path,
+            case_selector=case_id,
+            study_binding_path=tmp_path / "binding.yaml",
+            out_root=trusted_root / "formal-runs",
+            run_id="formal-protocol-drift",
+            expected_binding_kinds={"BASELINE"},
+        )
+
+    result = service.run_swe_exp2_case(
+        tmp_path / "visible.yaml",
+        swe_protocol_path=protocol_path,
+        case_selector=case_id,
+        study_binding_path=tmp_path / "binding.yaml",
+        out_root=trusted_root / "formal-runs",
+        run_id="formal-replay",
+        expected_binding_kinds={"BASELINE"},
+    )
+
+    assert result == {"status": "executed"}
+    assert runner.load_instance_calls == 0
+    assert runner.row_calls == [case_id]
+    assert source_checks == [case_id]
+    assert captured["instance"].instance_id == case_id
+    assert captured["materialized"].source_digest == qualification["source_digest"]
+
+
+def test_exp2_scorer_retry_replays_qualification_without_verified_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol_path = _real_exp2_swe_protocol_path()
+    protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+    case_id = "pallets__flask-5014"
+    runner, qualifications = _exp2_replay_runner(protocol, (case_id,))
+    qualification = qualifications[case_id]
+    trusted_root = tmp_path / "trusted-eval"
+    submission_digest = _digest("frozen-submission")
+    source_root = trusted_root / "source-run"
+    subject_root = source_root / "subject-run"
+    evidence_root = subject_root / "frozen-execution-evidence"
+    command = record_with_digest({"schema": "test-command-v1"})
+    broker = record_with_digest(
+        {
+            "schema": "test-exp2-broker-v1",
+            "submission_digest": submission_digest,
+            "executed_subject_sha": _sha("h0-subject"),
+            "executed_subject_tree": _sha("h0-tree"),
+            "execution_mode": "protected",
+            "sdk_call_receipt_digests": [_digest("sdk-call")],
+            "command": command,
+            "task_worktree_path": str((subject_root / "task").resolve()),
+        }
+    )
+    ledger = record_with_digest({"schema": "test-exp2-ledger-v1"})
+    subject_binding = record_with_digest(
+        {
+            "schema": "test-exp2-subject-binding-v1",
+            "memory_digest": _EMPTY_MEMORY_DIGEST,
+        }
+    )
+    subject_root.mkdir(parents=True)
+    evidence_root.mkdir()
+    (subject_root / "broker-result.yaml").write_text(
+        yaml.safe_dump(broker, sort_keys=False),
+        encoding="utf-8",
+    )
+    (evidence_root / "execution-ledger.json").write_text(
+        json.dumps(ledger),
+        encoding="utf-8",
+    )
+    (evidence_root / "subject-binding.yaml").write_text(
+        yaml.safe_dump(subject_binding, sort_keys=False),
+        encoding="utf-8",
+    )
+    (
+        trusted_root
+        / "swe"
+        / "submissions"
+        / "swebench_verified"
+        / "authority"
+        / submission_digest
+    ).mkdir(parents=True)
+
+    frozen_submission = SimpleNamespace(
+        record={"record_digest": submission_digest},
+        base_commit=qualification["base_commit"],
+        subject_sha=_sha("h0-subject"),
+        subject_tree=_sha("h0-tree"),
+    )
+    frozen = SimpleNamespace(
+        submission=frozen_submission,
+        identity=lambda: {"submission_digest": submission_digest},
+    )
+
+    class _SubmissionAuthority:
+        def __init__(self, _: Path):
+            pass
+
+        @staticmethod
+        def load(_: Path) -> SimpleNamespace:
+            return frozen
+
+    class _OfficialResult:
+        resolved = False
+        harness_error = False
+
+        @staticmethod
+        def to_dict() -> dict[str, Any]:
+            return record_with_digest(
+                {
+                    "schema": "autobugfix-swe-official-result-v1",
+                    "instance_id": case_id,
+                    "resolved": False,
+                    "harness_error": False,
+                }
+            )
+
+    def image_id(_: Any, __: Path, *, allow_pull: bool) -> str:
+        assert allow_pull is False
+        return str(qualification["image_id"])
+
+    def score(instance: Any, *_: Any, **__: Any) -> _OfficialResult:
+        assert instance.instance_id == case_id
+        runner.score_calls += 1
+        return _OfficialResult()
+
+    def noninterference(
+        _: Any,
+        __: Mapping[str, Any],
+        *,
+        official_result_digest: str,
+    ) -> dict[str, Any]:
+        return record_with_digest(
+            {
+                "schema": "autobugfix-swe-noninterference-v1",
+                "submission_digest": submission_digest,
+                "official_result_digest": official_result_digest,
+                "unchanged": True,
+            }
+        )
+
+    runner.image_id = image_id
+    runner.score = score
+    runner.score_calls = 0
+    service = EvalBenchmarkService.__new__(EvalBenchmarkService)
+    service.config = SimpleNamespace(
+        eval=SimpleNamespace(
+            benchmarks=SimpleNamespace(trusted_case_root=trusted_root)
+        )
+    )
+    service._swe_adapter = lambda _: runner
+    service.exp2_qualification_receipt = lambda _path, _instance: qualification
+    service.submission_noninterference = noninterference
+    monkeypatch.setattr(
+        benchmark_service,
+        "SWESubmissionAuthority",
+        _SubmissionAuthority,
+    )
+
+    report = service.rescore_swe_exp2_submission(
+        protocol_path,
+        instance_id=case_id,
+        submission_digest=submission_digest,
+        source_run_root=source_root,
+        out_root=trusted_root / "retry-runs",
+        run_id="retry-replay",
+    )
+
+    assert report["schema"] == "autobugfix-exp2-scorer-retry-report-v2"
+    assert runner.load_instance_calls == 0
+    assert runner.row_calls == [case_id]
+    assert runner.score_calls == 1
 
 
 def _write_protocol(tmp_path: Path, protocol: Exp2ResumeProtocol) -> Path:
@@ -1280,6 +2028,7 @@ class _FakeExp2EvalService:
         self.expected_additional_hidden_paths: set[Path] = set()
         self.execute_calls = 0
         self.rescore_calls = 0
+        self.formal_swe_protocol_paths: list[Path] = []
         self.submissions: dict[str, dict[str, str]] = {}
 
     def exp2_runtime_identity(self, protocol_path: Path) -> dict[str, Any]:
@@ -1571,6 +2320,48 @@ class _FakeExp2EvalService:
             self.mode = "normal"
             raise EvalBenchmarkServiceError("forced post-report interruption")
         return report
+
+    def run_swe_exp2_case(
+        self,
+        public_manifest_path: Path,
+        *,
+        swe_protocol_path: Path,
+        case_selector: str,
+        study_binding_path: Path,
+        out_root: Path,
+        run_id: str,
+        expected_binding_kinds: set[str],
+        execution_mode: str,
+        disposable_root: Path,
+        additional_hidden_paths: tuple[Path, ...],
+    ) -> dict[str, Any]:
+        del public_manifest_path, study_binding_path, expected_binding_kinds
+        assert execution_mode == "protected"
+        assert {
+            path.resolve() for path in additional_hidden_paths
+        } == self.expected_additional_hidden_paths
+        self.formal_swe_protocol_paths.append(swe_protocol_path.resolve())
+        self.execute_calls += 1
+        root = out_root / run_id
+        submission = _digest(f"submission:{run_id}")
+        evidence = self._execution_evidence(
+            root=root,
+            run_id=run_id,
+            case_id=case_selector,
+            disposable_root=disposable_root,
+            submission_digest=submission,
+            additional_hidden_paths=additional_hidden_paths,
+        )
+        report = self._official_report(
+            case_id=case_selector,
+            run_id=run_id,
+            submission_digest=submission,
+            execution=evidence["execution"],
+        )
+        payload = dict(report)
+        payload.pop("record_digest")
+        payload["schema"] = "autobugfix-swe-formal-case-v2"
+        return record_with_digest(payload)
 
     def verify_exp2_frozen_submission(
         self,

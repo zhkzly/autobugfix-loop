@@ -888,6 +888,7 @@ class Exp2EvalAuthority:
                 )
             self.service.run_swe_exp2_case(
                 Path(self.plan.public_manifest_path),
+                swe_protocol_path=Path(self.plan.swe_protocol_path),
                 case_selector=intent.case_id,
                 study_binding_path=Path(binding_path),
                 out_root=output_parent,

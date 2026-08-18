@@ -866,6 +866,39 @@ class EvalBenchmarkService:
         out_root: Path | None = None,
         additional_hidden_paths: tuple[Path, ...] = (),
     ) -> dict[str, Any]:
+        return self._run_swe_development_case(
+            protocol_path,
+            adapter,
+            instance_id,
+            run_id=run_id,
+            subject_sha=subject_sha,
+            model=model,
+            max_attempts=max_attempts,
+            timeout_seconds=timeout_seconds,
+            execution_mode=execution_mode,
+            disposable_root=disposable_root,
+            out_root=out_root,
+            additional_hidden_paths=additional_hidden_paths,
+            exp2_qualification=None,
+        )
+
+    def _run_swe_development_case(
+        self,
+        protocol_path: Path,
+        adapter: str,
+        instance_id: str,
+        *,
+        run_id: str,
+        subject_sha: str | None = None,
+        model: str = "gpt-5.4-mini",
+        max_attempts: int = 2,
+        timeout_seconds: int = 900,
+        execution_mode: SWEExecutionMode = "protected",
+        disposable_root: Path | None = None,
+        out_root: Path | None = None,
+        additional_hidden_paths: tuple[Path, ...] = (),
+        exp2_qualification: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
         protocol = SWEExperimentProtocol.from_yaml(protocol_path)
         if (
             model != protocol.model
@@ -907,13 +940,30 @@ class EvalBenchmarkService:
             root = output / run_name
         if root.exists():
             raise EvalBenchmarkServiceError("SWE development run_id already exists")
-        inspection_root = root / "inspection"
-        instance = runner.load_instance(identity, inspection_root)
-        image_id = runner.image_id(instance, root / "image", allow_pull=False)
-        materialized = SWEImageMaterializer(runner).materialize(
-            instance,
-            root / "materialization",
-        )
+        if exp2_qualification is None:
+            inspection_root = root / "inspection"
+            instance = runner.load_instance(identity, inspection_root)
+            image_id = runner.image_id(instance, root / "image", allow_pull=False)
+            materialized = SWEImageMaterializer(runner).materialize(
+                instance,
+                root / "materialization",
+            )
+        else:
+            instance, _ = self._exp2_verified_instance_from_qualification(
+                runner,
+                identity,
+                exp2_qualification,
+                expected_qualification_contract_digest=(
+                    protocol.qualification_contract_digest
+                ),
+            )
+            materialized = self._validate_swe_qualification_source(
+                runner,
+                instance,
+                exp2_qualification,
+                root / "materialization",
+            )
+            image_id = materialized.image_id
         visible = SWEVisibleCase(
             case_token=f"dev-{hashlib.sha256(f'{adapter}:{identity}'.encode()).hexdigest()[:24]}",
             benchmark=adapter,  # type: ignore[arg-type]
@@ -1130,7 +1180,11 @@ class EvalBenchmarkService:
         any scorer-private fields to the coordinator.
         """
 
-        report = self.run_swe_development_case(
+        qualification = self.exp2_qualification_receipt(
+            protocol_path,
+            instance_id,
+        )
+        report = self._run_swe_development_case(
             protocol_path,
             adapter,
             instance_id,
@@ -1139,6 +1193,7 @@ class EvalBenchmarkService:
             disposable_root=disposable_root,
             out_root=out_root,
             additional_hidden_paths=additional_hidden_paths,
+            exp2_qualification=qualification,
         )
         trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
         official_source = Path(str(report.get("official_result_path") or ""))
@@ -1268,8 +1323,18 @@ class EvalBenchmarkService:
             )
 
         runner = self._swe_adapter("swebench_verified")
-        instance = runner.load_instance(identity, root / "inspection")
+        qualification = self.exp2_qualification_receipt(protocol_path, identity)
+        instance, qualification = self._exp2_verified_instance_from_qualification(
+            runner,
+            identity,
+            qualification,
+            expected_qualification_contract_digest=(
+                protocol.qualification_contract_digest
+            ),
+        )
         image_id = runner.image_id(instance, root / "image", allow_pull=False)
+        if image_id != qualification.get("image_id"):
+            raise EvalBenchmarkServiceError("qualified SWE image identity drift")
         matches = tuple(
             (trusted_root / "swe" / "submissions" / "swebench_verified").glob(
                 f"*/{submission_digest}"
@@ -1861,6 +1926,7 @@ class EvalBenchmarkService:
         self,
         public_manifest_path: Path,
         *,
+        swe_protocol_path: Path,
         case_selector: str,
         study_binding_path: Path,
         out_root: Path,
@@ -1921,6 +1987,46 @@ class EvalBenchmarkService:
         treatment = SWESubjectTreatmentRuntime.from_dict(public["codex_runtime"])
         instance_id = str(selected["benchmark_instance_id"])
         runner = self._swe_adapter("swebench_verified")
+        try:
+            swe_protocol = SWEExperimentProtocol.from_yaml(swe_protocol_path)
+        except (BenchmarkContractError, OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise EvalBenchmarkServiceError(
+                "SWE Exp2 trusted protocol is invalid"
+            ) from exc
+        if (
+            swe_protocol.protocol_digest != public.get("protocol_digest")
+            or swe_protocol.qualification_contract_digest
+            != public.get("qualification_contract_digest")
+        ):
+            raise EvalBenchmarkServiceError("SWE Exp2 manifest protocol drift")
+        qualifications = [
+            record
+            for record in self._swe_qualification_pool(
+                swe_protocol,
+                "swebench_verified",
+            )
+            if record.get("instance_id") == instance_id
+        ]
+        if len(qualifications) != 1:
+            raise EvalBenchmarkServiceError(
+                f"SWE Exp2 case lacks one current eligible qualification: {instance_id}"
+            )
+        if qualifications[0].get("record_digest") != selected.get(
+            "qualification_digest"
+        ):
+            raise EvalBenchmarkServiceError(
+                f"SWE Exp2 qualification drift: {instance_id}"
+            )
+        instance, qualification = (
+            self._exp2_verified_instance_from_qualification(
+                runner,
+                instance_id,
+                qualifications[0],
+                expected_qualification_contract_digest=(
+                    swe_protocol.qualification_contract_digest
+                ),
+            )
+        )
         output = out_root.resolve()
         trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
         if not output.is_relative_to(trusted_root):
@@ -1929,11 +2035,13 @@ class EvalBenchmarkService:
             )
         root = output / safe_component(run_id, "run_id")
         root.mkdir(parents=True, mode=0o700, exist_ok=False)
-        instance = runner.load_instance(instance_id, root / "inspection")
-        image_id = runner.image_id(instance, root / "image", allow_pull=False)
-        materialized = SWEImageMaterializer(runner).materialize(
-            instance, root / "materialization"
+        materialized = self._validate_swe_qualification_source(
+            runner,
+            instance,
+            qualification,
+            root / "materialization",
         )
+        image_id = materialized.image_id
         if (
             visible.repository != instance.repository
             or visible.base_commit != instance.base_commit
@@ -2398,6 +2506,66 @@ class EvalBenchmarkService:
                 f"Exp2 case lacks one current eligible qualification: {identity}"
             )
         return dict(matches[0])
+
+    @staticmethod
+    def _exp2_verified_instance_from_qualification(
+        runner: Any,
+        instance_id: str,
+        qualification: Mapping[str, Any],
+        *,
+        expected_qualification_contract_digest: str,
+    ) -> tuple[SWEInstance, dict[str, Any]]:
+        """Replay one Exp2 instance without invoking remote test-spec inspection."""
+
+        identity = safe_component(instance_id, "instance_id")
+        try:
+            verify_record(qualification)
+            instance = SWEInstance.from_verified(
+                runner._row(identity),
+                {
+                    "language": qualification.get("language"),
+                    "docker_image": qualification.get("image"),
+                },
+            )
+        except (
+            BenchmarkContractError,
+            OSError,
+            SWERuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise EvalBenchmarkServiceError(
+                "Exp2 qualification instance metadata is invalid"
+            ) from exc
+        if (
+            runner.adapter != "swebench_verified"
+            or qualification.get("schema")
+            != "autobugfix-swe-qualification-v5"
+            or qualification.get("qualification_contract_digest")
+            != expected_qualification_contract_digest
+            or qualification.get("adapter") != "swebench_verified"
+            or qualification.get("role") != "optimization"
+            or qualification.get("eligible") is not True
+            or qualification.get("instance_id") != identity
+            or qualification.get("dataset") != runner.snapshot.dataset
+            or qualification.get("dataset_revision")
+            != runner.snapshot.revision
+            or qualification.get("dataset_snapshot_sha256")
+            != runner.snapshot.sha256
+            or qualification.get("evaluator_runtime_id")
+            != runner.runtime.evaluator_runtime_id
+            or instance.instance_id != identity
+            or instance.repository != qualification.get("repository")
+            or instance.base_commit != qualification.get("base_commit")
+            or instance.language != qualification.get("language")
+            or instance.docker_image != qualification.get("image")
+            or instance.docker_image
+            != f"sweb.eval.x86_64.{identity}:latest"
+        ):
+            raise EvalBenchmarkServiceError(
+                "Exp2 qualification instance metadata drift"
+            )
+        return instance, dict(qualification)
 
     @staticmethod
     def _swe_first_wave(index: int, *, role: str) -> int:
@@ -2995,14 +3163,20 @@ class EvalBenchmarkService:
         visible_cases = []
         for index, case_id in enumerate(selected):
             record = qualifications[case_id]
-            instance = runner.load_instance(
-                case_id,
-                validation_root / "inspection" / case_id,
+            instance, replayed_qualification = (
+                self._exp2_verified_instance_from_qualification(
+                    runner,
+                    case_id,
+                    record,
+                    expected_qualification_contract_digest=(
+                        protocol.qualification_contract_digest
+                    ),
+                )
             )
             materialized = self._validate_swe_qualification_source(
                 runner,
                 instance,
-                record,
+                replayed_qualification,
                 validation_root / "materialization" / case_id,
             )
             token = "opt-" + hashlib.sha256(
@@ -3028,6 +3202,7 @@ class EvalBenchmarkService:
                     {
                         "schema": "autobugfix-swe-optimization-case-v1",
                         "benchmark_instance_id": case_id,
+                        "qualification_digest": record["record_digest"],
                         "visible_case": visible.to_dict(),
                     }
                 )
