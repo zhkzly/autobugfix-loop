@@ -824,12 +824,137 @@ def test_exp2_development_replay_branch_skips_inspection_but_generic_path_keeps_
             adapter="swebench_verified",
             instance_id=case_id,
             run_id="calibration-wrapper",
+            memory_root=_private_empty_memory_root(tmp_path / "empty-memory"),
         )
 
     assert runner.load_instance_calls == 1
     assert runner.row_calls == [case_id]
     assert materialized_cases == [case_id]
     assert observed_calibration_qualifications == [qualifications[case_id]]
+
+
+def test_exp2_calibration_memory_must_be_the_validated_fixture_root(
+    tmp_path: Path,
+) -> None:
+    service = EvalBenchmarkService.__new__(EvalBenchmarkService)
+    service.config = SimpleNamespace(
+        eval=SimpleNamespace(
+            benchmarks=SimpleNamespace(
+                trusted_case_root=(tmp_path / "trusted-eval").resolve()
+            )
+        )
+    )
+    service.exp2_qualification_receipt = (
+        lambda _path, _instance: _qualification_record("pallets__flask-5014")
+    )
+    captured: dict[str, Any] = {}
+
+    class _StopAfterCapture(RuntimeError):
+        pass
+
+    def development_case(*_: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        raise _StopAfterCapture
+
+    service._run_swe_development_case = development_case
+    fixture_root = _private_empty_memory_root(tmp_path / "empty-memory")
+
+    with pytest.raises(_StopAfterCapture):
+        service.run_swe_exp2_calibration_case(
+            _real_exp2_swe_protocol_path(),
+            adapter="swebench_verified",
+            instance_id="pallets__flask-5014",
+            run_id="calibration-memory",
+            memory_root=fixture_root,
+        )
+    assert captured["memory_snapshot"] == fixture_root
+
+    stray_root = tmp_path / "stray-memory"
+    stray_root.mkdir()
+    (stray_root / "active").mkdir()
+    (stray_root / "notes.txt").write_text("not a fixture\n", encoding="utf-8")
+    captured.clear()
+    with pytest.raises(
+        EvalBenchmarkServiceError, match="frozen empty fixture"
+    ):
+        service.run_swe_exp2_calibration_case(
+            _real_exp2_swe_protocol_path(),
+            adapter="swebench_verified",
+            instance_id="pallets__flask-5014",
+            run_id="calibration-memory",
+            memory_root=stray_root,
+        )
+    assert captured == {}
+
+
+def test_exp2_development_case_threads_memory_snapshot_to_broker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol_path = _real_exp2_swe_protocol_path()
+    protocol = SWEExperimentProtocol.from_yaml(protocol_path)
+    case_id = "pallets__flask-5014"
+    runner, qualifications = _exp2_replay_runner(protocol, (case_id,))
+    trusted_root = tmp_path / "trusted-eval"
+
+    def validate_source(
+        _: Any,
+        instance: Any,
+        qualification: Mapping[str, Any],
+        __: Path,
+    ) -> SimpleNamespace:
+        del instance
+        return SimpleNamespace(
+            source_digest=qualification["source_digest"],
+            image_id=qualification["image_id"],
+        )
+
+    class _Store:
+        @staticmethod
+        def write_swe_record(*_: Any, **__: Any) -> Path:
+            return trusted_root / "visible" / "record.yaml"
+
+    class _StopAtBroker(RuntimeError):
+        pass
+
+    captured: dict[str, Any] = {}
+
+    class _BrokerStub:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def run(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+            raise _StopAtBroker
+
+    service = EvalBenchmarkService.__new__(EvalBenchmarkService)
+    service.project_root = tmp_path
+    service.config = SimpleNamespace(
+        eval=SimpleNamespace(
+            benchmarks=SimpleNamespace(trusted_case_root=trusted_root)
+        )
+    )
+    service._swe_adapter = lambda _: runner
+    service._validate_swe_qualification_source = validate_source
+    service.store = _Store()
+    monkeypatch.setattr(benchmark_service, "SWESubjectBroker", _BrokerStub)
+    monkeypatch.setattr(
+        benchmark_service, "rev_parse", lambda *_: _sha("h0-subject-tree")
+    )
+    fixture_root = _private_empty_memory_root(tmp_path / "empty-memory")
+
+    with pytest.raises(_StopAtBroker):
+        service._run_swe_development_case(
+            protocol_path,
+            "swebench_verified",
+            case_id,
+            run_id="exp2-calibration",
+            out_root=trusted_root / "runs",
+            exp2_qualification=qualifications[case_id],
+            memory_snapshot=fixture_root,
+        )
+
+    assert captured["memory_snapshot"] == fixture_root
 
 
 def test_exp2_manifest_preparation_replays_all_qualified_cases_without_inspection(
@@ -2065,6 +2190,7 @@ class _FakeExp2EvalService:
         self.formal_swe_protocol_paths: list[Path] = []
         self.submissions: dict[str, dict[str, str]] = {}
         self.report_memory_digest: str | None = None
+        self.expected_memory_root: Path | None = None
 
     def exp2_runtime_identity(self, protocol_path: Path) -> dict[str, Any]:
         return record_with_digest(
@@ -2324,9 +2450,11 @@ class _FakeExp2EvalService:
         disposable_root: Path,
         out_root: Path,
         additional_hidden_paths: tuple[Path, ...],
+        memory_root: Path,
     ) -> dict[str, Any]:
         del protocol_path, adapter
         assert execution_mode == "protected"
+        assert memory_root == self.expected_memory_root
         assert {
             path.resolve() for path in additional_hidden_paths
         } == self.expected_additional_hidden_paths
@@ -2584,6 +2712,10 @@ def _service_bound_authority(
         Path(plan.memory_root).resolve(),
         Path(plan.guard_root).resolve(),
     }
+    service.expected_memory_root = Path(plan.memory_root)
+    service.report_memory_digest = SWESubjectBroker.memory_input_digest(
+        Path(plan.memory_root)
+    )
     authority = Exp2EvalAuthority(
         project_root,
         coordinator,
@@ -2628,7 +2760,11 @@ def test_service_bound_receipt_binds_frozen_memory_fixture_not_broker_digest(
         tmp_path,
         mode="report_then_raise",
     )
-    service.report_memory_digest = _digest("broker-memory-input")
+    validated_input = SWESubjectBroker.memory_input_digest(
+        Path(coordinator.load_plan().memory_root)
+    )
+    assert validated_input != coordinator.load_plan().memory_fixture_digest
+    service.report_memory_digest = validated_input
 
     with pytest.raises(Exp2EvalAuthorityError, match="post-report interruption"):
         authority.resume(execute=True)
@@ -2650,7 +2786,23 @@ def test_service_bound_receipt_binds_frozen_memory_fixture_not_broker_digest(
         receipts[0].memory_digest
         == coordinator.load_plan().memory_fixture_digest
     )
-    assert receipts[0].memory_digest != service.report_memory_digest
+    assert receipts[0].memory_digest != validated_input
+
+
+def test_service_bound_rejects_memory_input_not_derived_from_validated_root(
+    tmp_path: Path,
+) -> None:
+    coordinator, authority, service = _service_bound_authority(
+        tmp_path,
+        mode="normal",
+    )
+    del coordinator
+    service.report_memory_digest = _digest("unrelated-memory-input")
+
+    with pytest.raises(Exp2EvalAuthorityError, match="validated fixture root"):
+        authority.resume(execute=True)
+
+    assert service.execute_calls == 1
 
 
 def test_service_bound_scorer_retry_reuses_frozen_submission(

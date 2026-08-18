@@ -330,6 +330,11 @@ class SWESubjectBroker:
         )
 
     @staticmethod
+    def memory_input_digest(memory_root: Path) -> str:
+        """File-set digest a subject binding records for a Memory input tree."""
+        return SWESubjectBroker._tree_digest(memory_root)
+
+    @staticmethod
     def _build_evidence_tree(
         destination: Path,
         sources: Mapping[str, Path],

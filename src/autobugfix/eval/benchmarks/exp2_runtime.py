@@ -39,6 +39,7 @@ from autobugfix.eval.benchmarks.service import (
 )
 from autobugfix.eval.benchmarks.swe_models import SWEExperimentProtocol
 from autobugfix.eval.benchmarks.swe_submission import verify_evidence_manifest
+from autobugfix.eval.benchmarks.subject_broker import SWESubjectBroker
 from autobugfix.git_utils import rev_parse, run_git
 from autobugfix.operator.service import (
     OperatorGovernanceError,
@@ -732,6 +733,13 @@ class Exp2EvalAuthority:
             raise Exp2EvalAuthorityError(
                 "Exp2 report image differs from its trusted image gate"
             )
+        expected_memory_input = SWESubjectBroker.memory_input_digest(
+            Path(self.plan.memory_root)
+        )
+        if report.get("memory_digest") != expected_memory_input:
+            raise Exp2EvalAuthorityError(
+                "Exp2 report Memory input differs from the validated fixture root"
+            )
         submission_digest = str(report.get("submission_digest") or "")
         frozen_verification = self.service.verify_exp2_frozen_submission(
             submission_digest=submission_digest,
@@ -866,6 +874,7 @@ class Exp2EvalAuthority:
                     Path(self.plan.memory_root),
                     Path(self.plan.guard_root),
                 ),
+                memory_root=Path(self.plan.memory_root),
             )
         else:
             if self.plan.public_manifest_path is None:

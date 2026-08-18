@@ -898,6 +898,7 @@ class EvalBenchmarkService:
         out_root: Path | None = None,
         additional_hidden_paths: tuple[Path, ...] = (),
         exp2_qualification: Mapping[str, Any] | None,
+        memory_snapshot: Path | None = None,
     ) -> dict[str, Any]:
         protocol = SWEExperimentProtocol.from_yaml(protocol_path)
         if (
@@ -1016,6 +1017,7 @@ class EvalBenchmarkService:
             execution_mode=execution_mode,
             disposable_root=disposable_root,
             additional_hidden_paths=additional_hidden_paths,
+            memory_snapshot=memory_snapshot,
         )
         broker_result_path = root / "subject-run" / "broker-result.yaml"
         if broker_result_path.is_symlink() or not broker_result_path.is_file():
@@ -1171,14 +1173,25 @@ class EvalBenchmarkService:
         disposable_root: Path | None = None,
         out_root: Path | None = None,
         additional_hidden_paths: tuple[Path, ...] = (),
+        memory_root: Path,
     ) -> dict[str, Any]:
         """Adapt an existing H0 development run into Exp2 calibration input.
 
         Calibration is deliberately outside the formal ten-case denominator
         and therefore uses the existing H0-only development endpoint.  The
         official result is copied into a result projection without exposing
-        any scorer-private fields to the coordinator.
+        any scorer-private fields to the coordinator.  ``memory_root`` must
+        be the authority-validated empty Memory fixture: the broker copies
+        the subject's Study Memory input from that root, so the execution
+        time input derives from the frozen fixture instead of a fabricated
+        directory.
         """
+        try:
+            OperatorGovernanceService.validate_exp2_empty_memory_root(memory_root)
+        except (OperatorGovernanceError, OSError) as exc:
+            raise EvalBenchmarkServiceError(
+                "Exp2 calibration Memory root is not the frozen empty fixture"
+            ) from exc
 
         qualification = self.exp2_qualification_receipt(
             protocol_path,
@@ -1194,6 +1207,7 @@ class EvalBenchmarkService:
             out_root=out_root,
             additional_hidden_paths=additional_hidden_paths,
             exp2_qualification=qualification,
+            memory_snapshot=memory_root,
         )
         trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
         official_source = Path(str(report.get("official_result_path") or ""))
