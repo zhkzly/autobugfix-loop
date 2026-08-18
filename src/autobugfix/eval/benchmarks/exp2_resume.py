@@ -3242,6 +3242,7 @@ class Exp2ResumeCoordinator:
                 failure_stage=str(result.get("failure_stage") or "unknown"),  # type: ignore[arg-type]
                 image_digest=(str(result["image_digest"]) if result.get("image_digest") else None),
                 runtime_digest=(str(result["runtime_digest"]) if result.get("runtime_digest") else None),
+                memory_digest=(str(result["memory_digest"]) if result.get("memory_digest") else None),
                 usage_digest=(str(result["usage_digest"]) if result.get("usage_digest") else None),
             )
         raise Exp2ResumeError("executor result must carry an official report or terminal receipt")

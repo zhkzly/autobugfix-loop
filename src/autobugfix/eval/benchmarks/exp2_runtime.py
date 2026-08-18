@@ -826,6 +826,7 @@ class Exp2EvalAuthority:
             failure_stage=str(report.get("failure_stage") or "unknown"),  # type: ignore[arg-type]
             image_digest=str(image_gate["local_image_id"]),
             runtime_digest=self.protocol.runtime_digest,
+            memory_digest=self.plan.memory_fixture_digest,
             usage_digest=str(usage["record_digest"]),
             usage_summary=usage,
             execution_summary=execution_summary,

@@ -1439,6 +1439,7 @@ def _official_report(
     resolved: bool,
     submission_digest: str | None = None,
     failure_stage: str = "unknown",
+    memory_digest: str | None = None,
 ) -> dict[str, Any]:
     submission = submission_digest or _digest(f"submission:{intent.run_id}")
     official = record_with_digest(
@@ -1474,7 +1475,7 @@ def _official_report(
             "executed_subject_sha": intent.subject_sha,
             "executed_subject_tree": intent.subject_tree,
             "subject_runtime_digest": _digest("runtime"),
-            "memory_digest": _EMPTY_MEMORY_DIGEST,
+            "memory_digest": memory_digest or _EMPTY_MEMORY_DIGEST,
             "image_digest": _digest(f"local:{intent.case_id}"),
             "submission_digest": submission,
             "official_result": official,
@@ -1703,6 +1704,39 @@ def test_calibration_executes_one_case_per_resume_and_stays_terminal(
     assert terminal["status"] == "terminal"
     assert terminal["state"] == "CALIBRATION_COMPLETE"
     assert len(calls) == 2
+
+
+def test_coordinator_receipt_threads_memory_override_from_executor_result(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    fixture_digest = coordinator.load_plan().memory_fixture_digest
+
+    def executor(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+        intent = Exp2CaseAttemptIntent.from_dict(raw)
+        return {
+            "report": _official_report(
+                intent,
+                resolved=False,
+                memory_digest=_digest("broker-memory-input"),
+            ),
+            "memory_digest": fixture_digest,
+        }
+
+    result = coordinator.resume(executor)
+    assert result["terminal_receipt_count"] == 1
+    events = [
+        json.loads(line)
+        for line in coordinator.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    receipts = [
+        Exp2CaseAttemptReceipt.from_dict(event["payload"])
+        for event in events
+        if event["kind"] == "case_attempt_terminal"
+    ]
+    assert len(receipts) == 1
+    assert receipts[0].memory_digest == fixture_digest
+    assert receipts[0].memory_digest != _digest("broker-memory-input")
 
 
 def test_study_lease_prevents_concurrent_dispatch_and_is_process_exclusive(
@@ -2030,6 +2064,7 @@ class _FakeExp2EvalService:
         self.rescore_calls = 0
         self.formal_swe_protocol_paths: list[Path] = []
         self.submissions: dict[str, dict[str, str]] = {}
+        self.report_memory_digest: str | None = None
 
     def exp2_runtime_identity(self, protocol_path: Path) -> dict[str, Any]:
         return record_with_digest(
@@ -2235,8 +2270,8 @@ class _FakeExp2EvalService:
             "execution": execution,
         }
 
-    @staticmethod
     def _official_report(
+        self,
         *,
         case_id: str,
         run_id: str,
@@ -2266,7 +2301,7 @@ class _FakeExp2EvalService:
             "executed_subject_sha": _sha("h0"),
             "executed_subject_tree": _sha("h0-tree"),
             "subject_runtime_digest": _digest("runtime"),
-            "memory_digest": _EMPTY_MEMORY_DIGEST,
+            "memory_digest": self.report_memory_digest or _EMPTY_MEMORY_DIGEST,
             "image_digest": _digest(f"local:{case_id}"),
             "submission_digest": submission_digest,
             "official_result": official,
@@ -2584,6 +2619,38 @@ def test_service_bound_resume_adopts_report_after_interruption(
     assert metrics["empty_patch_rate"] == 0.0
     assert metrics["changed_files"] == 2
     assert metrics["changed_lines"] == 2
+
+
+def test_service_bound_receipt_binds_frozen_memory_fixture_not_broker_digest(
+    tmp_path: Path,
+) -> None:
+    coordinator, authority, service = _service_bound_authority(
+        tmp_path,
+        mode="report_then_raise",
+    )
+    service.report_memory_digest = _digest("broker-memory-input")
+
+    with pytest.raises(Exp2EvalAuthorityError, match="post-report interruption"):
+        authority.resume(execute=True)
+
+    result = authority.resume(execute=True)
+    assert result["terminal_receipt_count"] == 1
+    assert result["open_intents"] == []
+    events = [
+        json.loads(line)
+        for line in coordinator.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    receipts = [
+        Exp2CaseAttemptReceipt.from_dict(event["payload"])
+        for event in events
+        if event["kind"] == "case_attempt_terminal"
+    ]
+    assert len(receipts) == 1
+    assert (
+        receipts[0].memory_digest
+        == coordinator.load_plan().memory_fixture_digest
+    )
+    assert receipts[0].memory_digest != service.report_memory_digest
 
 
 def test_service_bound_scorer_retry_reuses_frozen_submission(
