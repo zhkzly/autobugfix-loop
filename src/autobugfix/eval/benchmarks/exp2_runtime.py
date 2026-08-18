@@ -39,7 +39,6 @@ from autobugfix.eval.benchmarks.service import (
 )
 from autobugfix.eval.benchmarks.swe_models import SWEExperimentProtocol
 from autobugfix.eval.benchmarks.swe_submission import verify_evidence_manifest
-from autobugfix.eval.benchmarks.subject_broker import SWESubjectBroker
 from autobugfix.git_utils import rev_parse, run_git
 from autobugfix.operator.service import (
     OperatorGovernanceError,
@@ -733,12 +732,22 @@ class Exp2EvalAuthority:
             raise Exp2EvalAuthorityError(
                 "Exp2 report image differs from its trusted image gate"
             )
-        expected_memory_input = SWESubjectBroker.memory_input_digest(
-            Path(self.plan.memory_root)
-        )
-        if report.get("memory_digest") != expected_memory_input:
+        try:
+            live_memory_digest = (
+                self.operator_service.validate_exp2_empty_memory_root(
+                    Path(self.plan.memory_root)
+                )
+            )
+        except (OperatorGovernanceError, OSError) as exc:
             raise Exp2EvalAuthorityError(
-                "Exp2 report Memory input differs from the validated fixture root"
+                "Exp2 Memory root no longer matches the frozen empty fixture"
+            ) from exc
+        if (
+            live_memory_digest != self.plan.memory_fixture_digest
+            or report.get("memory_digest") != self.plan.memory_fixture_digest
+        ):
+            raise Exp2EvalAuthorityError(
+                "Exp2 report Memory differs from the frozen empty fixture"
             )
         submission_digest = str(report.get("submission_digest") or "")
         frozen_verification = self.service.verify_exp2_frozen_submission(
@@ -834,7 +843,6 @@ class Exp2EvalAuthority:
             failure_stage=str(report.get("failure_stage") or "unknown"),  # type: ignore[arg-type]
             image_digest=str(image_gate["local_image_id"]),
             runtime_digest=self.protocol.runtime_digest,
-            memory_digest=self.plan.memory_fixture_digest,
             usage_digest=str(usage["record_digest"]),
             usage_summary=usage,
             execution_summary=execution_summary,

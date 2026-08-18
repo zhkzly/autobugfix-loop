@@ -30,6 +30,7 @@ from autobugfix.eval.benchmarks.swe_verifier import (
 )
 from autobugfix.eval.benchmarks.swe_runtime import SWERuntime, SWERuntimeError
 from autobugfix.models import VerifierResult
+from autobugfix.operator.service import OperatorGovernanceService
 from tests.helpers import FakeCodexBackend, make_service_project
 
 
@@ -679,6 +680,36 @@ def test_subject_broker_copies_only_active_reviewed_memory(tmp_path: Path) -> No
     assert (copied / "active/user-preferences.md").read_text() == "accepted memory\n"
     assert (copied / "skills/approved/fix/SKILL.md").is_file()
     assert not (copied / "proposals").exists()
+
+
+def test_development_memory_binding_digest_distinguishes_snapshot_source(
+    tmp_path: Path,
+) -> None:
+    fixture = tmp_path / "fixture"
+    for directory in (
+        fixture,
+        fixture / "active",
+        fixture / "skills",
+        fixture / "skills/approved",
+    ):
+        directory.mkdir()
+    fabricated = tmp_path / "fabricated"
+    fabricated.mkdir()
+
+    snapshot_digest = SWESubjectBroker.development_memory_binding_digest(
+        fixture, "unused"
+    )
+
+    assert snapshot_digest == OperatorGovernanceService.exp2_empty_memory_digest()
+    assert snapshot_digest != SWESubjectBroker.development_memory_binding_digest(
+        fabricated, "unused"
+    )
+    assert (
+        SWESubjectBroker.development_memory_binding_digest(
+            None, "copy-digest"
+        )
+        == "copy-digest"
+    )
 
 
 def _docker_evidence(root: Path, name: str, *, passed: bool, timed_out: bool = False):

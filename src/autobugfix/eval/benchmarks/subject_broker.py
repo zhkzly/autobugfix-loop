@@ -48,6 +48,7 @@ from autobugfix.eval.benchmarks.swe_verifier import (
     SWEVerifierServer,
 )
 from autobugfix.git_utils import git_common_dir, rev_parse, run_git
+from autobugfix.operator.service import OperatorGovernanceService
 from autobugfix.service import AutobugfixService
 from autobugfix.study_binding import StudyBindingError, validate_study_binding_shape
 from autobugfix.worktree import diff_for_task
@@ -330,9 +331,21 @@ class SWESubjectBroker:
         )
 
     @staticmethod
-    def memory_input_digest(memory_root: Path) -> str:
-        """File-set digest a subject binding records for a Memory input tree."""
-        return SWESubjectBroker._tree_digest(memory_root)
+    def development_memory_binding_digest(
+        memory_snapshot: Path | None,
+        control_memory_digest: str,
+    ) -> str:
+        """Bind a development Memory input to its snapshot source tree.
+
+        A file-set digest cannot distinguish the empty fixture from any
+        fabricated empty directory, so when the authority supplied a
+        snapshot the binding records the directory-inclusive digest of
+        that source instead of the copy's file-set digest.
+        """
+
+        if memory_snapshot is None:
+            return control_memory_digest
+        return OperatorGovernanceService.exp2_memory_tree_digest(memory_snapshot)
 
     @staticmethod
     def _build_evidence_tree(
@@ -1241,7 +1254,10 @@ class SWESubjectBroker:
             "memory_digest": (
                 str(study_binding["memory_digest"])
                 if study_binding is not None
-                else protected_before["memory"]
+                else SWESubjectBroker.development_memory_binding_digest(
+                    memory_snapshot,
+                    protected_before["memory"],
+                )
             ),
             "memory_input_digest": protected_before["memory"],
             "worker_sha256": protected_before["worker"],

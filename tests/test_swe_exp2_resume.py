@@ -2479,6 +2479,16 @@ class _FakeExp2EvalService:
             execution=evidence["execution"],
         )
         self._write_yaml(root / "exp2-calibration-case-report.yaml", report)
+        if self.mode == "mutate_during_run":
+            self.mode = "normal"
+            (
+                Path(self.expected_memory_root)
+                / "active"
+                / "stray.md"
+            ).write_text(
+                "same-user mutation after validation\n",
+                encoding="utf-8",
+            )
         if self.mode == "report_then_raise":
             self.mode = "normal"
             raise EvalBenchmarkServiceError("forced post-report interruption")
@@ -2713,9 +2723,6 @@ def _service_bound_authority(
         Path(plan.guard_root).resolve(),
     }
     service.expected_memory_root = Path(plan.memory_root)
-    service.report_memory_digest = SWESubjectBroker.memory_input_digest(
-        Path(plan.memory_root)
-    )
     authority = Exp2EvalAuthority(
         project_root,
         coordinator,
@@ -2753,18 +2760,15 @@ def test_service_bound_resume_adopts_report_after_interruption(
     assert metrics["changed_lines"] == 2
 
 
-def test_service_bound_receipt_binds_frozen_memory_fixture_not_broker_digest(
+def test_service_bound_report_carries_fixture_digest_and_receipt_binds_it(
     tmp_path: Path,
 ) -> None:
     coordinator, authority, service = _service_bound_authority(
         tmp_path,
         mode="report_then_raise",
     )
-    validated_input = SWESubjectBroker.memory_input_digest(
-        Path(coordinator.load_plan().memory_root)
-    )
-    assert validated_input != coordinator.load_plan().memory_fixture_digest
-    service.report_memory_digest = validated_input
+    plan = coordinator.load_plan()
+    service.report_memory_digest = plan.memory_fixture_digest
 
     with pytest.raises(Exp2EvalAuthorityError, match="post-report interruption"):
         authority.resume(execute=True)
@@ -2782,27 +2786,46 @@ def test_service_bound_receipt_binds_frozen_memory_fixture_not_broker_digest(
         if event["kind"] == "case_attempt_terminal"
     ]
     assert len(receipts) == 1
-    assert (
-        receipts[0].memory_digest
-        == coordinator.load_plan().memory_fixture_digest
-    )
-    assert receipts[0].memory_digest != validated_input
+    assert receipts[0].memory_digest == plan.memory_fixture_digest
 
 
-def test_service_bound_rejects_memory_input_not_derived_from_validated_root(
+@pytest.mark.parametrize(
+    "fabricated_digest",
+    [
+        _digest("unrelated-memory-input"),
+        digest_payload({"files": []}),
+    ],
+)
+def test_service_bound_rejects_report_memory_without_fixture_derivation(
     tmp_path: Path,
+    fabricated_digest: str,
 ) -> None:
     coordinator, authority, service = _service_bound_authority(
         tmp_path,
         mode="normal",
     )
     del coordinator
-    service.report_memory_digest = _digest("unrelated-memory-input")
+    service.report_memory_digest = fabricated_digest
 
-    with pytest.raises(Exp2EvalAuthorityError, match="validated fixture root"):
+    with pytest.raises(Exp2EvalAuthorityError, match="frozen empty fixture"):
         authority.resume(execute=True)
 
     assert service.execute_calls == 1
+
+
+def test_service_bound_rejects_memory_root_mutated_during_execution(
+    tmp_path: Path,
+) -> None:
+    coordinator, authority, service = _service_bound_authority(
+        tmp_path,
+        mode="mutate_during_run",
+    )
+    del coordinator, service
+
+    with pytest.raises(
+        Exp2EvalAuthorityError, match="frozen empty fixture"
+    ):
+        authority.resume(execute=True)
 
 
 def test_service_bound_scorer_retry_reuses_frozen_submission(

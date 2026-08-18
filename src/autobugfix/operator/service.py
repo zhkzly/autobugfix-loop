@@ -482,6 +482,12 @@ class OperatorGovernanceService:
             (root / "skills/approved").mkdir(parents=True)
             return _path_digest(root)
 
+    @staticmethod
+    def exp2_memory_tree_digest(memory_root: Path | str) -> str:
+        """Directory-inclusive digest of a Memory tree, as validation computes it."""
+
+        return _path_digest(Path(memory_root))
+
     @classmethod
     def validate_exp2_empty_memory_root(
         cls,
