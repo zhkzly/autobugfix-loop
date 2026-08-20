@@ -1831,7 +1831,7 @@ def test_calibration_executes_one_case_per_resume_and_stays_terminal(
     assert len(calls) == 2
 
 
-def test_coordinator_receipt_threads_memory_override_from_executor_result(
+def test_coordinator_rejects_executor_memory_override_authority(
     tmp_path: Path,
 ) -> None:
     coordinator = _coordinator(tmp_path)
@@ -1848,6 +1848,24 @@ def test_coordinator_receipt_threads_memory_override_from_executor_result(
             "memory_digest": fixture_digest,
         }
 
+    with pytest.raises(
+        Exp2ResumeError, match="cannot override the official report"
+    ):
+        coordinator.resume(executor)
+
+    assert coordinator.status()["terminal_receipt_count"] == 0
+
+
+def test_coordinator_receipt_binds_report_memory_without_override(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    fixture_digest = coordinator.load_plan().memory_fixture_digest
+
+    def executor(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+        intent = Exp2CaseAttemptIntent.from_dict(raw)
+        return {"report": _official_report(intent, resolved=False)}
+
     result = coordinator.resume(executor)
     assert result["terminal_receipt_count"] == 1
     events = [
@@ -1861,7 +1879,6 @@ def test_coordinator_receipt_threads_memory_override_from_executor_result(
     ]
     assert len(receipts) == 1
     assert receipts[0].memory_digest == fixture_digest
-    assert receipts[0].memory_digest != _digest("broker-memory-input")
 
 
 def test_study_lease_prevents_concurrent_dispatch_and_is_process_exclusive(

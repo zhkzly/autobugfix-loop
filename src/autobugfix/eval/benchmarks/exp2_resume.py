@@ -1188,7 +1188,6 @@ class Exp2CaseAttemptReceipt:
         failure_stage: Literal["execution", "visible_verifier", "official_eval", "infrastructure", "unknown"] = "unknown",
         image_digest: str | None = None,
         runtime_digest: str | None = None,
-        memory_digest: str | None = None,
         usage_digest: str | None = None,
         usage_summary: Mapping[str, Any] | None = None,
         execution_summary: Mapping[str, Any] | None = None,
@@ -1237,7 +1236,7 @@ class Exp2CaseAttemptReceipt:
         observed_runtime_digest = runtime_digest or report.get(
             "subject_runtime_digest"
         )
-        observed_memory_digest = memory_digest or report.get("memory_digest")
+        observed_memory_digest = report.get("memory_digest")
         observed_usage_digest = usage_digest or execution.get(
             "execution_ledger_digest"
         )
@@ -3232,9 +3231,14 @@ class Exp2ResumeCoordinator:
                 raise Exp2ResumeError("executor terminal_receipt must be a mapping")
             return Exp2CaseAttemptReceipt.from_dict(raw)
         report = result.get("report") if isinstance(result, Mapping) else None
+        wrapped_report = report is not None
         if report is None and result.get("official_result") is not None:
             report = result
         if isinstance(report, Mapping):
+            if wrapped_report and result.get("memory_digest") is not None:
+                raise Exp2ResumeError(
+                    "executor Memory digest cannot override the official report"
+                )
             return Exp2CaseAttemptReceipt.from_official_report(
                 intent,
                 report,
@@ -3242,7 +3246,6 @@ class Exp2ResumeCoordinator:
                 failure_stage=str(result.get("failure_stage") or "unknown"),  # type: ignore[arg-type]
                 image_digest=(str(result["image_digest"]) if result.get("image_digest") else None),
                 runtime_digest=(str(result["runtime_digest"]) if result.get("runtime_digest") else None),
-                memory_digest=(str(result["memory_digest"]) if result.get("memory_digest") else None),
                 usage_digest=(str(result["usage_digest"]) if result.get("usage_digest") else None),
             )
         raise Exp2ResumeError("executor result must carry an official report or terminal receipt")
