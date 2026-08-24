@@ -4575,7 +4575,12 @@ class OperatorGovernanceService:
     def compare_experiment_baseline(self, request_id: str, name: str) -> dict[str, Any]:
         request, _ = self._effective_request(request_id)
         snapshot = self._snapshot(request_id, request)
-        baseline = baseline_for_request(self.project_root, name, request.base_sha)
+        baseline = baseline_for_request(
+            self.project_root,
+            name,
+            request.base_sha,
+            allow_subject_baseline=bool(request.experiment_line_id),
+        )
         matching = [
             item.get("metric_receipt")
             for item in self.store.read_experiments(request_id)
@@ -4596,6 +4601,7 @@ class OperatorGovernanceService:
             matching[-1],
             self.policy().data.get("metrics") or {},
             request_base_sha=request.base_sha,
+            allow_subject_baseline=bool(request.experiment_line_id),
         )
 
     @_leased_request
@@ -5640,6 +5646,7 @@ class OperatorGovernanceService:
                     matching_receipts[-1],
                     policy.data.get("metrics") or {},
                     request_base_sha=request.base_sha,
+                    allow_subject_baseline=bool(request.experiment_line_id),
                 )
             except OperatorMetricsError as exc:
                 regression = {"ok": False, "failures": [str(exc)], "comparisons": {}}
@@ -5805,6 +5812,7 @@ class OperatorGovernanceService:
                     self.project_root,
                     request.performance_baseline,
                     request.base_sha,
+                    allow_subject_baseline=bool(request.experiment_line_id),
                 )
                 snapshot = self._snapshot(request_id, request)
                 matching = [

@@ -596,6 +596,7 @@ def validate_operator_request(
                 record_root,
                 request.performance_baseline,
                 request.base_sha,
+                allow_subject_baseline=bool(request.experiment_line_id),
             )
             profile = baseline["profile_contract"]
             profile_values = {

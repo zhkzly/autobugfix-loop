@@ -313,9 +313,15 @@ def compare_baseline(
     metric_contract: Mapping[str, Any],
     *,
     request_base_sha: str | None = None,
+    allow_subject_baseline: bool = False,
 ) -> dict[str, Any]:
     data = (
-        baseline_for_request(project_root, name, request_base_sha)
+        baseline_for_request(
+            project_root,
+            name,
+            request_base_sha,
+            allow_subject_baseline=allow_subject_baseline,
+        )
         if request_base_sha is not None
         else read_baseline(project_root, name)
     )
