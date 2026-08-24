@@ -19,7 +19,14 @@ from autobugfix.codex_sdk import CodexSDKBackend
 from autobugfix.models import CodexRequest, CodexResult
 from autobugfix.operator.bundle import OperatorBundleError, validate_bundle
 from autobugfix.operator.guard import compute_scope_risk
-from autobugfix.operator.metrics import compare_baseline, derive_metric_receipt, record_baseline
+from autobugfix.operator.metrics import (
+    OperatorMetricsError,
+    baseline_for_request,
+    compare_baseline,
+    derive_metric_receipt,
+    read_baseline,
+    record_baseline,
+)
 from autobugfix.operator.policy import layers_for_file, static_constitution_violations
 from autobugfix.operator.models import OperatorModelError, digest_payload
 from autobugfix.operator.service import OperatorGovernanceError, OperatorGovernanceService
@@ -1649,6 +1656,38 @@ def test_committed_baseline_rejects_later_behavior_commit(tmp_path: Path):
 
     assert not report["allowed"]
     assert any("baseline is stale" in item for item in report["violations"])
+
+
+def test_line_bound_subject_baseline_accepted_by_identity(tmp_path: Path):
+    root = make_operator_repo(tmp_path)
+    policy_path = write_test_policy(root, tmp_path)
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["baseline_required_layers"] = ["eval"]
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+    service = service_for(root, tmp_path, policy=policy_path)
+    subject = run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+    (root / "src/autobugfix/eval/runner.py").write_text(
+        "# behavior changed after the frozen subject\n", encoding="utf-8"
+    )
+    run(["git", "add", "src/autobugfix/eval/runner.py"], root)
+    run(["git", "commit", "-m", "Change Eval behavior after the subject"], root)
+
+    service.capture_baseline("subject-e2e", profile="smoke", base_ref=subject)
+
+    assert read_baseline(root, "subject-e2e")["base_sha"] == subject
+    accepted = baseline_for_request(
+        root, "subject-e2e", subject, allow_subject_baseline=True
+    )
+    assert accepted["base_sha"] == subject
+    with pytest.raises(OperatorMetricsError, match="not committed"):
+        baseline_for_request(root, "subject-e2e", subject)
+    with pytest.raises(OperatorMetricsError, match="frozen request base"):
+        baseline_for_request(
+            root,
+            "subject-e2e",
+            run(["git", "rev-parse", "HEAD"], root).stdout.strip(),
+            allow_subject_baseline=True,
+        )
 
 
 def test_baseline_profile_values_reject_secrets_and_local_absolute_paths(tmp_path: Path):

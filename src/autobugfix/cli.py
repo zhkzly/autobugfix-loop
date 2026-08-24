@@ -1402,6 +1402,7 @@ def command_operator(args: argparse.Namespace) -> int:
                 profile=args.profile,
                 values=_parse_values(args.value or []),
                 notes=args.notes or "",
+                base_ref=args.base,
             )
             _print_yaml(report)
         elif args.baseline_action == "compare":
@@ -2311,6 +2312,10 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_record.add_argument("--profile")
     baseline_record.add_argument("--value", action="append", help="Experiment input as key=value")
     baseline_record.add_argument("--notes")
+    baseline_record.add_argument(
+        "--base",
+        help="explicit measurement base ref (defaults to the configured trusted ref)",
+    )
     baseline_record.set_defaults(func=command_operator)
     baseline_compare = baseline_sub.add_parser("compare")
     governance_options(baseline_compare)

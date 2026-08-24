@@ -4330,6 +4330,7 @@ class OperatorGovernanceService:
                         self.project_root,
                         request.performance_baseline,
                         request.base_sha,
+                        allow_subject_baseline=bool(request.experiment_line_id),
                     )
                 except OperatorMetricsError as exc:
                     violations.append(str(exc))
@@ -4481,12 +4482,13 @@ class OperatorGovernanceService:
         profile: str | None = None,
         values: Mapping[str, str] | None = None,
         notes: str = "",
+        base_ref: str | None = None,
     ) -> dict[str, Any]:
         if not self.config.operator.experiments.enabled:
             raise OperatorGovernanceError("Operator experiments are disabled")
         profile_name, profile_data, supplied = self._experiment_profile(profile, values)
-        trusted_ref = self.config.operator.experiments.trusted_ref
-        base_sha = rev_parse(self.project_root, trusted_ref)
+        measurement_ref = base_ref or self.config.operator.experiments.trusted_ref
+        base_sha = rev_parse(self.project_root, measurement_ref)
         baseline_id = self.store.next_id("baseline")
         workspace = (
             self.config.operator.worktrees.root / ".baselines" / baseline_id / "candidate"
@@ -5614,6 +5616,7 @@ class OperatorGovernanceService:
                     self.project_root,
                     request.performance_baseline,
                     request.base_sha,
+                    allow_subject_baseline=bool(request.experiment_line_id),
                 )
                 matching_receipts = [
                     item.get("metric_receipt")

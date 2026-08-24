@@ -247,9 +247,35 @@ def baseline_for_request(
     project_root: Path,
     name: str,
     request_base_sha: str,
+    *,
+    allow_subject_baseline: bool = False,
 ) -> dict[str, Any]:
-    """Load a committed baseline and prove its measured code still matches the request base."""
-    data = read_baseline_at_ref(project_root, name, request_base_sha)
+    """Load a committed baseline and prove its measured code still matches the request base.
+
+    Line-bound experiment requests base at an immutable frozen subject whose
+    tree cannot contain a later-recorded baseline file.  For those callers
+    (allow_subject_baseline=True), a baseline recorded in the control worktree
+    is accepted only when it was measured at exactly the request base SHA, so
+    freshness holds by identity instead of by a committed-tree diff.
+    """
+    try:
+        data = read_baseline_at_ref(project_root, name, request_base_sha)
+    except OperatorMetricsError:
+        if not allow_subject_baseline:
+            raise
+        data = read_baseline(project_root, name)
+        try:
+            measured_now = rev_parse(project_root, str(data.get("base_sha") or ""))
+            request_base_now = rev_parse(project_root, request_base_sha)
+        except GitError as exc:
+            raise OperatorMetricsError(
+                f"cannot validate baseline Git binding: {exc}"
+            ) from exc
+        if measured_now != request_base_now:
+            raise OperatorMetricsError(
+                "performance baseline was not measured at the frozen request base"
+            ) from None
+        return data
     measured_sha = str(data.get("base_sha") or "")
     try:
         measured = rev_parse(project_root, measured_sha)
