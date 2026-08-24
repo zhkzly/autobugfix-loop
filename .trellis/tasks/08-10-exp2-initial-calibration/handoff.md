@@ -1,0 +1,150 @@
+# Handoff — Exp2 resume-first pilot (written 2026-08-24)
+
+Complete state + next steps for any agent continuing this task. Read `prd.md` / `design.md` in this
+directory for the experiment design; this file is the operational snapshot.
+
+> **TL;DR — 在哪继续开发：`/home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2`**
+> （分支 `experiment/exp2-resume-mvp-v2` @ 649546f）。这就是下文表格中标粗体的那个 worktree：
+> 所有执行、所有后续提交都在它里面，直接 `cd` 进去开工。主仓 `autobugfix-loop`（main）只用来
+> 更新 Trellis 任务/journal；`…guard-seal-db0f2b5` 是死路，不要进去。
+
+## 1. Checkouts (3, all on this machine)
+
+| Path | Branch / HEAD | Role |
+|---|---|---|
+| `/home/kelong/pycodes/autobugfix-loop` | `main` @ 89c5bda | Trellis task home, journal, this file |
+| `/home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2` | `experiment/exp2-resume-mvp-v2` @ 649546f (clean, pushed) | **All execution work happens here.** PR #17 → base `experiment/exp2-execution-only-20260809` |
+| `/home/kelong/pycodes/autobugfix-exp2-guard-seal-db0f2b5` | detached @ db0f2b5 | Dead end. Was used only because trusted_ref pointed there |
+
+Supporting roots (shared, still valid):
+- Empty-memory fixture: `/home/kelong/pycodes/autobugfix-exp2-empty-memory-649546f` (digest `8d05dbaf…`)
+- Guard root: `/home/kelong/pycodes/autobugfix-exp2-guard-649546f`
+- Disposable study state roots: created fresh per study under `/tmp` (0700)
+
+## 2. Completed (do not redo)
+
+- **Phase 7 calibration at 649546f** — two studies, both terminal:
+  - `exp2-calibration-649546f-r1`: crash-consistency proof (forced interruption mid-Flask case; open
+    intent reconciled as `execution_infrastructure_invalid`; Flask never re-run; honest infra receipt).
+  - `exp2-calibration-649546f-r2`: **CALIBRATION_COMPLETE**, published report.
+    Receipt: `.autobugfix/trusted-eval-cases/exp2/exp2-calibration-649546f-r2/calibration-terminal-receipt.yaml`
+    (apparatus_receipt_digest `0a28ab63b63b13966b8bbf90cbcca0b50b86e1a88705e99d52d2ec873b8a04d6`).
+- 4 hardening commits ending at 649546f; independent trellis-check PROCEED; full gate 408 passed.
+- PR #17 open (9 commits, +16054/−189). Branch pushed.
+- Journal session 4 committed on main (89c5bda). Task meta has `pr_url` + `commit=649546f`.
+- Pilot studies r1/r2 at 649546f burned (documented in task #10): r1 hit manifest-visible-root wall,
+  r2 hit sealed-manifest/trusted-checkout mismatch wall. Their state roots are dead evidence.
+
+## 3. RESOLVED 2026-08-24: trust anchor advanced to 649546f (user-authorized Path A)
+
+The user explicitly authorized re-pinning both `trusted_ref` locations in
+`.autobugfix/config.yaml` of the exp2 worktree from `db0f2b58701e68a21ee1c04033475f7ade68b67c`
+to `649546f93b660c61c0f9b07f43c6d60056244e92` (justification on record: trellis-check PROCEED at
+649546f, full gate 408 passed, r2 real calibration CALIBRATION_COMPLETE). This section records the
+former blocker for audit; the contradiction evidence lives on in dead studies
+`exp2-calibration-db0f2b5-r1/r2`:
+- db0f2b5's own producer emitted the **old** empty-Memory digest `602e35a9…` (files-only algorithm),
+  but the frozen fixture + db0f2b5's own checker bind `8d05dbaf…` (directory-inclusive algorithm)
+  → every official case died with "official receipt Memory differs from the frozen empty fixture".
+- 649546f executes cleanly (r2 calibration green) and is now the anchor.
+
+**Governance rule (still in force):** an agent must NOT unilaterally edit `trusted_ref` to point at
+its own commit; advancing it is a human decision that explicitly names the change. This advance was
+made under exactly that authorization.
+
+## 4. Path A executed (2026-08-24) — artifact trail
+
+All inside `/home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2` (HEAD 649546f, clean):
+
+1. `config.yaml` trusted_ref ×2 → `649546f93b…` (user-authorized).
+2. Fresh public manifest: `exp2-resume-exp2-prep-4063467854218a2f9ce199b5`
+   (manifest digest `4dcabe2be4edf884c4d4652562eb7ea93535a69188a571f452a6bce06d9cd124`,
+   guard code_identity binds 649546f). Old db0f2b5-sealed tree `…3eb6c0cf…` NOT reused.
+   Gotcha hit: had to delete the stale materialization dir under
+   `trusted-eval-cases/swe/exp2-preparation-runs/exp2-prep-4063467854218a2f9ce199b5/` first.
+3. Operator study #2: `exp2-operator-649546f-r2` — `--harness-ref 649546f93b…` (explicit),
+   `--base-ref f529f09d`, `--target-checkpoint H_general`, memory digest 8d05dbaf, manifest 4dcabe2b.
+   (Study #1 `exp2-operator-649546f-r1` remains the H_bug/old-manifest record.)
+4. H0 binding exported: `.autobugfix/operator-artifacts/exp2-study-bindings/8ee12c0db8c417ccaa7f2a5fa1d5cb8eda07401fe71022d53c75e020d8b6d8ff.yaml`.
+5. Pilot r3 plan built (digest `950a7e8caf30f79d78755f2260194594ed1851c6718fceb5afb2d81d9d33c41a`)
+   binding: r2 calibration terminal receipt + r2 apparatus (0a28ab63) + new manifest + new binding +
+   disposable root `/tmp/autobugfix-exp2-disposable-649546f-pilot-r3` (0700, must pre-exist!).
+   Study initialized: `exp2-pilot-649546f-r3` (burned r1/r2 IDs untouched), state PREPARED → H0.
+6. H0 execution COMPLETE (2026-08-24): ten sequential `resume --execute` runs, all
+   `official_terminal`, zero invalid arms. Baseline: 5 resolved (django, matplotlib,
+   xarray, requests, scikit-learn) / 5 unresolved (astropy, sympy, seaborn, pytest,
+   sphinx); 26 model calls / ~2033s model time. Study → SOURCE_RELEASED; source
+   projection bundle digest 3b5f5ef9… (feasibility passed; astropy failure_stage
+   visible_verifier = Execution-owned, satisfies the gate).
+7. Post-H0 governance chain — executed until a STRUCTURAL gate deadlock (see §5):
+   - `register-h0` → line exp2-operator-649546f-r2 @ H0 checkpoint (metric 47b9487…),
+     line branch `experiment/exp2-operator-649546f-r2-main` @ f529f09d, generation 0.
+   - Evidence auto-registered: `study-evidence-20260824T044651-7bbf18f3`.
+   - Attribution recorded (empty-patch first-attempt on astropy; Writer-skill scope);
+     triage 3ad5fb45…; wave-3 + wave-8 budget grants human-approved
+     (budget-grant-…-6049c4ca wave 3, budget-grant-…-4471da05 wave 8, zero usage consumed).
+   - Three candidate requests created (docs_skills wrong-layer → execution + pr2-real-e2e
+     baseline) — ALL blocked at preflight; closed as superseded. Study
+     exp2-pilot-649546f-r3 remains in CANDIDATE_TRANSITION_AWAITING (dead state, evidence
+     preserved). Pilot r3 stops here per PRD stop conditions.
+
+## 5. NEW BLOCKER (2026-08-24): baseline gate structurally unsatisfiable for line-bound candidates
+
+The constitution (`baseline_required_layers: [execution, memory, eval, operator]`) makes every
+behavior-layer request require a trusted performance baseline. `baseline_for_request` demands:
+(a) the baseline YAML committed **in the request-base commit's tree**, (b) measured SHA an
+ancestor of the base, (c) diff(measured, base) touching only `.autobugfix-baselines/`.
+
+For a line-bound request the base is the LINE HEAD = frozen H0 subject f529f09d (immutable).
+The only baseline in f529f09d's tree is pr2-real-e2e (measured 0ca8f66) — stale, because real
+behavior changed between 0ca8f66 and f529f09d. `capture_baseline` can only measure at
+`operator.experiments.trusted_ref` (649546f), which is NOT an ancestor of f529f09d. No
+sanctioned CLI advances the line head with a baseline-only commit (only `integrate` advances
+it, which itself needs preflight first). Chicken-and-egg. Tests never caught it because
+`tests/helpers.py` sets `baseline_required_layers: []` globally.
+
+**Remediation options for a follow-up harness task (then restart pilot as r4, new IDs):**
+- Add `--base <sha>` to baseline capture + a governed `line commit-baseline` transition that
+  CAS-advances the line head by a baseline-only commit; or
+- Scope baseline freshness for line-bound requests to the declared layer's paths (and define
+  ancestry for the subject lineage explicitly).
+- Either way: capture the baseline BEFORE freezing the H0 subject in future protocols.
+
+**What stands as deliverables (r3):** anchor advance record, fresh 649546f-sealed manifest,
+operator study #2 (H_general), complete 10/10 H0 baseline evidence (5/5 resolved split, all
+official_terminal), source projection + evidence-bound attribution, budget grant trail, and
+this defect analysis. Governed continuation: merge PR #17 through trusted-merge (advances the
+anchor), then the harness fix task above, then exp2-pilot-…-r4.
+
+## 5. Hard constraints (never violate)
+
+- Burned study IDs are never reused.
+- No parallel codex session on the same worktree.
+- Caller-supplied YAML/strings never become authority (receipts bind digests).
+- One case per `resume --execute`; a crash reconciles the open intent as
+  `execution_infrastructure_invalid` — there is no execution retry path (only scorer_only_retry).
+  CALIBRATION_BLOCKED / non-official terminal = study dead, start a new -rN.
+- Do not edit `trusted_ref` without explicit user authorization naming that change.
+
+## 6. Environment gotchas (this machine)
+
+- `find` / `grep` in the agent shell are broken shims → use `/usr/bin/find` and `command grep`.
+- Agent shell cwd resets to `/home/kelong/pycodes/autobugfix-loop` after every command — always `cd` into the worktree in the same command.
+- Export `UV_CACHE_DIR=/tmp/autobugfix-uv-cache PYTHONDONTWRITEBYTECODE=1`.
+- `source-check-v2` takes argv via argparse.REMAINDER — no `--` separator.
+- Artifact dirs must be deleted before rerun ("not fresh" otherwise).
+- Dataset snapshot is path-absolute-bound: per worktree run
+  `autobugfix eval benchmark doctor --adapter swebench_verified` (pinned c104f840, 500 rows).
+- Qualification records embed absolute paths: per worktree re-qualify the 12 instances via
+  `qualify-swe --protocol benchmarks/swe-experiment-2-resume-mvp-v2.yaml --adapter swebench_verified --instance <id>`.
+
+## 7. Optional bookkeeping
+
+- `exp2-calibration-db0f2b5-r1` (seal worktree) still has an open Flask intent; one more
+  `resume --execute` would reconcile it to CALIBRATION_BLOCKED for a clean terminal record.
+
+## 8. Orientation pointers
+
+- Full prior-session transcript: `/home/kelong/.claude/projects/-home-kelong-pycodes-autobugfix-loop/6b5fbba2-7933-4f0a-8e5e-0c0929d361d0.jsonl`
+- Task list item #10 "Phase 8：resume_pilot H0 十仓基线" tracks the pilot phase.
+- Journal: `.trellis/workspace/kelong.ZX/journal-1.md` sessions 1–4.

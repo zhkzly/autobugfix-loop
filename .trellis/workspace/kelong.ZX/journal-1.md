@@ -130,3 +130,67 @@ Closed the four-round Memory-binding review cycle (PROCEED at 649546f), rebuilt 
 
 - Proceed to the resume_pilot phases: H0 ten-repository baseline, one governed Execution-harness revision, paired source/transfer outcomes
 - Open PR for experiment/exp2-resume-mvp-v2 into experiment/exp2-execution-only-20260809
+
+## Session 5: Trust anchor advanced (Path A) and r3 pilot H0 launched
+
+**Date**: 2026-08-24
+**Task**: Exp2 initial calibration (pilot phase)
+**Branch**: `experiment/exp2-resume-mvp-v2`
+
+### Summary
+
+User explicitly authorized Path A: both `trusted_ref` locations in the exp2 worktree's `.autobugfix/config.yaml` advanced from db0f2b58 to 649546f93b (the justification already on record: trellis-check PROCEED, 408-test full gate, r2 real calibration CALIBRATION_COMPLETE). Re-sealed the public manifest against the new anchor (exp2-resume-exp2-prep-4063467854218a2f9ce199b5, digest 4dcabe2b), created operator study #2 exp2-operator-649546f-r2 with explicit harness 649546f / base f529f09d / target H_general, exported H0 binding 8ee12c0d, built the r3 pilot plan (950a7e8c) binding the r2 calibration receipt + apparatus 0a28ab63 + new manifest + new binding, and initialized study exp2-pilot-649546f-r3 (burned r1/r2 IDs never reused). H0 execution started: case 1 astropy terminal `official_terminal` (resolved=false, honest measured failure, 2 writer attempts / 4 model calls / ~241s).
+
+### Main Changes
+
+- `.autobugfix/config.yaml` (exp2 worktree, gitignored): eval.benchmarks.guard.trusted_ref and operator.experiments.trusted_ref → 649546f93b (user-authorized change, named explicitly)
+- Fresh sealed artifacts: manifest 4dcabe2b, operator study record 9847c833, H0 binding 8ee12c0d, protocol build 649546f-pilot-r3 (31a3e1bf), plan 950a7e8c, study state exp2-pilot-649546f-r3
+- handoff.md sections 3–4 rewritten as the Path A decision + artifact trail
+
+### Testing
+
+- [OK] benchmark doctor green in the exp2 worktree (snapshot c104f840, 500 rows)
+- [OK] prepare-manifest-v2 guard authority resolves at 649546f (HEAD == trusted_ref, clean tree)
+- [OK] H0: ten sequential resume --execute runs, all official_terminal, zero invalid arms
+- [BLOCKED] governed candidate chain: preflight baseline gate structurally unsatisfiable (see below)
+
+### H0 baseline result (exp2-pilot-649546f-r3)
+
+| Case | Slice | Terminal | Resolved |
+|---|---|---|---|
+| astropy__astropy-13398 | source | official_terminal | no |
+| django__django-10097 | source | official_terminal | yes |
+| matplotlib__matplotlib-24627 | transfer | official_terminal | yes |
+| pydata__xarray-2905 | transfer | official_terminal | yes |
+| sympy__sympy-13091 | transfer | official_terminal | no |
+| mwaskom__seaborn-3187 | reserve | official_terminal | no |
+| psf__requests-6028 | reserve | official_terminal | yes |
+| pytest-dev__pytest-10051 | reserve | official_terminal | no |
+| scikit-learn__scikit-learn-13439 | reserve | official_terminal | yes |
+| sphinx-doc__sphinx-9229 | reserve | official_terminal | no |
+
+5 resolved / 5 unresolved, 26 model calls, ~2033s model time. Feasibility gate passed
+(astropy failure_stage=visible_verifier is Execution-owned).
+
+### Blocker found (harness defect, first real contact)
+
+The constitution requires a trusted performance baseline for every behavior-layer request.
+For a line-bound candidate the request base is the frozen H0 subject f529f09d; the baseline
+must be committed in that commit's tree and be behavior-fresh, but capture_baseline can only
+measure at operator.experiments.trusted_ref (649546f, not an ancestor of f529f09d), and no
+sanctioned path advances the line head with a baseline-only commit before the candidate.
+Tests never caught this because tests/helpers.py sets baseline_required_layers=[]. Three
+requests (docs_skills wrong-layer; execution without baseline; execution + pr2-real-e2e
+stale baseline) were closed as superseded; study r3 stays in CANDIDATE_TRANSITION_AWAITING
+with all evidence preserved. Full analysis + remediation options in handoff.md §5.
+
+### Status
+
+[停] **Stopped at governed candidate gate** — H0 baseline complete and valid; H1 blocked by
+apparatus defect, not by model or protocol failure
+
+### Next Steps
+
+- Merge PR #17 through the operator trusted-merge flow (this also advances the anchor)
+- New harness task: fix the line-bound baseline gate (see handoff.md §5 remediation options)
+- Restart the pilot as exp2-pilot-…-r4 with fresh study IDs after the fix lands
