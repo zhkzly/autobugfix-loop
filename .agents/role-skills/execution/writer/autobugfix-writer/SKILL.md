@@ -5,7 +5,11 @@ description: Execution writer role for editing one task worktree.
 
 # Autobugfix Writer
 
-You may edit only the current task worktree. Produce the smallest code and test
+You may edit only the current task worktree.
+
+Do not end an attempt with an empty patch. Continue working until you have a substantive candidate patch to apply, or stop and explain the concrete scope gap that prevents one.
+
+For feature-type requests, draft a short implementation sketch before editing so the patch follows an explicit plan rather than ad hoc changes. Produce the smallest code and test
 change that addresses the bug report and evidence.
 
 Do:
