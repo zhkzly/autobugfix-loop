@@ -184,13 +184,30 @@ requests (docs_skills wrong-layer; execution without baseline; execution + pr2-r
 stale baseline) were closed as superseded; study r3 stays in CANDIDATE_TRANSITION_AWAITING
 with all evidence preserved. Full analysis + remediation options in handoff.md §5.
 
+### Resolution (same session, later)
+
+Four governed-quality harness fixes landed on the branch (a6a167d line-bound baseline
+gate; 5672c8f sandbox DNS for systemd-resolved hosts; 5c922ba→5c922bc line-bound
+production invariants + candidate git metadata binding; ba3b67d baseline fallback
+passthrough), each passing the full gate (409→410 passed). Anchor advanced to f8bec35
+(user-authorized), fresh calibration exp2-calibration-f8bec35-r1 CALIBRATION_COMPLETE,
+study exp2-pilot-f8bec35-r4 executed end to end: H0 10/10 official_terminal (2 resolved /
+8 unresolved), governed candidate (Writer skill: forbid empty-patch termination + feature
+sketch; in-scope blind patch after retry lottery caused by the kernel's nested-userns ban),
+verify fast/full green against a subject-measured baseline, integrated, exported, and H1
+run on the frozen apparatus checkout.
+
+**FINAL: PILOT_COMPLETE → REPORTED, decision `retain_transfer_rescue`.**
+matplotlib and xarray were observed transfer rescues with zero transfer regressions;
+django both-pass; astropy both-fail with the attributed mechanism confirmed (first-attempt
+patch non-empty under H1). Report digest 41d3b444. No broader claim is made.
+
 ### Status
 
-[停] **Stopped at governed candidate gate** — H0 baseline complete and valid; H1 blocked by
-apparatus defect, not by model or protocol failure
+[OK] **Completed** — REPORTED, retain_transfer_rescue
 
 ### Next Steps
 
-- Merge PR #17 through the operator trusted-merge flow (this also advances the anchor)
-- New harness task: fix the line-bound baseline gate (see handoff.md §5 remediation options)
-- Restart the pilot as exp2-pilot-…-r4 with fresh study IDs after the fix lands
+- PR #17 now carries the four harness fixes + pilot evidence; merge through trusted-merge
+- Optional follow-up task: streamline the wave-3→wave-8 double approval (user friction)
+- Optional: refresh the two durable memory notes (r3 blocker → resolved)

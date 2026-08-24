@@ -1,5 +1,12 @@
 # Handoff — Exp2 resume-first pilot (written 2026-08-24)
 
+> **FINAL STATUS 2026-08-24: PILOT COMPLETE.** Study `exp2-pilot-f8bec35-r4` reached
+> **REPORTED** with decision **`retain_transfer_rescue`**. Report digest
+> `41d3b4445c2290f29157567aac2655e5bae44dfc9d5949b8b91c1aaae88d7e22` under
+> `trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/reports/` in the exp2 worktree.
+> The sections below are the historical record of how it got there (including the
+> r3 stop and the four harness fixes that unblocked the governed candidate path).
+
 Complete state + next steps for any agent continuing this task. Read `prd.md` / `design.md` in this
 directory for the experiment design; this file is the operational snapshot.
 
@@ -148,3 +155,44 @@ anchor), then the harness fix task above, then exp2-pilot-…-r4.
 - Full prior-session transcript: `/home/kelong/.claude/projects/-home-kelong-pycodes-autobugfix-loop/6b5fbba2-7933-4f0a-8e5e-0c0929d361d0.jsonl`
 - Task list item #10 "Phase 8：resume_pilot H0 十仓基线" tracks the pilot phase.
 - Journal: `.trellis/workspace/kelong.ZX/journal-1.md` sessions 1–4.
+
+## 9. FINAL RUN RECORD (2026-08-24, session 5 completion)
+
+**Outcome: `exp2-pilot-f8bec35-r4` → REPORTED, decision `retain_transfer_rescue`.**
+
+Paired outcomes (H0 → H1, all `official_terminal`, zero invalid arms):
+
+| Case | Slice | H0 | H1 | Pair |
+|---|---|---|---|---|
+| astropy__astropy-13398 | source | unresolved (2 att., first empty) | unresolved (1 att., first non-empty) | both-fail; mechanism fix confirmed |
+| django__django-10097 | source | resolved | resolved | both-pass |
+| matplotlib__matplotlib-24627 | transfer | unresolved | resolved | **observed transfer rescue** |
+| pydata__xarray-2905 | transfer | unresolved | resolved | **observed transfer rescue** |
+| sympy__sympy-13091 | transfer | unresolved | unresolved | both-fail |
+
+Two observed transfer rescues, zero observed transfer regressions → candidate
+retained on the experiment line (never promoted). Sanctioned phrasing: "observed
+transfer rescue on this three-repository pilot" — no broader claim.
+
+Governed candidate (request-20260824T102055-03c554fc, line exp2-operator-f8bec35-r1):
+Writer skill diff `5ddc98a1` (forbid empty-patch termination + feature-type
+implementation sketch), integrated as line HEAD `fe0f2fea` (generation 1);
+transition receipt `8faa15d8`.
+
+H1 execution detail: the control worktree was checked out detached at `f8bec35`
+(the frozen H0 apparatus identity) for H1, matching the apparatus-consistency
+requirement; governance verification ran from the branch tip code. The branch tip
+is `ba3b67d` (fixes a6a167d baseline-gate, 5672c8f sandbox DNS, 5c922bc
+line-bound production invariants + git metadata binding, ba3b67d baseline
+passthrough); all pushed to PR #17, full gate 410 passed / 1 skipped.
+
+Machine notes for any future governed run on THIS host:
+- `kernel.apparmor_restrict_unprivileged_userns=1` (user permanently refuses to
+  change it) → nested bwrap impossible → verification profiles must avoid
+  sandbox-spawning tests; machine-local `operator.verification.fast_profiles/
+  full_profiles` are set to [execution] / [execution, memory].
+- The governed Writer's SDK session cannot exec (nested sandbox); writers must
+  blind-apply_patch. Put explicit file-path + "no shell" guidance in the REQUEST
+  SUMMARY to bias the model (request-…-03c554fc is the working example).
+- Budget `max_operator_revisions=3` counts per (role, execution_id); a fresh
+  request resets it when a writer run is burned.
