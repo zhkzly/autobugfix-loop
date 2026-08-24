@@ -2278,13 +2278,21 @@ class OperatorGovernanceService:
         approver: str,
         confirm_request_digest: str,
         approval_kind: str = "interactive",
+        delegation_note: str | None = None,
     ) -> BudgetGrantRecord:
         request = self.store.read_budget_request(budget_request_id)
         if confirm_request_digest != request.budget_request_digest:
             raise OperatorGovernanceError("budget approval does not confirm the request digest")
-        if approval_kind != "interactive":
+        if approval_kind not in {"interactive", "delegated_agent"}:
             raise OperatorGovernanceError(
-                "budget grants currently accept only digest-bound interactive human attestation"
+                "budget grants accept only digest-bound interactive or recorded delegated attestation"
+            )
+        if approval_kind == "delegated_agent" and (
+            not str(delegation_note or "").strip()
+            or len(str(delegation_note)) > 500
+        ):
+            raise OperatorGovernanceError(
+                "delegated budget approval requires a delegation note recording the standing user instruction"
             )
         study = self.store.read_study(request.study_id)
         if study.policy_digest != digest_payload(self.policy().data):
@@ -2322,6 +2330,11 @@ class OperatorGovernanceService:
             case_concurrency=request.case_concurrency,
             approved_by=approver,
             approval_kind=approval_kind,
+            delegation_note=(
+                str(delegation_note).strip()
+                if approval_kind == "delegated_agent"
+                else None
+            ),
             previous_grant_id=request.previous_grant_id,
             expires_at=expires_at,
         )

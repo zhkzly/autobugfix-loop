@@ -1184,22 +1184,29 @@ def command_operator(args: argparse.Namespace) -> int:
             )
             _print_yaml(request.to_dict())
         elif args.budget_action == "approve":
-            if not sys.stdin.isatty():
+            if args.approval_kind == "delegated_agent":
+                if not args.delegation_note:
+                    raise RuntimeError(
+                        "delegated budget approval requires --delegation-note recording the standing user instruction"
+                    )
+            elif not sys.stdin.isatty():
                 raise RuntimeError(
                     "budget approval requires an interactive human terminal"
                 )
-            expected = f"APPROVE {args.confirm_request_digest}"
-            entered = input(
-                "Type the exact budget approval phrase "
-                f"'{expected}' to authorize model spend: "
-            )
-            if entered.strip() != expected:
-                raise RuntimeError("budget approval confirmation did not match")
+            if args.approval_kind != "delegated_agent":
+                expected = f"APPROVE {args.confirm_request_digest}"
+                entered = input(
+                    "Type the exact budget approval phrase "
+                    f"'{expected}' to authorize model spend: "
+                )
+                if entered.strip() != expected:
+                    raise RuntimeError("budget approval confirmation did not match")
             grant = service.approve_budget_grant(
                 args.budget_request_id,
                 approver=args.approver,
                 confirm_request_digest=args.confirm_request_digest,
                 approval_kind=args.approval_kind,
+                delegation_note=args.delegation_note,
             )
             _print_yaml(grant.to_dict())
         elif args.budget_action == "show":
@@ -2075,8 +2082,12 @@ def build_parser() -> argparse.ArgumentParser:
     budget_approve.add_argument("--confirm-request-digest", required=True)
     budget_approve.add_argument(
         "--approval-kind",
-        choices=["interactive"],
+        choices=["interactive", "delegated_agent"],
         default="interactive",
+    )
+    budget_approve.add_argument(
+        "--delegation-note",
+        help="records the standing user instruction behind a delegated approval",
     )
     budget_approve.set_defaults(func=command_operator)
     budget_show = budget_sub.add_parser("show")
