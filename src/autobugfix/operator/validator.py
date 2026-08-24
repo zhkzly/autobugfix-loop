@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
+from autobugfix.git_utils import GitError, run_git
 from autobugfix.models import utc_now
 from autobugfix.config import load_config
 from autobugfix.operator.guard import effective_request
@@ -333,6 +334,28 @@ def _run_command(
                         str(resolv_real),
                     ]
                 )
+        git_meta_roots: list[Path] = []
+        for git_query in (
+            ["rev-parse", "--absolute-git-dir"],
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ):
+            try:
+                meta = Path(
+                    run_git(candidate_root, git_query, check=True).stdout.strip()
+                ).resolve()
+            except (GitError, OSError):
+                continue
+            if meta.is_dir() and meta not in git_meta_roots:
+                git_meta_roots.append(meta)
+        for meta_root in git_meta_roots:
+            try:
+                meta_root.relative_to(candidate_root)
+            except ValueError:
+                pass
+            else:
+                continue
+            wrapper.extend(_sandbox_directory_args(host_home, meta_root))
+            wrapper.extend(["--ro-bind", str(meta_root), str(meta_root)])
         environment["AUTOBUGFIX_PROCESS_SANDBOX"] = "bubblewrap"
         wrapper.extend(["--chdir", str(candidate_root), "--"])
         executed_argv = [*wrapper, *command_argv]
@@ -524,6 +547,7 @@ def validate_operator_request(
         phase=phase,
         allowed_signers=allowed_signers,
         scope_version=scope_version,
+        production_root=record_root if request.experiment_line_id else None,
     )
     validation_id = f"validation-{uuid.uuid4().hex[:12]}"
     command_results: list[dict[str, Any]] = []

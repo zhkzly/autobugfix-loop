@@ -3018,6 +3018,7 @@ class OperatorGovernanceService:
                     trusted_policy_source=policy.source,
                     trusted_policy=policy.trusted,
                     phase="merge",
+            production_root=self.project_root if request.experiment_line_id else None,
                     allowed_signers=self.allowed_signers,
                     scope_version=scope_version,
                 )
@@ -5497,6 +5498,7 @@ class OperatorGovernanceService:
             phase="postflight",
             allowed_signers=self.allowed_signers,
             scope_version=scope_version,
+            production_root=self.project_root if request.experiment_line_id else None,
         )
         if not policy.trusted:
             decision.violations.append("bootstrap policy cannot produce VERIFIED authority")
@@ -6111,6 +6113,7 @@ class OperatorGovernanceService:
             trusted_policy_source=policy.source,
             trusted_policy=policy.trusted,
             phase="merge",
+            production_root=self.project_root if request.experiment_line_id else None,
             allowed_signers=self.allowed_signers,
             expected_github_repository=repository,
             expected_pull_request=int(data["pull_request"]),

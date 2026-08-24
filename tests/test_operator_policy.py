@@ -1690,6 +1690,32 @@ def test_line_bound_subject_baseline_accepted_by_identity(tmp_path: Path):
         )
 
 
+def test_line_bound_production_invariants_use_control_root(tmp_path: Path):
+    from autobugfix.operator.policy import static_constitution_violations
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    candidate_root = make_operator_repo(tmp_path / "a")
+    control_root = make_operator_repo(tmp_path / "b")
+    policy = yaml.safe_load(PACKAGE_POLICY.read_text(encoding="utf-8"))
+    marker = "MARKER_ONLY_THE_CONTROL_LINEAGE_HAS = True"
+    invariants = dict(policy.get("static_invariants") or {})
+    invariants["production_sdk_requires"] = [marker]
+    policy["static_invariants"] = invariants
+    sdk = control_root / "src/autobugfix/codex_sdk.py"
+    sdk.write_text(
+        sdk.read_text(encoding="utf-8") + f"\n{marker}\n", encoding="utf-8"
+    )
+
+    without_control = static_constitution_violations(candidate_root, policy)
+    with_control = static_constitution_violations(
+        candidate_root, policy, invariant_root=control_root
+    )
+
+    assert any("production SDK runtime missing required marker" in item for item in without_control)
+    assert not any("production SDK runtime missing required marker" in item for item in with_control)
+
+
 def test_baseline_profile_values_reject_secrets_and_local_absolute_paths(tmp_path: Path):
     root = make_operator_repo(tmp_path)
     service = service_for(root, tmp_path)
