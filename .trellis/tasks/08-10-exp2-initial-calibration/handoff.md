@@ -196,3 +196,32 @@ Machine notes for any future governed run on THIS host:
   SUMMARY to bias the model (request-…-03c554fc is the working example).
 - Budget `max_operator_revisions=3` counts per (role, execution_id); a fresh
   request resets it when a writer run is burned.
+
+## 10. RETURN-TO-CONTINUE CARD (user stepped back 2026-08-24; everything below is turnkey)
+
+The user delegated all judgment and stopped participating. Everything autonomously
+executable is done. The remaining evolution steps are human-gated; when the user returns,
+these are the exact unlocks (no context needed):
+
+**A. Formalize H_general (holdout generalization proof — the full evolution close):**
+1. One-time infra: dedicated Guard VM docker daemon publishing
+   `autobugfix.guard.isolation=dedicated-vm-v1` via a mode-0600 unix socket under an
+   external guard root; set `eval.benchmarks.guard.docker_host` to it. (Absent today:
+   it is `null`.)
+2. New task/protocol/study IDs (holdout extension is now UNLOCKED by the PRD's own
+   criteria: positive transfer signal + zero regressions).
+3. Budget approvals are interactive-TTY commands the agent will hand over when reached.
+4. `operator study import-guard-metric` (getpass guard secret — human only) →
+   `operator checkpoint create --name H_general` materializes the frozen evolved identity.
+
+**B. Evolution round 2 (H2 iteration):** new study/line on top of `fe0f2fea`; needs new
+budget grants (same interactive approvals). The Writer blind-patch guidance pattern from
+request-…-03c554fc's summary is the working recipe on this kernel.
+
+**C. Merge PR #17:** must go through the operator trusted-merge flow (it is itself an
+anchor-advancing act); do NOT raw-merge.
+
+**Durable state:** branch tip `ba3b67d` (clean, pushed); study r4 REPORTED; line
+`exp2-operator-f8bec35-r1` CLOSED at `fe0f2fea`; anchor `trusted_ref=f8bec35` in the
+machine-local config; verification profiles fast=[execution] full=[execution,memory];
+subject baseline `exp2-subject-f529f09d-gate` committed at f8bec35.
