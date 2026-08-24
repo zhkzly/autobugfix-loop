@@ -2996,7 +2996,15 @@ class Exp2ResumeCoordinator:
         resolved = sum(bool(item.resolved) for item in valid)
         unresolved = len(valid) - resolved
         source = [h0_by_case[item.case_id] for item in state.protocol.source_cases]
-        legal_signal = any(item.resolved is False and item.failure_stage in {"execution", "visible_verifier"} for item in source)
+        # official_eval failures (real patch, hidden tests not passed) are
+        # attackable through the Writer skill now that the worker shell is
+        # unblocked: the writer can run the visible suite locally before
+        # finalizing, so repair-quality revisions remain attributable.
+        legal_signal = any(
+            item.resolved is False
+            and item.failure_stage in {"execution", "visible_verifier", "official_eval"}
+            for item in source
+        )
         feasibility: Literal["passed", "saturation", "floor", "no_legal_adaptation_signal"]
         if resolved < 2:
             feasibility = "floor"
