@@ -314,6 +314,25 @@ def _run_command(
                         else sandbox_bin
                     )
                     command_argv[0] = str(sandbox_executable)
+        if network_access:
+            # On systemd-resolved hosts /etc/resolv.conf symlinks into /run,
+            # which sandbox authority masking replaces with a tmpfs; recreate
+            # the resolved target so network-enabled commands keep DNS.
+            resolv = Path("/etc/resolv.conf")
+            try:
+                resolv_real = resolv.resolve(strict=False)
+            except OSError:
+                resolv_real = resolv
+            if resolv_real != resolv and resolv_real.is_file():
+                wrapper.extend(
+                    [
+                        "--dir",
+                        str(resolv_real.parent),
+                        "--ro-bind",
+                        str(resolv_real),
+                        str(resolv_real),
+                    ]
+                )
         environment["AUTOBUGFIX_PROCESS_SANDBOX"] = "bubblewrap"
         wrapper.extend(["--chdir", str(candidate_root), "--"])
         executed_argv = [*wrapper, *command_argv]
