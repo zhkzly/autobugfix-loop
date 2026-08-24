@@ -225,3 +225,15 @@ anchor-advancing act); do NOT raw-merge.
 `exp2-operator-f8bec35-r1` CLOSED at `fe0f2fea`; anchor `trusted_ref=f8bec35` in the
 machine-local config; verification profiles fast=[execution] full=[execution,memory];
 subject baseline `exp2-subject-f529f09d-gate` committed at f8bec35.
+
+## 11. Why there is no "H2 iteration" (design boundary, checked 2026-08-24)
+
+An H2 round with subject = the retained fe0f2fea was attempted and correctly rejected by
+the apparatus: `SWE_H0_SUBJECT = f529f09d` is a hard constant (swe_constants.py) and the
+constitution states H_bug/H_general are INDEPENDENT successors of one frozen H0 that may
+not inherit each other's code/skills/artifacts/case feedback. The evolution model is:
+frozen H0 → one governed revision per lineage → holdout validation → frozen checkpoint.
+Continuation therefore means (a) holdout + H_general checkpoint for the retained
+candidate (handoff §10.A — human gates), or (b) a fresh INDEPENDENT lineage from f529f09d
+with its own H0/attribution (legal, but "more of the same" and still budget-gated at
+candidate time). The H2 attempt left no artifacts.
