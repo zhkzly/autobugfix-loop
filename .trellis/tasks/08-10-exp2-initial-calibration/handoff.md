@@ -248,3 +248,43 @@ null. Consequence, by the system's own design: no CANDIDATE metric can be regist
 the formal H_general checkpoint is permanently out of scope on this machine unless the
 user re-opens it (§10.A remains the recipe). The pilot's terminal state stands on its own:
 exp2-pilot-f8bec35-r4 REPORTED, retain_transfer_rescue.
+
+## 13. THE USER'S ITERATIVE PROTOCOL (executed 2026-08-24 evening)
+
+The user clarified exp2's real design mid-session: an ITERATIVE conquer loop —
+(evolution set: attack failures from execution feedback) + (regression set: passing
+cases must stay passing) + (held-out: final eval only after convergence) — with
+standing delegation ("我也不想反复确认了"). Executed:
+
+- **Frozen-H0 advancement**: each round's retained candidate becomes the next frozen
+  H0 (SWE_H0_SUBJECT constant + benchmark protocol yamls + raw-codex treatment
+  rebind; commit aa98bba). f529f09d → fe0f2fea (round-1 evolution).
+- **Round 2 exploration** exposed the real root cause of empty-patch failures: the
+  CASE-execUTION Codex worker was double-sandboxed (outer worker bwrap + inner codex
+  sandbox = nested userns, banned by this kernel). Fixed in 2c35c1b (inner session
+  runs full-access inside the already-confined outer wrapper; verified with a real
+  SDK probe). Writers can exec again.
+- **Feasibility gate extended** (1965577): official_eval failures are now attributable
+  (writers can run tests locally, so repair-quality skill revisions are legal).
+- **Delegated budget approvals** (37842ab): approval_kind=delegated_agent + recorded
+  delegation note; interactive human attestation unchanged as default.
+- **Cycle-6 completed the loop INCLUDING rollback**: candidate (skill: derive
+  acceptance tests from the problem statement + verify locally) verified and
+  integrated, H1 ran, transfer showed xarray RESCUE but matplotlib OBSERVED
+  REGRESSION → decision=rollback → governed rollback restored the line to its H0
+  checkpoint → REPORTED (d78e50ad). The user's "不许修坏" gate fired for real.
+- **Rollback-path defects fixed** (d1c1fd0): Exp2PairedMetrics.record_digest crashes
+  (authorization + replay), usage-digest provenance (now prefix-verified because H1
+  meters onto the same grant by design), rollback validation now honors the machine
+  full_profiles knob.
+
+**Evolution curve (H0 resolved/10 per harness generation):** f529f09d @f8bec35: 2 →
+subject fe0f2fea @aa98bba: 4 → @2c35c1b (exec fixed): 3-4 (variance). Retained
+evolution: round-1 skill fix (empty-patch prohibition). Round-2 candidate REJECTED by
+the regression gate (correct behavior). Continuation is turnkey: cycle assembly
+(/tmp pattern: anchor+tag; steps 1-9) + candidate chain scripts; every future cycle is
+zero-human (delegated approvals, committed baseline pattern).
+
+Honest variance note: django/matplotlib/requests flip between runs (gpt-5.4-mini@low
+nondeterminism); paired same-study comparisons are the only sound basis (which is
+what each cycle's H0/H1 pairing does).
