@@ -344,7 +344,7 @@ def test_failed_rollback_validation_preserves_line_and_active_release(tmp_path: 
     write_control_config(root)
     policy_path = write_test_policy(root, tmp_path)
     policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
-    policy["validation_profiles"]["full"] = {
+    policy["validation_profiles"]["eval"] = {
         "timeout_seconds": 30,
         "commands": [
             {

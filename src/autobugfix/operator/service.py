@@ -2727,23 +2727,38 @@ class OperatorGovernanceService:
                     raise OperatorGovernanceError(
                         "rollback commit tree does not match checkpoint tree"
                     )
-                profile = (policy.data.get("validation_profiles") or {}).get("full")
-                if not isinstance(profile, dict) or not profile.get("commands"):
-                    raise OperatorGovernanceError("trusted full validation profile is missing")
+                constitution_profiles = (
+                    policy.data.get("validation_profiles") or {}
+                )
+                profile_names = tuple(
+                    self.config.operator.verification.full_profiles or ("full",)
+                )
+                profile_commands = []
+                profile_timeout = 300
+                for profile_name in profile_names:
+                    profile = constitution_profiles.get(profile_name)
+                    if not isinstance(profile, dict) or not profile.get("commands"):
+                        raise OperatorGovernanceError(
+                            "trusted full validation profile is missing"
+                        )
+                    profile_commands.extend(profile["commands"])
+                    profile_timeout = max(
+                        profile_timeout, int(profile.get("timeout_seconds", 300))
+                    )
                 results = run_command_specs(
                     worktree,
                     self.store.artifact_root
                     / request_id
                     / "rollbacks"
                     / rollback_id,
-                    list(profile["commands"]),
+                    profile_commands,
                     values={
                         "base_sha": line.head_sha,
                         "head_sha": result_head,
                         "request_id": request_id,
                         "candidate_root": str(worktree),
                     },
-                    default_timeout_seconds=int(profile.get("timeout_seconds", 300)),
+                    default_timeout_seconds=profile_timeout,
                     name_prefix="rollback-full",
                     process_sandbox=self.config.operator.verification.process_sandbox,
                     require_process_sandbox=self.config.operator.verification.require_process_sandbox,
@@ -3667,8 +3682,13 @@ class OperatorGovernanceService:
                 and check.to_dict()["record_digest"] == item.full_check_digest
                 for check in checks
             )
-            or digest_payload({"usage": [entry.to_dict() for entry in usage]})
-            != item.usage_digest
+            or not any(
+                digest_payload(
+                    {"usage": [entry.to_dict() for entry in usage[:count]]}
+                )
+                == item.usage_digest
+                for count in range(len(usage) + 1)
+            )
             or not isinstance(subject_runtime, Mapping)
             or subject_runtime.get("record_digest")
             != item.binding.runtime_digest

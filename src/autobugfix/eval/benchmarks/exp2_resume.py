@@ -2640,7 +2640,7 @@ class Exp2ResumeCoordinator:
                         or authorization.candidate_transition_digest
                         != state.candidate_transition.record_digest
                         or authorization.transfer_metrics_digest
-                        != metrics.record_digest
+                        != str(metrics.to_dict()["record_digest"])
                     ):
                         raise Exp2ResumeError(
                             "rollback authorization differs from transfer evidence"
@@ -3361,7 +3361,7 @@ class Exp2ResumeCoordinator:
                     candidate_transition_digest=(
                         state.candidate_transition.record_digest
                     ),
-                    transfer_metrics_digest=metrics.record_digest,
+                    transfer_metrics_digest=str(metrics.to_dict()["record_digest"]),
                     created_at=max(
                         self._last_receipt(
                             state,
