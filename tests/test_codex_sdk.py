@@ -107,7 +107,12 @@ def test_codex_sdk_preview_api_parameter_passing(tmp_path, monkeypatch):
     assert result.text == "done"
     assert calls["thread_start"]["developer_instructions"] == "dev"
     assert calls["thread_start"]["approval_mode"] == "auto_review"
-    assert calls["run"]["sandbox"] == "workspace-write"
+    import shutil as _shutil
+
+    expected_sandbox = (
+        "full-access" if _shutil.which("bwrap") is not None else "workspace-write"
+    )
+    assert calls["run"]["sandbox"] == expected_sandbox
 
 
 def test_production_sdk_backend_runs_in_bounded_worker_process(tmp_path, monkeypatch):
@@ -297,7 +302,12 @@ def test_runtime_bridge_sanitizes_user_config_and_legacy_effort(tmp_path, monkey
     assert "hooks = false" in text
     assert "multi_agent = false" in text
     assert 'approval_policy = "never"' in text
-    assert 'sandbox_mode = "workspace-write"' in text
+    if shutil.which("bwrap") is not None:
+        # The outer Bubblewrap worker wrapper is active, so the inner Codex
+        # session must not nest another user namespace.
+        assert 'sandbox_mode = "danger-full-access"' in text
+    else:
+        assert 'sandbox_mode = "workspace-write"' in text
     assert "allow_login_shell = false" in text
     assert 'web_search = "disabled"' in text
     assert "network_access = false" in text

@@ -649,11 +649,28 @@ class CodexSDKBackend(CodexBackend):
                 dest = codex_home / name
                 if source.exists():
                     write_private_bytes(dest, source.read_bytes(), exclusive=True)
+            # The worker process is itself confined by the Bubblewrap
+            # wrapper from worker_launch_argv (read-only host, writable
+            # workspace, hidden authority roots).  Codex's own sandbox would
+            # nest another user namespace inside it, which kernels that
+            # restrict unprivileged nested user namespaces reject, leaving
+            # the model unable to execute anything.  When that outer wrapper
+            # is active, run the inner session with full access inside the
+            # already-confined namespace instead of double-sandboxing.
+            outer_bwrap_sandbox = (
+                os.name != "nt"
+                and request.sandbox == "workspace-write"
+                and shutil.which("bwrap") is not None
+            )
             values: dict[str, Any] = {
                 "model_reasoning_effort": cfg.codex.reasoning_effort,
                 "disable_response_storage": cfg.codex.disable_response_storage,
                 "approval_policy": "never",
-                "sandbox_mode": request.sandbox,
+                "sandbox_mode": (
+                    "danger-full-access"
+                    if outer_bwrap_sandbox
+                    else request.sandbox
+                ),
                 "allow_login_shell": False,
                 "web_search": "disabled",
             }
@@ -736,7 +753,14 @@ class CodexSDKBackend(CodexBackend):
             ) from exc
         client = module.Codex(config)
         try:
-            sandbox = module.Sandbox(request.sandbox)
+            outer_bwrap_sandbox = (
+                os.name != "nt"
+                and request.sandbox == "workspace-write"
+                and shutil.which("bwrap") is not None
+            )
+            sandbox = module.Sandbox(
+                "full-access" if outer_bwrap_sandbox else request.sandbox
+            )
             approval_name = request.approval_mode or ("auto_review" if request.sandbox == "workspace-write" else "deny_all")
             approval = getattr(module.ApprovalMode, approval_name, approval_name)
             thread = client.thread_start(
@@ -759,10 +783,15 @@ class CodexSDKBackend(CodexBackend):
                 close()
 
     def _call_legacy_sdk(self, module: Any, request: CodexRequest) -> Any:
+        outer_bwrap_sandbox = (
+            os.name != "nt"
+            and request.sandbox == "workspace-write"
+            and shutil.which("bwrap") is not None
+        )
         kwargs = {
             "prompt": request.prompt,
             "cwd": str(request.cwd),
-            "sandbox": request.sandbox,
+            "sandbox": ("full-access" if outer_bwrap_sandbox else request.sandbox),
             "model": request.model,
             "timeout_seconds": request.timeout_seconds,
             "developer_instructions": request.developer_instructions,
