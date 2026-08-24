@@ -237,3 +237,14 @@ Continuation therefore means (a) holdout + H_general checkpoint for the retained
 candidate (handoff §10.A — human gates), or (b) a fresh INDEPENDENT lineage from f529f09d
 with its own H0/attribution (legal, but "more of the same" and still budget-gated at
 candidate time). The H2 attempt left no artifacts.
+
+## 12. FINAL DISPOSITION (2026-08-24): H_general holdout formalization declined by user
+
+After the pilot completed (§9), the sanctioned H_general path (holdout guard machinery:
+dedicated Guard daemon + sealed cohort + secret-signed metric + checkpoint) was fully
+scoped and infra setup was started, and the user explicitly declined it: "我不需要这个
+保护". The half-built guard root was removed; `eval.benchmarks.guard.docker_host` remains
+null. Consequence, by the system's own design: no CANDIDATE metric can be registered, so
+the formal H_general checkpoint is permanently out of scope on this machine unless the
+user re-opens it (§10.A remains the recipe). The pilot's terminal state stands on its own:
+exp2-pilot-f8bec35-r4 REPORTED, retain_transfer_rescue.
