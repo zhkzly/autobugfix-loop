@@ -308,3 +308,30 @@ plateaued at 4-5/10 with failures astropy/sympy/seaborn/pytest/sphinx. Per the u
 protocol the loop has converged (held-out final eval declined earlier). Continuing
 means either a new lever (beyond the frozen skill-only allowlist — needs protocol
 redesign), a stronger model/effort, or accepting the plateau.
+
+## 15. CYCLE-8 RESULT (2026-08-25): the compute x guidance interaction — THE key finding
+
+Controlled variable: reasoning effort low -> medium (protocol 132b58d; effort pin
+parameterized to {low, medium} in dc1ea4c; everything else frozen: same model, cases,
+budget, subject fe0f2fea).
+
+- **H0@medium: 4/10** (django, xarray, requests, scikit-learn) — identical band to
+  H0@low (3-5/10 over four runs). Doubling reasoning effort ALONE does not move the
+  plateau.
+- **H1@medium with the cycle-7 verification-guidance skill: `retain_transfer_rescue`**
+  (report 1b38bfe0) — matplotlib RESCUE, zero regressions, django/xarray both-pass,
+  astropy/sympy both-fail. The SAME skill revision that produced `retain_no_gain` at
+  low effort produced a transfer rescue at medium effort.
+
+**Experimental conclusions (all governed, paired same-study):**
+1. Harness evolution moved the baseline: 2/10 -> 4-5/10 (round-1 skill fix + nested-
+   sandbox environment fix).
+2. Compute alone does not: medium effort H0 == low effort H0.
+3. Guidance x compute INTERACTS: verification/enumeration instructions are inert at
+   low effort and convert to a transfer rescue at medium effort. Guidance requires
+   attempt-time reasoning capacity to be acted on.
+4. Residual plateau (astropy, sympy [+ seaborn/pytest/sphinx at H0]): model capability
+   ceiling on these instances at gpt-5.4-mini scale.
+
+Evolution ledger final: r4 retain_transfer_rescue, c6 rollback, c7 retain_no_gain(low),
+c8 retain_transfer_rescue(medium).
