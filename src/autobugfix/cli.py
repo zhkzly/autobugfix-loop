@@ -350,6 +350,7 @@ def command_eval(args: argparse.Namespace) -> int:
                 empty_memory_fixture_path=Path(args.empty_memory_fixture),
                 execution_allowlist=tuple(args.execution_allowlist),
                 artifact_root=artifact_root,
+                evaluation_mode=args.evaluation_mode,
             )
             output = Path(args.out).resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -1612,6 +1613,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         choices=[EXP2_WRITER_SKILL_PATH],
         required=True,
+    )
+    exp2_build_protocol.add_argument(
+        "--evaluation-mode",
+        choices=["legacy_pilot", "iterative_full"],
+        default="iterative_full",
     )
     exp2_build_protocol.add_argument("--artifact-root")
     exp2_build_protocol.add_argument("--out", required=True)

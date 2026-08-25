@@ -24,10 +24,12 @@ from autobugfix.eval.benchmarks.exp2_resume import (
     Exp2CaseAttemptIntent,
     Exp2CaseAttemptReceipt,
     Exp2OciImageIdentity,
+    Exp2PairedMetrics,
     Exp2ResumeCoordinator,
     Exp2ResumeError,
     Exp2ResumeProtocol,
     Exp2ResumeStudyPlan,
+    _ReplayState,
 )
 from autobugfix.eval.benchmarks.exp2_runtime import (
     Exp2EvalAuthority,
@@ -208,9 +210,18 @@ def test_candidate_transition_rejects_unexplained_execution_skill_drift(
         coordinator._validate_candidate_transition(state, receipt)
 
 
-def _protocol(*, qualified: bool = True) -> Exp2ResumeProtocol:
+def _protocol(
+    *, qualified: bool = True, iterative: bool = False
+) -> Exp2ResumeProtocol:
     pending = Exp2ResumeProtocol(
-        protocol_id="exp2-resume-mvp-v2",
+        protocol_id=(
+            "exp2-iterative-v3" if iterative else "exp2-resume-mvp-v2"
+        ),
+        schema_version=(3 if iterative else 2),
+        evaluation_mode=(
+            "iterative_full" if iterative else "legacy_pilot"
+        ),
+
         dataset_revision=_sha("dataset"),
         scorer_digest=_digest("scorer"),
         runtime_digest=_digest("runtime"),
@@ -2091,6 +2102,208 @@ def test_h0_invalid_produces_replayable_terminal_record(tmp_path: Path) -> None:
     assert result["pilot_terminal_digest"] is not None
     assert pilot.status()["state"] == "BLOCKED"
     assert pilot.resume(executor)["status"] == "terminal"
+
+
+def test_v3_protocol_round_trip_enables_iterative_full_regression() -> None:
+    protocol = _protocol(iterative=True)
+
+    restored = Exp2ResumeProtocol.from_dict(protocol.to_dict())
+
+    assert restored.schema_version == 3
+    assert restored.evaluation_mode == "iterative_full"
+    assert restored.to_dict() == protocol.to_dict()
+
+
+def test_iterative_h0_releases_all_failures_and_derives_full_regression_set(
+    tmp_path: Path,
+) -> None:
+    protocol = _protocol(iterative=True)
+    calibration = _coordinator(
+        tmp_path / "calibration",
+        protocol=protocol,
+    )
+    calibration.resume(_execute_official)
+    calibration.resume(_execute_official)
+    terminal_path = (
+        calibration.state_root / "calibration-terminal-receipt.yaml"
+    )
+    pilot = _coordinator(
+        tmp_path / "pilot",
+        study_id="iterative-pilot-v3",
+        study_kind="resume_pilot",
+        protocol=protocol,
+        calibration_terminal=terminal_path,
+        apparatus_receipt_path=Path(
+            calibration.load_plan().apparatus_receipt_path
+        ),
+    )
+    resolved_ids = {
+        "django__django-10097",
+        "pydata__xarray-2905",
+        "psf__requests-6028",
+        "scikit-learn__scikit-learn-13439",
+    }
+
+    def executor(raw: Mapping[str, Any]) -> Any:
+        intent = Exp2CaseAttemptIntent.from_dict(raw)
+        return _official_report(
+            intent,
+            resolved=intent.case_id in resolved_ids,
+            failure_stage=(
+                "unknown"
+                if intent.case_id in resolved_ids
+                else "official_eval"
+            ),
+        )
+
+    for _ in range(10):
+        result = pilot.resume(executor)
+
+    assert result["state"] == "SOURCE_RELEASED"
+    state = pilot._replay()
+    failure_ids = tuple(
+        case.case_id
+        for case in pilot._stage_cases(state, "H1_EVOLUTION")
+    )
+    regression_ids = tuple(
+        case.case_id
+        for case in pilot._stage_cases(state, "H1_REGRESSION")
+    )
+    assert failure_ids == tuple(
+        case.case_id
+        for case in protocol.h0_cases
+        if case.case_id not in resolved_ids
+    )
+    assert regression_ids == tuple(
+        case.case_id
+        for case in protocol.h0_cases
+        if case.case_id in resolved_ids
+    )
+    assert len(failure_ids) + len(regression_ids) == 10
+    bundle = yaml.safe_load(
+        (pilot.state_root / "source-projection-bundle.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert bundle["schema"] == "autobugfix-exp2-source-projection-bundle-v3"
+    assert bundle["projection_scope"] == "evolution_failures"
+    assert [item["case_id"] for item in bundle["projections"]] == list(
+        failure_ids
+    )
+    assert not resolved_ids.intersection(
+        item["case_id"] for item in bundle["projections"]
+    )
+
+
+def test_iterative_full_decision_prioritizes_regression_over_rescue() -> None:
+    cells = {
+        "both-pass": 3,
+        "both-fail": 5,
+        "rescue": 1,
+        "observed-regression": 1,
+        "invalid-H0-only": 0,
+        "invalid-H1-only": 0,
+        "both-invalid": 0,
+    }
+    metrics = Exp2PairedMetrics(
+        population="full",
+        case_ids=tuple(case.case_id for case in _protocol().h0_cases),
+        cells=cells,
+        h0_resolved=4,
+        h1_resolved=4,
+        net_paired_gain=0.0,
+    )
+
+    assert Exp2ResumeCoordinator._full_decision(metrics) == "rollback"
+
+
+def _terminal_receipt_for_case(
+    *,
+    study_id: str,
+    stage: str,
+    arm: str,
+    case_id: str,
+    resolved: bool,
+) -> Exp2CaseAttemptReceipt:
+    intent = Exp2CaseAttemptIntent(
+        study_id=study_id,
+        study_kind="resume_pilot",
+        stage=stage,  # type: ignore[arg-type]
+        arm=arm,  # type: ignore[arg-type]
+        case_id=case_id,
+        slice=next(
+            case.slice for case in _protocol().h0_cases if case.case_id == case_id
+        ),
+        run_id=f"run-{stage.lower()}-{case_id}",
+        output_root=str((Path("/tmp") / f"run-{stage.lower()}-{case_id}").resolve()),
+        subject_sha=_sha(arm),
+        subject_tree=_sha(f"{arm}-tree"),
+        frozen_input_digest=_digest(f"input:{stage}:{case_id}"),
+        binding_digest=_digest(f"binding:{arm}"),
+        attempt_kind="execution",
+    )
+    return Exp2CaseAttemptReceipt.from_official_report(
+        intent,
+        _official_report(intent, resolved=resolved),
+        writer_attempts=1,
+        failure_stage="unknown" if resolved else "official_eval",
+        image_digest=_digest(f"local:{case_id}"),
+        runtime_digest=_digest("runtime"),
+        usage_digest=_digest(f"usage:{stage}:{case_id}"),
+    )
+
+
+def test_iterative_full_metrics_cover_all_ten_and_regression_wins() -> None:
+    protocol = _protocol(iterative=True)
+    plan = SimpleNamespace()
+    state = _ReplayState(plan=plan, protocol=protocol, state="REGRESSION_RUNNING")
+    h0_resolved = {
+        "django__django-10097",
+        "pydata__xarray-2905",
+        "psf__requests-6028",
+        "scikit-learn__scikit-learn-13439",
+    }
+    h1_resolved = {
+        "django__django-10097",
+        "matplotlib__matplotlib-24627",  # rescue
+        "pydata__xarray-2905",
+        "scikit-learn__scikit-learn-13439",
+        # requests regresses
+    }
+    coordinator = Exp2ResumeCoordinator(Path("/tmp/iterative-metrics"), "iterative-v3")
+    for case in protocol.h0_cases:
+        h0 = _terminal_receipt_for_case(
+            study_id="iterative-v3",
+            stage="H0",
+            arm="H0",
+            case_id=case.case_id,
+            resolved=case.case_id in h0_resolved,
+        )
+        state.receipts[("H0", "H0", case.case_id)] = [h0]
+        stage = (
+            "H1_REGRESSION"
+            if case.case_id in h0_resolved
+            else "H1_EVOLUTION"
+        )
+        h1 = _terminal_receipt_for_case(
+            study_id="iterative-v3",
+            stage=stage,
+            arm="H1",
+            case_id=case.case_id,
+            resolved=case.case_id in h1_resolved,
+        )
+        state.receipts[(stage, "H1", case.case_id)] = [h1]
+    full = coordinator._reduce_population(state, "full")
+    evolution = coordinator._reduce_population(state, "evolution")
+    regression = coordinator._reduce_population(state, "regression")
+
+    assert len(full.case_ids) == 10
+    assert len(evolution.case_ids) == 6
+    assert len(regression.case_ids) == 4
+    assert full.cells["rescue"] == 1
+    assert full.cells["observed-regression"] == 1
+    assert regression.cells["observed-regression"] == 1
+    assert coordinator._full_decision(full) == "rollback"
 
 
 def test_h0_pass_releases_only_the_source_pair(tmp_path: Path) -> None:

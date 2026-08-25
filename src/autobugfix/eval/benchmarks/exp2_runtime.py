@@ -1394,6 +1394,7 @@ def build_exp2_resume_protocol(
     empty_memory_fixture_path: Path,
     execution_allowlist: tuple[str, ...],
     artifact_root: Path,
+    evaluation_mode: str = "legacy_pilot",
 ) -> Exp2ResumeProtocol:
     """Build a qualified v2 protocol from replayed receipts and local OCI state."""
 
@@ -1421,6 +1422,8 @@ def build_exp2_resume_protocol(
     )
     pending = Exp2ResumeProtocol(
         protocol_id=protocol_id,
+        schema_version=(3 if evaluation_mode == "iterative_full" else 2),
+        evaluation_mode=evaluation_mode,  # type: ignore[arg-type]
         dataset_revision=str(runtime["dataset_revision"]),
         scorer_digest=str(runtime["scorer_digest"]),
         runtime_digest=str(runtime["runtime_digest"]),

@@ -46,8 +46,12 @@ class Exp2ResumeError(RuntimeError):
 
 
 StudyKind = Literal["calibration", "resume_pilot"]
-ResumeStage = Literal["CALIBRATION", "H0", "H1_SOURCE", "H1_TRANSFER"]
+ResumeStage = Literal[
+    "CALIBRATION", "H0", "H1_SOURCE", "H1_TRANSFER",
+    "H1_EVOLUTION", "H1_REGRESSION",
+]
 ResumeArm = Literal["H0", "H1"]
+EvaluationMode = Literal["legacy_pilot", "iterative_full"]
 AttemptKind = Literal["execution", "scorer_only_retry"]
 CaseTerminalStatus = Literal[
     "official_terminal",
@@ -347,6 +351,7 @@ class Exp2ResumeProtocol:
     oci_images: tuple[Exp2OciImageIdentity, ...] = ()
     qualification_status: Literal["pending_qualification", "qualified"] = "pending_qualification"
     one_revision_cap: int = 1
+    evaluation_mode: EvaluationMode = "legacy_pilot"
     schema_version: int = 2
 
     def __post_init__(self) -> None:
@@ -362,8 +367,16 @@ class Exp2ResumeProtocol:
             "execution_role_skill_digest",
         ):
             _sha256(getattr(self, field_name), field_name)
-        if self.schema_version != 2:
+        if self.schema_version not in {2, 3}:
             raise Exp2ContractError("unsupported Exp2 resume protocol schema")
+        if self.schema_version == 2 and self.evaluation_mode != "legacy_pilot":
+            raise Exp2ContractError(
+                "Exp2 v2 protocol supports only the legacy pilot evaluation mode"
+            )
+        if self.schema_version == 3 and self.evaluation_mode != "iterative_full":
+            raise Exp2ContractError(
+                "Exp2 v3 protocol requires the iterative full-regression mode"
+            )
         if self.model != "gpt-5.4-mini" or self.reasoning_effort not in {"low", "medium"}:
             raise Exp2ContractError("Exp2 resume protocol model or reasoning drift")
         if self.execution_mode != "protected":
@@ -414,7 +427,11 @@ class Exp2ResumeProtocol:
     def to_dict(self) -> dict[str, Any]:
         return record_with_digest(
             {
-                "schema": "autobugfix-exp2-resume-protocol-v2",
+                "schema": (
+                    "autobugfix-exp2-resume-protocol-v3"
+                    if self.schema_version == 3
+                    else "autobugfix-exp2-resume-protocol-v2"
+                ),
                 "schema_version": self.schema_version,
                 "protocol_id": self.protocol_id,
                 "dataset_revision": self.dataset_revision,
@@ -437,6 +454,11 @@ class Exp2ResumeProtocol:
                 "oci_images": [item.to_dict() for item in self.oci_images],
                 "qualification_status": self.qualification_status,
                 "one_revision_cap": self.one_revision_cap,
+                **(
+                    {"evaluation_mode": self.evaluation_mode}
+                    if self.schema_version == 3
+                    else {}
+                ),
             }
         )
 
@@ -446,6 +468,7 @@ class Exp2ResumeProtocol:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Exp2ResumeProtocol":
+        schema_version = int(data.get("schema_version") or 0)
         fields = {
             "schema", "schema_version", "protocol_id", "dataset_revision", "scorer_digest",
             "runtime_digest", "memory_fixture_digest", "operator_policy_digest",
@@ -455,7 +478,18 @@ class Exp2ResumeProtocol:
             "execution_allowlist", "calibration_cases", "h0_cases", "oci_images",
             "qualification_status", "one_revision_cap", "record_digest",
         }
-        _verify(data, "autobugfix-exp2-resume-protocol-v2", fields, "Exp2 resume protocol")
+        if schema_version == 3:
+            fields.add("evaluation_mode")
+        _verify(
+            data,
+            (
+                "autobugfix-exp2-resume-protocol-v3"
+                if schema_version == 3
+                else "autobugfix-exp2-resume-protocol-v2"
+            ),
+            fields,
+            "Exp2 resume protocol",
+        )
         raw_calibration = data.get("calibration_cases")
         raw_h0 = data.get("h0_cases")
         raw_images = data.get("oci_images")
@@ -464,7 +498,12 @@ class Exp2ResumeProtocol:
         if not all(isinstance(item, Mapping) for item in (*raw_calibration, *raw_h0, *raw_images)):
             raise Exp2ContractError("Exp2 resume protocol case/image entries must be mappings")
         return cls(
-            schema_version=int(data.get("schema_version") or 0),
+            schema_version=schema_version,
+            evaluation_mode=(
+                str(data.get("evaluation_mode") or "iterative_full")
+                if schema_version == 3
+                else "legacy_pilot"
+            ),  # type: ignore[arg-type]
             protocol_id=str(data.get("protocol_id") or ""),
             dataset_revision=str(data.get("dataset_revision") or ""),
             scorer_digest=str(data.get("scorer_digest") or ""),
@@ -753,7 +792,10 @@ class Exp2CaseAttemptIntent:
         _safe(self.run_id, "run_id")
         if self.study_kind not in {"calibration", "resume_pilot"}:
             raise Exp2ContractError("case intent study_kind is invalid")
-        if self.stage not in {"CALIBRATION", "H0", "H1_SOURCE", "H1_TRANSFER"}:
+        if self.stage not in {
+            "CALIBRATION", "H0", "H1_SOURCE", "H1_TRANSFER",
+            "H1_EVOLUTION", "H1_REGRESSION",
+        }:
             raise Exp2ContractError("case intent stage is invalid")
         if self.arm not in {"H0", "H1"}:
             raise Exp2ContractError("case intent arm is invalid")
@@ -783,7 +825,9 @@ class Exp2CaseAttemptIntent:
             )
         if (self.stage in {"CALIBRATION", "H0"}) != (self.arm == "H0"):
             raise Exp2ContractError("case intent arm disagrees with stage")
-        if self.stage in {"H1_SOURCE", "H1_TRANSFER"} and self.arm != "H1":
+        if self.stage in {
+            "H1_SOURCE", "H1_TRANSFER", "H1_EVOLUTION", "H1_REGRESSION"
+        } and self.arm != "H1":
             raise Exp2ContractError("case intent arm disagrees with H1 stage")
         _absolute_path(self.output_root, "output_root")
         _sha1(self.subject_sha, "subject_sha")
@@ -1511,6 +1555,7 @@ class Exp2SourceProjectionBundle:
     h0_receipt_digest: str
     feasibility: Literal["passed", "saturation", "floor", "no_legal_adaptation_signal"]
     projections: tuple[Exp2SourceProjection, ...]
+    projection_scope: Literal["source_pair", "evolution_failures"] = "source_pair"
     audience: Literal["operator"] = "operator"
     created_at: str = field(default_factory=utc_now)
 
@@ -1521,18 +1566,45 @@ class Exp2SourceProjectionBundle:
             raise Exp2ContractError("source projection feasibility is invalid")
         if self.audience != "operator":
             raise Exp2ContractError("source projection audience must be operator")
-        expected = tuple(item.case_id for item in _H0_CASES if item.slice == "source")
-        if tuple(item.case_id for item in self.projections) != expected:
-            raise Exp2ContractError("source projection bundle may contain only the frozen source pair")
+        case_ids = tuple(item.case_id for item in self.projections)
+        if self.projection_scope == "source_pair":
+            expected = tuple(
+                item.case_id for item in _H0_CASES if item.slice == "source"
+            )
+            if case_ids != expected:
+                raise Exp2ContractError(
+                    "source projection bundle may contain only the frozen source pair"
+                )
+        elif self.projection_scope == "evolution_failures":
+            frozen_order = tuple(item.case_id for item in _H0_CASES)
+            if (
+                not case_ids
+                or any(item not in frozen_order for item in case_ids)
+                or tuple(sorted(case_ids, key=frozen_order.index)) != case_ids
+            ):
+                raise Exp2ContractError(
+                    "evolution projection bundle must contain ordered frozen H0 failures"
+                )
+        else:
+            raise Exp2ContractError("source projection scope is invalid")
 
     def to_dict(self) -> dict[str, Any]:
         return record_with_digest(
             {
-                "schema": "autobugfix-exp2-source-projection-bundle-v2",
+                "schema": (
+                    "autobugfix-exp2-source-projection-bundle-v3"
+                    if self.projection_scope == "evolution_failures"
+                    else "autobugfix-exp2-source-projection-bundle-v2"
+                ),
                 "study_id": self.study_id,
                 "h0_receipt_digest": self.h0_receipt_digest,
                 "feasibility": self.feasibility,
                 "projections": [item.to_dict() for item in self.projections],
+                **(
+                    {"projection_scope": self.projection_scope}
+                    if self.projection_scope == "evolution_failures"
+                    else {}
+                ),
                 "audience": self.audience,
                 "created_at": self.created_at,
             }
@@ -1544,8 +1616,22 @@ class Exp2SourceProjectionBundle:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Exp2SourceProjectionBundle":
+        projection_scope = str(
+            data.get("projection_scope") or "source_pair"
+        )
         fields = {"schema", "study_id", "h0_receipt_digest", "feasibility", "projections", "audience", "created_at", "record_digest"}
-        _verify(data, "autobugfix-exp2-source-projection-bundle-v2", fields, "source projection bundle")
+        if projection_scope == "evolution_failures":
+            fields.add("projection_scope")
+        _verify(
+            data,
+            (
+                "autobugfix-exp2-source-projection-bundle-v3"
+                if projection_scope == "evolution_failures"
+                else "autobugfix-exp2-source-projection-bundle-v2"
+            ),
+            fields,
+            "source projection bundle",
+        )
         raw = data.get("projections")
         if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)) or not all(isinstance(item, Mapping) for item in raw):
             raise Exp2ContractError("source projection bundle projections must be a list")
@@ -1554,6 +1640,7 @@ class Exp2SourceProjectionBundle:
             h0_receipt_digest=str(data.get("h0_receipt_digest") or ""),
             feasibility=str(data.get("feasibility") or ""),  # type: ignore[arg-type]
             projections=tuple(Exp2SourceProjection.from_dict(item) for item in raw),
+            projection_scope=projection_scope,  # type: ignore[arg-type]
             audience=str(data.get("audience") or ""),  # type: ignore[arg-type]
             created_at=str(data.get("created_at") or utc_now()),
         )
@@ -2021,7 +2108,7 @@ class Exp2RollbackReceipt:
 
 @dataclass(frozen=True, slots=True)
 class Exp2PairedMetrics:
-    population: Literal["source", "transfer"]
+    population: Literal["source", "transfer", "evolution", "regression", "full"]
     case_ids: tuple[str, ...]
     cells: Mapping[str, int]
     h0_resolved: int
@@ -2029,7 +2116,16 @@ class Exp2PairedMetrics:
     net_paired_gain: float | None
 
     def __post_init__(self) -> None:
-        expected = 2 if self.population == "source" else 3
+        if self.population == "source":
+            expected = 2
+        elif self.population == "transfer":
+            expected = 3
+        else:
+            expected = len(self.case_ids)
+            if expected < 1 or expected > len(_H0_CASES):
+                raise Exp2ContractError(
+                    "iterative paired metrics have an invalid dynamic denominator"
+                )
         if len(self.case_ids) != expected or len(set(self.case_ids)) != expected:
             raise Exp2ContractError("paired metrics have the wrong fixed denominator")
         required = {
@@ -2070,10 +2166,13 @@ def reduce_exp2_pairs(
     h0: Sequence[Exp2CaseAttemptReceipt],
     h1: Sequence[Exp2CaseAttemptReceipt],
     *,
-    population: Literal["source", "transfer"],
+    population: Literal["source", "transfer", "evolution", "regression", "full"],
+    case_ids: Sequence[str] | None = None,
 ) -> Exp2PairedMetrics:
-    expected_cases = tuple(
-        item.case_id for item in _H0_CASES if item.slice == population
+    expected_cases = (
+        tuple(case_ids)
+        if case_ids is not None
+        else tuple(item.case_id for item in _H0_CASES if item.slice == population)
     )
     h0_by_case = {item.case_id: item for item in h0}
     h1_by_case = {item.case_id: item for item in h1}
@@ -2177,6 +2276,9 @@ class _ReplayState:
     candidate_transition: Exp2CandidateTransitionReceipt | None = None
     source_metrics: Exp2PairedMetrics | None = None
     transfer_metrics: Exp2PairedMetrics | None = None
+    evolution_metrics: Exp2PairedMetrics | None = None
+    regression_metrics: Exp2PairedMetrics | None = None
+    full_metrics: Exp2PairedMetrics | None = None
     decision: str | None = None
     rollback_authorization: Exp2RollbackAuthorization | None = None
     rollback: Exp2RollbackReceipt | None = None
@@ -2558,7 +2660,15 @@ class Exp2ResumeCoordinator:
                     raise Exp2ResumeError("Exp2 v2 case has multiple open intents")
                 state.intents.setdefault(key, []).append(intent)
                 if state.state in {"CALIBRATION_PREPARED", "PREPARED"}:
-                    state.state = "CALIBRATION_RUNNING" if plan.study_kind == "calibration" else "H0_RUNNING"
+                    state.state = (
+                        "CALIBRATION_RUNNING"
+                        if plan.study_kind == "calibration"
+                        else "H0_RUNNING"
+                    )
+                elif intent.stage == "H1_EVOLUTION":
+                    state.state = "EVOLUTION_RUNNING"
+                elif intent.stage == "H1_REGRESSION":
+                    state.state = "REGRESSION_RUNNING"
             elif kind == "case_attempt_terminal":
                 receipt = Exp2CaseAttemptReceipt.from_dict(payload)
                 key = (receipt.stage, receipt.arm, receipt.case_id)
@@ -2611,6 +2721,61 @@ class Exp2ResumeCoordinator:
                     raise Exp2ResumeError("Exp2 v2 candidate transition is duplicated")
                 state.candidate_transition = receipt
                 state.state = "CANDIDATE_LOCKED"
+            elif kind == "evolution_complete":
+                metrics = self._metrics_from_payload(payload, "evolution")
+                self._validate_complete_h1_stage(state, "evolution", metrics)
+                state.evolution_metrics = metrics
+                state.state = "EVOLUTION_COMPLETE"
+            elif kind == "regression_decided":
+                regression = self._metrics_from_payload(payload, "regression")
+                full = self._metrics_from_payload(
+                    payload, "full", field_name="full_metrics"
+                )
+                self._validate_complete_h1_stage(state, "regression", regression)
+                self._validate_complete_h1_stage(state, "full", full)
+                decision = _required(payload.get("decision"), "regression decision")
+                expected = self._full_decision(full)
+                if decision != expected:
+                    raise Exp2ResumeError(
+                        "Exp2 v3 decision differs from complete paired metrics"
+                    )
+                raw_authorization = payload.get("rollback_authorization")
+                if decision == "rollback":
+                    if (
+                        not isinstance(raw_authorization, Mapping)
+                        or state.candidate_transition is None
+                    ):
+                        raise Exp2ResumeError(
+                            "rollback decision lacks Eval authorization"
+                        )
+                    authorization = Exp2RollbackAuthorization.from_dict(
+                        raw_authorization
+                    )
+                    if (
+                        authorization.study_id != self.study_id
+                        or authorization.candidate_transition_digest
+                        != state.candidate_transition.record_digest
+                        or authorization.transfer_metrics_digest
+                        != str(full.to_dict()["record_digest"])
+                    ):
+                        raise Exp2ResumeError(
+                            "rollback authorization differs from full regression evidence"
+                        )
+                    state.rollback_authorization = authorization
+                elif raw_authorization is not None:
+                    raise Exp2ResumeError(
+                        "non-rollback decision cannot carry rollback authorization"
+                    )
+                state.regression_metrics = regression
+                state.full_metrics = full
+                state.decision = decision
+                state.state = (
+                    "ROLLBACK_AWAITING"
+                    if decision == "rollback"
+                    else "BLOCKED"
+                    if decision == "blocked_invalid"
+                    else "PILOT_COMPLETE"
+                )
             elif kind == "source_replay_complete":
                 metrics = self._metrics_from_payload(payload, "source")
                 self._validate_complete_h1_stage(state, "source", metrics)
@@ -2689,6 +2854,19 @@ class Exp2ResumeCoordinator:
             return state.protocol.source_cases
         if stage == "H1_TRANSFER":
             return state.protocol.transfer_cases
+        if stage in {"H1_EVOLUTION", "H1_REGRESSION"}:
+            h0 = {
+                case.case_id: self._last_receipt(state, "H0", "H0", case.case_id)
+                for case in state.protocol.h0_cases
+            }
+            expected_resolved = stage == "H1_REGRESSION"
+            return tuple(
+                case
+                for case in state.protocol.h0_cases
+                if h0[case.case_id] is not None
+                and h0[case.case_id].terminal_status == "official_terminal"
+                and h0[case.case_id].resolved is expected_resolved
+            )
         raise AssertionError(stage)
 
     @staticmethod
@@ -2700,6 +2878,12 @@ class Exp2ResumeCoordinator:
             return "CALIBRATION" if state.calibration_terminal is None else None
         if state.state in {"PREPARED", "H0_RUNNING"}:
             return "H0"
+        if state.protocol.evaluation_mode == "iterative_full":
+            if state.state in {"CANDIDATE_LOCKED", "EVOLUTION_RUNNING"}:
+                return "H1_EVOLUTION"
+            if state.state in {"EVOLUTION_COMPLETE", "REGRESSION_RUNNING"}:
+                return "H1_REGRESSION"
+            return None
         if state.state in {"CANDIDATE_LOCKED", "SOURCE_REPLAY_RUNNING"}:
             return "H1_SOURCE"
         if state.state in {"SOURCE_REPLAY_COMPLETE", "TRANSFER_RUNNING"}:
@@ -2995,7 +3179,11 @@ class Exp2ResumeCoordinator:
         valid = [item for item in h0_receipts if item.terminal_status == "official_terminal"]
         resolved = sum(bool(item.resolved) for item in valid)
         unresolved = len(valid) - resolved
-        source = [h0_by_case[item.case_id] for item in state.protocol.source_cases]
+        projected = (
+            [item for item in valid if item.resolved is False]
+            if state.protocol.evaluation_mode == "iterative_full"
+            else [h0_by_case[item.case_id] for item in state.protocol.source_cases]
+        )
         # official_eval failures (real patch, hidden tests not passed) are
         # attackable through the Writer skill now that the worker shell is
         # unblocked: the writer can run the visible suite locally before
@@ -3003,7 +3191,7 @@ class Exp2ResumeCoordinator:
         legal_signal = any(
             item.resolved is False
             and item.failure_stage in {"execution", "visible_verifier", "official_eval"}
-            for item in source
+            for item in projected
         )
         feasibility: Literal["passed", "saturation", "floor", "no_legal_adaptation_signal"]
         if resolved < 2:
@@ -3021,7 +3209,7 @@ class Exp2ResumeCoordinator:
                 terminal_label="resolved" if item.resolved else "unresolved",
                 failure_stage=item.failure_stage,
             )
-            for item in source
+            for item in projected
         )
         h0_digest = digest_payload({"case_receipts": [item.record_digest for item in h0_receipts]})
         return (
@@ -3030,14 +3218,24 @@ class Exp2ResumeCoordinator:
                 h0_digest,
                 feasibility,
                 projections,
+                projection_scope=(
+                    "evolution_failures"
+                    if state.protocol.evaluation_mode == "iterative_full"
+                    else "source_pair"
+                ),
                 created_at=max(item.terminal_at for item in h0_receipts),
             ),
             feasibility,
         )
 
     @staticmethod
-    def _metrics_from_payload(payload: Mapping[str, Any], population: Literal["source", "transfer"]) -> Exp2PairedMetrics:
-        raw = payload.get("metrics")
+    def _metrics_from_payload(
+        payload: Mapping[str, Any],
+        population: Literal["source", "transfer", "evolution", "regression", "full"],
+        *,
+        field_name: str = "metrics",
+    ) -> Exp2PairedMetrics:
+        raw = payload.get(field_name)
         if not isinstance(raw, Mapping):
             raise Exp2ResumeError("paired metrics event payload is missing")
         try:
@@ -3060,18 +3258,78 @@ class Exp2ResumeCoordinator:
             net_paired_gain=(float(raw["net_paired_gain"]) if raw.get("net_paired_gain") is not None else None),
         )
 
-    def _validate_complete_h1_stage(self, state: _ReplayState, population: Literal["source", "transfer"], metrics: Exp2PairedMetrics) -> None:
-        stage: ResumeStage = "H1_SOURCE" if population == "source" else "H1_TRANSFER"
-        if not self._stage_complete(state, stage):
-            raise Exp2ResumeError("paired metrics emitted before H1 stage terminal coverage")
-        h0 = [self._last_receipt(state, "H0", "H0", case.case_id) for case in self._stage_cases(state, stage)]
-        h1 = [self._last_receipt(state, stage, "H1", case.case_id) for case in self._stage_cases(state, stage)]
-        expected = reduce_exp2_pairs([item for item in h0 if item is not None], [item for item in h1 if item is not None], population=population)
+    def _validate_complete_h1_stage(
+        self,
+        state: _ReplayState,
+        population: Literal["source", "transfer", "evolution", "regression", "full"],
+        metrics: Exp2PairedMetrics,
+    ) -> None:
+        if population == "source":
+            stages: tuple[ResumeStage, ...] = ("H1_SOURCE",)
+        elif population == "transfer":
+            stages = ("H1_TRANSFER",)
+        elif population == "evolution":
+            stages = ("H1_EVOLUTION",)
+        elif population == "regression":
+            stages = ("H1_REGRESSION",)
+        else:
+            stages = ("H1_EVOLUTION", "H1_REGRESSION")
+        if any(not self._stage_complete(state, stage) for stage in stages):
+            raise Exp2ResumeError(
+                "paired metrics emitted before H1 stage terminal coverage"
+            )
+        stage_cases = {
+            stage: self._stage_cases(state, stage) for stage in stages
+        }
+        if population == "full":
+            by_case = {
+                case.case_id: (stage, case)
+                for stage, cases in stage_cases.items()
+                for case in cases
+            }
+            ordered = tuple(
+                by_case[case.case_id]
+                for case in state.protocol.h0_cases
+                if case.case_id in by_case
+            )
+        else:
+            ordered = tuple(
+                (stage, case)
+                for stage, cases in stage_cases.items()
+                for case in cases
+            )
+        cases = tuple(case for _, case in ordered)
+        h0 = [
+            self._last_receipt(state, "H0", "H0", case.case_id)
+            for case in cases
+        ]
+        h1 = [
+            self._last_receipt(state, stage, "H1", case.case_id)
+            for stage, case in ordered
+        ]
+        expected = reduce_exp2_pairs(
+            [item for item in h0 if item is not None],
+            [item for item in h1 if item is not None],
+            population=population,
+            case_ids=tuple(case.case_id for case in cases),
+        )
         if metrics.to_dict() != expected.to_dict():
-            raise Exp2ResumeError("paired metrics differ from terminal case receipts")
+            raise Exp2ResumeError(
+                "paired metrics differ from terminal case receipts"
+            )
 
     @staticmethod
     def _transfer_decision(metrics: Exp2PairedMetrics) -> str:
+        if metrics.invalid_any:
+            return "blocked_invalid"
+        if metrics.cells["observed-regression"]:
+            return "rollback"
+        if metrics.cells["rescue"]:
+            return "retain_transfer_rescue"
+        return "retain_no_gain"
+
+    @staticmethod
+    def _full_decision(metrics: Exp2PairedMetrics) -> str:
         if metrics.invalid_any:
             return "blocked_invalid"
         if metrics.cells["observed-regression"]:
@@ -3101,6 +3359,23 @@ class Exp2ResumeCoordinator:
             "pilot_terminal_digest": state.pilot_terminal.record_digest if state.pilot_terminal else None,
             "source_projection_bundle_digest": state.source_bundle.record_digest if state.source_bundle else None,
             "candidate_transition_digest": state.candidate_transition.record_digest if state.candidate_transition else None,
+            "evaluation_mode": state.protocol.evaluation_mode,
+            "evolution_case_ids": [
+                case.case_id
+                for case in (
+                    self._stage_cases(state, "H1_EVOLUTION")
+                    if state.protocol.evaluation_mode == "iterative_full"
+                    else ()
+                )
+            ],
+            "regression_case_ids": [
+                case.case_id
+                for case in (
+                    self._stage_cases(state, "H1_REGRESSION")
+                    if state.protocol.evaluation_mode == "iterative_full"
+                    else ()
+                )
+            ],
             "decision": state.decision,
             "rollback_authorization_digest": (
                 state.rollback_authorization.record_digest
@@ -3339,6 +3614,67 @@ class Exp2ResumeCoordinator:
                     terminal.to_dict(),
                     expected_predecessor=state.last_event_digest,
                 )
+        elif stage == "H1_EVOLUTION":
+            metrics = self._reduce_population(state, "evolution")
+            self._append(
+                "evolution_complete",
+                {"metrics": metrics.to_dict()},
+                expected_predecessor=state.last_event_digest,
+            )
+        elif stage == "H1_REGRESSION":
+            regression = self._reduce_population(state, "regression")
+            full = self._reduce_population(state, "full")
+            decision = self._full_decision(full)
+            authorization = None
+            if decision == "rollback":
+                if state.candidate_transition is None:
+                    raise Exp2ResumeError(
+                        "rollback decision lacks a locked candidate"
+                    )
+                authorization = Exp2RollbackAuthorization(
+                    study_id=self.study_id,
+                    issuer="exp2-eval-coordinator-v2",
+                    candidate_transition_digest=(
+                        state.candidate_transition.record_digest
+                    ),
+                    transfer_metrics_digest=str(
+                        full.to_dict()["record_digest"]
+                    ),
+                    created_at=max(
+                        self._last_receipt(
+                            state,
+                            "H1_REGRESSION",
+                            "H1",
+                            case.case_id,
+                        ).terminal_at
+                        for case in self._stage_cases(
+                            state, "H1_REGRESSION"
+                        )
+                    ),
+                )
+                self._write_once(
+                    self.state_root / "rollback-authorization.yaml",
+                    authorization.to_dict(),
+                )
+            self._append(
+                "regression_decided",
+                {
+                    "evolution_metrics": (
+                        state.evolution_metrics.to_dict()
+                        if state.evolution_metrics
+                        else self._reduce_population(
+                            state, "evolution"
+                        ).to_dict()
+                    ),
+                    "metrics": regression.to_dict(),
+                    "full_metrics": full.to_dict(),
+                    "decision": decision,
+                    "rollback_authorization": (
+                        authorization.to_dict() if authorization else None
+                    ),
+                },
+                expected_predecessor=state.last_event_digest,
+            )
         elif stage == "H1_SOURCE":
             metrics = self._reduce_population(state, "source")
             self._append(
@@ -3389,17 +3725,62 @@ class Exp2ResumeCoordinator:
             )
 
     @staticmethod
-    def _empty_metrics(population: Literal["source", "transfer"]) -> Exp2PairedMetrics:
+    def _empty_metrics(
+        population: Literal["source", "transfer", "evolution", "regression", "full"]
+    ) -> Exp2PairedMetrics:
         cases = tuple(item.case_id for item in _H0_CASES if item.slice == population)
         cells = {"both-pass": 0, "both-fail": 0, "rescue": 0, "observed-regression": 0, "invalid-H0-only": 0, "invalid-H1-only": 0, "both-invalid": len(cases)}
         return Exp2PairedMetrics(population, cases, cells, 0, 0, None)
 
-    def _reduce_population(self, state: _ReplayState, population: Literal["source", "transfer"]) -> Exp2PairedMetrics:
-        stage: ResumeStage = "H1_SOURCE" if population == "source" else "H1_TRANSFER"
-        cases = self._stage_cases(state, stage)
-        h0 = [self._last_receipt(state, "H0", "H0", item.case_id) for item in cases]
-        h1 = [self._last_receipt(state, stage, "H1", item.case_id) for item in cases]
-        return reduce_exp2_pairs([item for item in h0 if item is not None], [item for item in h1 if item is not None], population=population)
+    def _reduce_population(
+        self,
+        state: _ReplayState,
+        population: Literal["source", "transfer", "evolution", "regression", "full"],
+    ) -> Exp2PairedMetrics:
+        if population == "source":
+            stages: tuple[ResumeStage, ...] = ("H1_SOURCE",)
+        elif population == "transfer":
+            stages = ("H1_TRANSFER",)
+        elif population == "evolution":
+            stages = ("H1_EVOLUTION",)
+        elif population == "regression":
+            stages = ("H1_REGRESSION",)
+        else:
+            stages = ("H1_EVOLUTION", "H1_REGRESSION")
+        stage_cases = {
+            stage: self._stage_cases(state, stage) for stage in stages
+        }
+        if population == "full":
+            by_case = {
+                case.case_id: (stage, case)
+                for stage, cases in stage_cases.items()
+                for case in cases
+            }
+            ordered = tuple(
+                by_case[case.case_id]
+                for case in state.protocol.h0_cases
+                if case.case_id in by_case
+            )
+        else:
+            ordered = tuple(
+                (stage, case)
+                for stage, cases in stage_cases.items()
+                for case in cases
+            )
+        h0 = [
+            self._last_receipt(state, "H0", "H0", case.case_id)
+            for _, case in ordered
+        ]
+        h1 = [
+            self._last_receipt(state, stage, "H1", case.case_id)
+            for stage, case in ordered
+        ]
+        return reduce_exp2_pairs(
+            [item for item in h0 if item is not None],
+            [item for item in h1 if item is not None],
+            population=population,
+            case_ids=tuple(case.case_id for _, case in ordered),
+        )
 
     def resume(
         self,
@@ -3786,6 +4167,14 @@ class Exp2ResumeCoordinator:
                 populations["transfer"] = self._population_metrics(
                     state, "H1_TRANSFER"
                 )
+            if any(key[0] == "H1_EVOLUTION" for key in state.intents):
+                populations["evolution"] = self._population_metrics(
+                    state, "H1_EVOLUTION"
+                )
+            if any(key[0] == "H1_REGRESSION" for key in state.intents):
+                populations["regression"] = self._population_metrics(
+                    state, "H1_REGRESSION"
+                )
         h0_receipts = [
             self._last_receipt(state, "H0", "H0", case.case_id)
             for case in state.protocol.h0_cases
@@ -3812,6 +4201,19 @@ class Exp2ResumeCoordinator:
             ),
             "transfer_paired": (
                 state.transfer_metrics.to_dict() if state.transfer_metrics else None
+            ),
+            "evolution_paired": (
+                state.evolution_metrics.to_dict()
+                if state.evolution_metrics
+                else None
+            ),
+            "regression_paired": (
+                state.regression_metrics.to_dict()
+                if state.regression_metrics
+                else None
+            ),
+            "full_paired": (
+                state.full_metrics.to_dict() if state.full_metrics else None
             ),
             "incremental_h1_cost_per_transfer_rescue_usd": None,
         }
@@ -3875,7 +4277,14 @@ class Exp2ResumeCoordinator:
             "metrics": self._run_metrics(state),
             "source_paired": state.source_metrics.to_dict() if state.source_metrics else None,
             "transfer_paired": state.transfer_metrics.to_dict() if state.transfer_metrics else None,
-            "reserve": "not_run",
+            "evolution_paired": state.evolution_metrics.to_dict() if state.evolution_metrics else None,
+            "regression_paired": state.regression_metrics.to_dict() if state.regression_metrics else None,
+            "full_paired": state.full_metrics.to_dict() if state.full_metrics else None,
+            "reserve": (
+                "executed_as_full_regression"
+                if state.protocol.evaluation_mode == "iterative_full"
+                else "not_run"
+            ),
             "live": "not_run",
             "pro": "not_run",
             "candidate_transition_digest": state.candidate_transition.record_digest if state.candidate_transition else None,
@@ -3889,9 +4298,9 @@ class Exp2ResumeCoordinator:
             "rollback_receipt_digest": state.rollback.record_digest if state.rollback else None,
             "limitations": [
                 "Calibration is apparatus evidence and has no capability rate.",
-                "Source results are selection-exposed development evidence.",
-                "Transfer results are three-repository optimizer-unexposed pilot evidence.",
-                "Reserve, Live, and Pro were not run.",
+                "Evolution-set results are selection-exposed development evidence.",
+                "Every H0-resolved case is rerun under H1 as the complete regression set.",
+                "Held-out, Live, and Pro were not run.",
                 "No statistical or population-level claim is made.",
             ],
             "commands": [
