@@ -364,7 +364,7 @@ class Exp2ResumeProtocol:
             _sha256(getattr(self, field_name), field_name)
         if self.schema_version != 2:
             raise Exp2ContractError("unsupported Exp2 resume protocol schema")
-        if self.model != "gpt-5.4-mini" or self.reasoning_effort != "low":
+        if self.model != "gpt-5.4-mini" or self.reasoning_effort not in {"low", "medium"}:
             raise Exp2ContractError("Exp2 resume protocol model or reasoning drift")
         if self.execution_mode != "protected":
             raise Exp2ContractError(
