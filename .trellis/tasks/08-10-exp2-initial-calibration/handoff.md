@@ -288,3 +288,23 @@ zero-human (delegated approvals, committed baseline pattern).
 Honest variance note: django/matplotlib/requests flip between runs (gpt-5.4-mini@low
 nondeterminism); paired same-study comparisons are the only sound basis (which is
 what each cycle's H0/H1 pairing does).
+
+## 14. CYCLE-7 RESULT (2026-08-25): retain_no_gain — the loop has converged
+
+Candidate: skill guidance to enumerate stated requirements + verify each locally
+(writer patch, integrated 19d2879, transition 992c0784). H1 paired outcome: 3 both-pass
+(django, matplotlib, xarray), 2 both-fail (astropy, sympy) — zero rescues, zero
+regressions → decision `retain_no_gain`, REPORTED (a24ab53c). Candidate retained on the
+line with no claimed gain (valid negative result).
+
+**Evolution ledger (three terminal outcomes, all governed):**
+- r4  → retain_transfer_rescue (2 rescues) — empty-patch prohibition RETAINED
+- c6  → rollback (1 rescue, 1 regression) — acceptance-test derivation REJECTED
+- c7  → retain_no_gain (flat) — requirement checklist retained without gain
+
+Three different skill revisions attacked the remaining official_eval failures; none
+moved them. The skill lever on this subject (fe0f2fea) with gpt-5.4-mini@low has
+plateaued at 4-5/10 with failures astropy/sympy/seaborn/pytest/sphinx. Per the user's
+protocol the loop has converged (held-out final eval declined earlier). Continuing
+means either a new lever (beyond the frozen skill-only allowlist — needs protocol
+redesign), a stronger model/effort, or accepting the plateau.
