@@ -99,8 +99,13 @@ class SWEDockerVisibleVerifier:
         resolved = worktree.resolve()
         if not any(resolved.is_relative_to(root) for root in self.allowed_worktree_roots):
             raise SWERuntimeError("visible verifier worktree is outside Execution ownership")
-        if git_common_dir(resolved) != self.common_dir:
-            raise SWERuntimeError("visible verifier worktree has foreign Git metadata")
+        observed_common = git_common_dir(resolved)
+        if observed_common != self.common_dir:
+            raise SWERuntimeError(
+                "visible verifier worktree has foreign Git metadata: "
+                f"worktree={resolved} observed_common={observed_common} "
+                f"expected_common={self.common_dir} raw={worktree}"
+            )
         return resolved
 
     def patch_sha256(self, worktree: Path) -> str:
