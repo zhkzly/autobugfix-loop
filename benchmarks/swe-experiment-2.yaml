@@ -1,6 +1,6 @@
 schema_version: 3
 protocol_id: swe-h-general-16
-h0_subject: fe0f2fea98f3c39b9a254000e0731381476c7112
+h0_subject: 6d1d2a74fe9ccf85ba1318431093e7f38aed876d
 codex_runtime:
   model: gpt-5.4-mini
   reasoning_effort: low
