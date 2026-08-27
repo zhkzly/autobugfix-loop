@@ -335,3 +335,36 @@ budget, subject fe0f2fea).
 
 Evolution ledger final: r4 retain_transfer_rescue, c6 rollback, c7 retain_no_gain(low),
 c8 retain_transfer_rescue(medium).
+
+## 16. FULL-REGRESSION PROTOCOL FIRST EXECUTION (2026-08-27, exp2-pilot-d007891-v3r3)
+
+The user's authoritative protocol (evolution set + complete regression set + zero-regression
+gate) executed end-to-end for the first time under schema v3:
+
+- H0: 6/10 resolved. Evolution set (4): astropy, sympy, pytest, sphinx. Regression set (6):
+  django, matplotlib, seaborn, requests, xarray, scikit-learn.
+- Governed candidate: requirement-enumeration + local-verification Writer skill guidance
+  (request-…-b4eae372, integrated 43d10b5, transition e39fad0b), full lifecycle green.
+- H1 covered ALL TEN cases exactly once (H1_EVOLUTION 4 + H1_REGRESSION 6).
+- Outcome: **BLOCKED / blocked_invalid** (report 9b3425b6). Paired cells: 5 both-pass,
+  4 both-fail, 0 rescue, 1 observed-regression (seaborn H0-pass → H1-fail), and 1
+  invalid H1 arm (sphinx: Codex SDK worker hit the frozen 900-second timeout — an
+  apparatus-valid infra invalid, honestly recorded; no retry under the protocol).
+- The regression gate worked exactly as designed: the candidate is REJECTED (rollback
+  was not reachable because the invalid arm forces blocked_invalid before the rollback
+  decision; the operator line still advanced to the candidate and must be rolled back
+  or superseded before any reuse of that lineage).
+
+Harness defects fixed this session to reach this point (all committed on the branch,
+full gate 416/1):
+- 14ccc16 binary task diffs byte-faithful (surrogateescape) through capture/digest/freeze
+- 8c2adce credential env filter no longer strips GIT_AUTHOR_DATE/GIT_COMMITTER_DATE
+- db6fd72 verifier error carries observed/expected common dirs (diagnostic)
+- 8a8b144 verifier accepts broker-sanctioned verification-copy worktrees
+- d007891 db6fd72 subject unit baseline committed in the anchor tree
+- Environment: /tmp hit its tmpfs quota (16G, 13G consumed) — cleaned to 62%; it caused
+  cascading git init/verifier failures that looked like protocol bugs.
+
+Next iteration notes: the 900s writer timeout produced the first genuinely invalid H1 arm;
+a rerun cycle would re-derive sets from a fresh H0. The seaborn regression suggests the
+skill guidance can hurt as well as help — next attribution should examine both directions.
