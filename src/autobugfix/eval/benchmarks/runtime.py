@@ -23,14 +23,28 @@ _SENSITIVE_ENV_FRAGMENTS = (
 )
 
 
+_DETERMINISM_ENV_KEYS = frozenset(
+    {
+        # Literal pinned timestamps, not credentials: the fragment filter
+        # would otherwise strip GIT_AUTHOR_DATE / GIT_COMMITTER_DATE
+        # ("AUTH" matches "AUTHOR") and silently break snapshot determinism.
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_DATE",
+    }
+)
+
+
 def _safe_environment(source: Mapping[str, str]) -> dict[str, str]:
     """Remove host credentials from every benchmark subprocess environment."""
 
     safe: dict[str, str] = {}
     for key, value in source.items():
         normalized = str(key).upper()
-        if normalized == "SSH_AUTH_SOCK" or any(
-            fragment in normalized for fragment in _SENSITIVE_ENV_FRAGMENTS
+        if normalized == "SSH_AUTH_SOCK" or (
+            normalized not in _DETERMINISM_ENV_KEYS
+            and any(
+                fragment in normalized for fragment in _SENSITIVE_ENV_FRAGMENTS
+            )
         ):
             continue
         safe[str(key)] = str(value)
