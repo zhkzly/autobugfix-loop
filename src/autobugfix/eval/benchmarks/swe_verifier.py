@@ -100,12 +100,34 @@ class SWEDockerVisibleVerifier:
         if not any(resolved.is_relative_to(root) for root in self.allowed_worktree_roots):
             raise SWERuntimeError("visible verifier worktree is outside Execution ownership")
         observed_common = git_common_dir(resolved)
-        if observed_common != self.common_dir:
-            raise SWERuntimeError(
-                "visible verifier worktree has foreign Git metadata: "
-                f"worktree={resolved} observed_common={observed_common} "
-                f"expected_common={self.common_dir} raw={worktree}"
+        if resolved.is_relative_to(self.worktree_root):
+            # The live task worktree must be a registered worktree of the
+            # Execution-owned main checkout.
+            if observed_common != self.common_dir:
+                raise SWERuntimeError(
+                    "visible verifier worktree has foreign Git metadata: "
+                    f"worktree={resolved} observed_common={observed_common} "
+                    f"expected_common={self.common_dir} raw={worktree}"
+                )
+        else:
+            # Broker-sanctioned verification copies under an explicitly
+            # allowed artifacts root are self-contained Git checkouts; their
+            # metadata must stay inside that same root instead of escaping
+            # to a foreign repository.
+            allowed_copy_roots = tuple(
+                root
+                for root in self.allowed_worktree_roots
+                if root != self.worktree_root
             )
+            if not any(
+                observed_common.is_relative_to(root)
+                for root in allowed_copy_roots
+            ):
+                raise SWERuntimeError(
+                    "visible verifier copy has foreign Git metadata: "
+                    f"worktree={resolved} observed_common={observed_common} "
+                    f"allowed_copy_roots={allowed_copy_roots} raw={worktree}"
+                )
         return resolved
 
     def patch_sha256(self, worktree: Path) -> str:
