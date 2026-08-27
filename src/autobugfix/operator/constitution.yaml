@@ -365,6 +365,7 @@ layers:
       - src/autobugfix/locks.py
       - .agents/role-skills/execution/**
       - tests/test_runner.py
+      - tests/test_binary_diff.py
       - tests/test_service.py
       - tests/test_config_task_store.py
       - tests/test_scheduler.py

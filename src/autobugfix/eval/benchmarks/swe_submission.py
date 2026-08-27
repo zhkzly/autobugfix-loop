@@ -114,7 +114,9 @@ class FrozenSWESubmission:
             raise BenchmarkContractError("frozen SWE submission cannot contain symlinks")
         if not self.record_path.is_file() or not self.patch_path.is_file():
             raise BenchmarkContractError("frozen SWE submission artifact is missing")
-        patch = self.patch_path.read_text(encoding="utf-8")
+        patch = self.patch_path.read_text(
+            encoding="utf-8", errors="surrogateescape"
+        )
         data = yaml.safe_load(self.record_path.read_text(encoding="utf-8")) or {}
         if not isinstance(data, Mapping):
             raise BenchmarkContractError("frozen SWE submission record must be a mapping")
@@ -147,7 +149,9 @@ class SWESubmissionAuthority:
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
             mode,
         )
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        with os.fdopen(
+            descriptor, "w", encoding="utf-8", errors="surrogateescape"
+        ) as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
@@ -220,7 +224,9 @@ class SWESubmissionAuthority:
             raise BenchmarkContractError("frozen SWE submission record must be a mapping")
         submission = SWESubmission.from_record(
             data,
-            patch=patch_path.read_text(encoding="utf-8"),
+            patch=patch_path.read_text(
+                encoding="utf-8", errors="surrogateescape"
+            ),
         )
         if resolved.name != str(data["record_digest"]):
             raise BenchmarkContractError("SWE submission directory does not match digest")

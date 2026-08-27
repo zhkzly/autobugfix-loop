@@ -37,6 +37,11 @@ def run_git(
                 *args,
             ],
             text=True,
+            # Binary patch payloads (git diff --binary of PNG fixtures and
+            # similar) are not valid UTF-8; surrogateescape preserves the
+            # exact bytes through str so digests and re-encoded artifacts
+            # stay byte-faithful instead of crashing the diff path.
+            errors="surrogateescape",
             capture_output=True,
             check=False,
             timeout=timeout_seconds,

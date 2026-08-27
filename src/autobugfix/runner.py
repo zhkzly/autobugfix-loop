@@ -192,7 +192,7 @@ class TaskRunner:
             )
         diff_text = self._capture_diff(task, repo, worktree, attempt_dir, task_dir)
         task.metadata["candidate_patch_sha256"] = hashlib.sha256(
-            diff_text.encode("utf-8")
+            diff_text.encode("utf-8", errors="surrogateescape")
         ).hexdigest()
         self.store.append_event(task_id, "writer_completed", {"iteration": task.iterations})
 
@@ -395,7 +395,9 @@ class TaskRunner:
         base_ref = str(task.metadata.get("base_commit") or f"{repo.remote}/{repo.main_branch}")
         diff_text = diff_for_task(repo, worktree, base_ref)
         attempt_diff = attempt_dir / "diff.patch"
-        attempt_diff.write_text(diff_text, encoding="utf-8")
+        attempt_diff.write_text(
+            diff_text, encoding="utf-8", errors="surrogateescape"
+        )
         shutil.copy2(attempt_diff, task_dir / "artifacts" / "diff.patch")
         return diff_text
 
