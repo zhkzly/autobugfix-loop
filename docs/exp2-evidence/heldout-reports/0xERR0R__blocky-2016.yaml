@@ -1,0 +1,49 @@
+schema: autobugfix-swe-development-run-v1
+development_only: true
+protocol_digest: a9b1c2e5007517c7474718b57a10b038e80aa077fd28b8642693e10254c523e8
+codex_runtime:
+  model: gpt-5.4-mini
+  reasoning_effort: medium
+  service_tier: null
+  sdk_package: openai-codex
+  sdk_version: 0.144.4
+  cli_package: openai-codex-cli-bin
+  cli_version: 0.144.4
+  max_attempts: 2
+  timeout_seconds: 900
+subject_runtime_contract_digest: f37d4634683ace600361b2024b51b32dbaa5757421793e1ab93d409ad02a921f
+subject_runtime_digest: 0f3fa7cd327f97c8101afa1262a4cd050a9810b12ddb10e8323b9814227cfeab
+evaluator_runtime_id: sha256:7ee8b97e874ec7ff361aee9c391c356db51892f55d333f0da09c2627d4c008a9
+memory_digest: 602e35a92eec4bc0a2ec6ae113f07bfc6933322fb69fe8dee416e5a67217e2a2
+role_config_digest: 030dd327e295561608b8b07821f7027b8b31c72a9cb7ea803d44a0215ced1265
+policy_digest: e9f78e2eb77adbac8edb4b7a8c87a4db1154d89da3b821eebb12eddaa6ce1d1d
+adapter: swebench_live
+instance_id: 0xERR0R__blocky-2016
+visible_case_digest: 4842e8a1edf738ab865fbd9393fb404cf640ee7df6af6bf1ba339761b9cdf3ed
+visible_case_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/development-visible/swebench_live/0xERR0R__blocky-2016/4842e8a1edf738ab865fbd9393fb404cf640ee7df6af6bf1ba339761b9cdf3ed.yaml
+executed_subject_sha: b9c86b0cc621a950a4db02041661c238091f6dae
+executed_subject_tree: 1bde5f278e4fa98e9331bffeb0b8424116fe7b33
+submission_digest: 176c2d570ed7618213fc398314da0769af041b94c4370b7d06e2733d3d255910
+official_result_digest: 3b113beb378201de7e898868b6222447a15ae1ad539925ab51d9701e9d469581
+official_result_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/official-results/swebench_live/0xERR0R__blocky-2016/3b113beb378201de7e898868b6222447a15ae1ad539925ab51d9701e9d469581.yaml
+noninterference_digest: e5ccf91585dad46300522cff1d1f92a6e1396988329b74d1da14592ec674d750
+noninterference_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/noninterference/swebench_live/0xERR0R__blocky-2016/e5ccf91585dad46300522cff1d1f92a6e1396988329b74d1da14592ec674d750.yaml
+execution_receipt:
+  schema: autobugfix-exp2-execution-receipt-v1
+  execution_mode: protected
+  direct_sdk_in_process: false
+  outer_bubblewrap: true
+  broker_command_digest: 7e4352e2ce8c075f87dabd85c2ff24aa4de480b106b42dcd641793a51c5079fa
+  broker_result_digest: dd50f3a496afa31652a09741709e0cf0d92839e39f2c6f70b6555b181a0fce37
+  task_worktree_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/development-runs/swebench_live/0xERR0R__blocky-2016/exp2-holdout-final-v2-0xERR0R__blocky-2016/subject-run/target/worktrees/20260828-swe-eval-dev-67b8b19f0e33b30373710f6-473c809d
+  workspace_only_preflight_digest: null
+  execution_ledger_digest: 041452e2a9094523bf3432cf0208d39083f076460fe070cd880c2cf3b9517a3b
+  sdk_call_receipt_digests:
+  - 318f8d09533dca81d7c7ae6f74a25e3fb16318a901caff5cb55360670ed82855
+  - 06d5fc2972a2d1ad8c3a69ad77543884fd8d4bdf967ebd924f505eb4416f577e
+  record_digest: 615fb74435c80d34d1da00e2600f7ba6381f5a279f59e543cfe82e46a24493c2
+image_digest: 37b6e6198b92c7d1b62062ccb433271144da691fc26a0957ff602236ebd5bb7a
+failure_stage: visible_verifier
+resolved: false
+harness_error: ''
+record_digest: be9834456f48462f8b64e513d66c8d6f759ad0e4b20340c332c85e05c2fbbac7

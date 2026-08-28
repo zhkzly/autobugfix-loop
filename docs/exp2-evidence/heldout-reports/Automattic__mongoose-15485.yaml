@@ -1,0 +1,51 @@
+schema: autobugfix-swe-development-run-v1
+development_only: true
+protocol_digest: a9b1c2e5007517c7474718b57a10b038e80aa077fd28b8642693e10254c523e8
+codex_runtime:
+  model: gpt-5.4-mini
+  reasoning_effort: medium
+  service_tier: null
+  sdk_package: openai-codex
+  sdk_version: 0.144.4
+  cli_package: openai-codex-cli-bin
+  cli_version: 0.144.4
+  max_attempts: 2
+  timeout_seconds: 900
+subject_runtime_contract_digest: f37d4634683ace600361b2024b51b32dbaa5757421793e1ab93d409ad02a921f
+subject_runtime_digest: 0f3fa7cd327f97c8101afa1262a4cd050a9810b12ddb10e8323b9814227cfeab
+evaluator_runtime_id: sha256:7ee8b97e874ec7ff361aee9c391c356db51892f55d333f0da09c2627d4c008a9
+memory_digest: 602e35a92eec4bc0a2ec6ae113f07bfc6933322fb69fe8dee416e5a67217e2a2
+role_config_digest: 491060b571a0caf8c8709bd6fa1ce1a81c107a59a2c529f8bc2f2725fe5530cf
+policy_digest: e9f78e2eb77adbac8edb4b7a8c87a4db1154d89da3b821eebb12eddaa6ce1d1d
+adapter: swebench_live
+instance_id: Automattic__mongoose-15485
+visible_case_digest: 0ab3119527f45f400409f4fb8a8c5c3cba41743bf3b7afa0d52602682763a110
+visible_case_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/development-visible/swebench_live/Automattic__mongoose-15485/0ab3119527f45f400409f4fb8a8c5c3cba41743bf3b7afa0d52602682763a110.yaml
+executed_subject_sha: b9c86b0cc621a950a4db02041661c238091f6dae
+executed_subject_tree: 1bde5f278e4fa98e9331bffeb0b8424116fe7b33
+submission_digest: 56c92ecacbb3b356625435d8d527e87e04cc00508fa95213f6ac22c768f574c7
+official_result_digest: 5a7601b6fcb5a7855c7949822fce4f7a8f853c2fc8a975e49b331d8509c713a1
+official_result_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/official-results/swebench_live/Automattic__mongoose-15485/5a7601b6fcb5a7855c7949822fce4f7a8f853c2fc8a975e49b331d8509c713a1.yaml
+noninterference_digest: b297b9b8865fe51b929b8fb22bc4ab047fa2d7ab00e6c633ceecfee7e0fbf05f
+noninterference_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/noninterference/swebench_live/Automattic__mongoose-15485/b297b9b8865fe51b929b8fb22bc4ab047fa2d7ab00e6c633ceecfee7e0fbf05f.yaml
+execution_receipt:
+  schema: autobugfix-exp2-execution-receipt-v1
+  execution_mode: protected
+  direct_sdk_in_process: false
+  outer_bubblewrap: true
+  broker_command_digest: de294d9aa2323a0a4a0ee23e92bdda9013d625763db778c678b6f4647e720a9f
+  broker_result_digest: 0647e9592c8274cc0d5d86d89cd25f0c62ff142f49c8f8f9ef2b191aafbb7cb9
+  task_worktree_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/development-runs/swebench_live/Automattic__mongoose-15485/exp2-holdout-final-v2-Automattic__mongoose-15485/subject-run/target/worktrees/20260828-swe-eval-dev-62483f07f01cd8e6db73fc6-dfaf13b8
+  workspace_only_preflight_digest: null
+  execution_ledger_digest: bb07ed9ab576f6c5470a3ae2d44b0ef4f1863e2a1f9947a2d2aa0608ae939637
+  sdk_call_receipt_digests:
+  - e6ac7eee960440e86e7f1db302f7455058f6d019acf17b0051b69f0868928f8e
+  - 69efa3f0bdc976e0a62da6384a9086f7a57a33eadbdde34fbcfd4696431dd651
+  - 7c8c8cd77c1536a0766da4f58cd61013a1d06af410a58049e6115a50b61181e5
+  - a4ae4aecd14c3a00e62b4931b4180bf143b3c758cc9fb650fa04ac7dc96a2e33
+  record_digest: 752a8dd61793bc4f297ed66be942c32098be12194e12ff9b6cf961a75e031c71
+image_digest: 3330b1eb067c6e0eb9660307fcfbb582dedeaa312f59c3344cb883af312efce4
+failure_stage: unknown
+resolved: true
+harness_error: ''
+record_digest: a69fd57690511599b2ba3febd16fb121178ac9fd4b1f9c8a284d719b546af3bf
