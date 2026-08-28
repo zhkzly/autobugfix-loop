@@ -1,6 +1,6 @@
 schema_version: 3
 protocol_id: swe-exp2-resume-mvp-v2
-h0_subject: db6fd725f8885dd5350c10d5efe061b1c05aa298
+h0_subject: d2811289d7d512843d078e29129f31d356529784
 codex_runtime:
   model: gpt-5.4-mini
   reasoning_effort: medium
