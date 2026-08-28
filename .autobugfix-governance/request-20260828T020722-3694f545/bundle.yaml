@@ -1,0 +1,334 @@
+schema: autobugfix-operator-bundle-v3
+authority: advisory_transport_revalidated_by_trusted_base
+triage:
+  triage_id: triage-20260828T020720-cedbb9c9
+  summary: "v3r4 evolution set (6): astropy, matplotlib, sympy, seaborn, pytest, sphinx\
+    \ \u2014 real patches pass visible tests but miss official acceptance; v3r3 showed\
+    \ unscoped enumeration guidance regressed an H0-resolved bugfix (seaborn), so\
+    \ the fix must be type-scoped: requirement enumeration for feature/maintenance\
+    \ (astropy, sympy, sphinx), minimal-diff discipline for bugfix (protects django,\
+    \ xarray, requests regression set)."
+  suspected_layers:
+  - execution
+  evidence:
+  - study-evidence:study-evidence-20260828T020720-f6218ed0
+  creator: kelong
+  confidence: medium
+  next_actions:
+  - "Writer skill: type-scoped guidance \u2014 feature/maintenance get requirement\
+    \ checklists with per-item local verification; bugfix gets minimal-diff discipline"
+  created_at: '2026-08-28T02:07:20Z'
+  triage_digest: a0e6b4d5497ec6107e000973acc0858d21f91c3788984b39e863cfa0569b11f3
+request:
+  request_id: request-20260828T020722-3694f545
+  summary: "Edit EXACTLY ONE file: .agents/role-skills/execution/writer/autobugfix-writer/SKILL.md.\
+    \ Add TYPE-SCOPED bullet guidance: (A) feature/maintenance requests \u2014 BEFORE\
+    \ editing, enumerate every explicitly stated requirement and example from the\
+    \ issue as a short checklist; implement each item; BEFORE finalizing, verify each\
+    \ item locally (minimal reproduction or direct shell check) and never finalize\
+    \ while an item is unverified. (B) bugfix requests \u2014 minimal-diff discipline:\
+    \ fix the reported fault only, change no other behavior, add no speculative hardening\
+    \ or refactoring; verify the reported fault is fixed and the visible suite passes\
+    \ before finalizing. (C) if an attempt fails and another remains, pursue a different\
+    \ approach rather than a minor variation. Place both branches near the existing\
+    \ Do/Don't lists."
+  primary_layer: execution
+  secondary_layers: []
+  requested_risk: low
+  triage_id: triage-20260828T020720-cedbb9c9
+  triage_digest: a0e6b4d5497ec6107e000973acc0858d21f91c3788984b39e863cfa0569b11f3
+  evidence:
+  - study-evidence:study-evidence-20260828T020720-f6218ed0
+  validation_profiles:
+  - execution
+  performance_baseline: exp2-subject-db6fd72-gate
+  planned_paths:
+  - .agents/role-skills/execution/writer/autobugfix-writer/SKILL.md
+  constitution_digest: 088f49d2e5e227d1182272e69a2e55982e825401ed0430a2a179f5ac12a288c6
+  experiment_line_id: exp2-operator-d007891-v3r4
+  experiment_line_generation: 0
+  budget_grant_id: budget-grant-20260828T020722-cfff68e1
+  budget_grant_digest: c036d2be6340195b6b49fb5d13d1646c012f060dbcc81b6fcf32e0396512fd71
+  branch: operator/experiment/request-20260828T020722-3694f545
+  base_sha: db6fd725f8885dd5350c10d5efe061b1c05aa298
+  creator: kelong
+  expires_at: '2026-08-29T02:07:22Z'
+  created_at: '2026-08-28T02:07:22Z'
+  request_digest: ec6a13abf6fa77d8f080018ef6851c9c15fbc1f837e6305764945c01be287471
+events:
+- event_id: f6ccee3c060142ebad1245b46dcad24d
+  request_id: request-20260828T020722-3694f545
+  kind: request_created
+  actor: kelong
+  payload:
+    base_sha: db6fd725f8885dd5350c10d5efe061b1c05aa298
+    budget_grant_digest: c036d2be6340195b6b49fb5d13d1646c012f060dbcc81b6fcf32e0396512fd71
+    budget_grant_id: budget-grant-20260828T020722-cfff68e1
+    constitution_digest: 088f49d2e5e227d1182272e69a2e55982e825401ed0430a2a179f5ac12a288c6
+    experiment_line_generation: 0
+    experiment_line_id: exp2-operator-d007891-v3r4
+    request_digest: ec6a13abf6fa77d8f080018ef6851c9c15fbc1f837e6305764945c01be287471
+  previous_hash: null
+  created_at: '2026-08-28T02:07:22Z'
+  event_hash: 2b02c5876cb45b784c9bb4a12c56339d099bcfdb56b42bd131851362d65fae69
+- event_id: 85419cb823534a09bc47622e3d5f9556
+  request_id: request-20260828T020722-3694f545
+  kind: request_activated
+  actor: kelong
+  payload:
+    branch: operator/experiment/request-20260828T020722-3694f545
+    experiment_id: experiment-20260828T020723-63fccbb1
+    scope_version: 1
+    workspace_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-worktrees/request-20260828T020722-3694f545
+  previous_hash: 2b02c5876cb45b784c9bb4a12c56339d099bcfdb56b42bd131851362d65fae69
+  created_at: '2026-08-28T02:07:23Z'
+  event_hash: 7929ddb4c988809e9628da902b55f2e37fb918f361696a5cd1c1abc1028580e8
+- event_id: dc19f577a6e8425eaa87e06ec5c14aa9
+  request_id: request-20260828T020722-3694f545
+  kind: writer_started
+  actor: kelong
+  payload:
+    attempt: 1
+    run_id: writer-20260828T020723-bd783fcd
+  previous_hash: 7929ddb4c988809e9628da902b55f2e37fb918f361696a5cd1c1abc1028580e8
+  created_at: '2026-08-28T02:07:23Z'
+  event_hash: b9fa4e655a96ffaf80abfb69396d47b111ac1657faa95a1a47f0889464c062f8
+- event_id: 19077031d8f64318b0d1e87cc7e28867
+  request_id: request-20260828T020722-3694f545
+  kind: patch_observed
+  actor: trusted-host
+  payload:
+    head_sha: db6fd725f8885dd5350c10d5efe061b1c05aa298
+    patch_digest: 17ce9c01a033e40c8f9b698c2c369fcd1505abd9b5440dc96f4902902c839d27
+    run_id: writer-20260828T020723-bd783fcd
+  previous_hash: b9fa4e655a96ffaf80abfb69396d47b111ac1657faa95a1a47f0889464c062f8
+  created_at: '2026-08-28T02:08:15Z'
+  event_hash: fb327ccf1cd0a5de8cb06b76bd84705db195432168d8599b51ae820cf439d539
+- event_id: c1aa769f9d064dceab46945b116bbf7e
+  request_id: request-20260828T020722-3694f545
+  kind: writer_completed
+  actor: trusted-host
+  payload:
+    run_id: writer-20260828T020723-bd783fcd
+  previous_hash: fb327ccf1cd0a5de8cb06b76bd84705db195432168d8599b51ae820cf439d539
+  created_at: '2026-08-28T02:08:15Z'
+  event_hash: d88a8af8d8252a29e8e3a2a154f1539e891d248a7609225cb4cd757422715ba2
+- event_id: dc50382bbd9645e2a32eccafbbb19757
+  request_id: request-20260828T020722-3694f545
+  kind: check_started
+  actor: kelong
+  payload:
+    check_id: check-20260828T020815-4dd5c544
+    mode: fast
+  previous_hash: d88a8af8d8252a29e8e3a2a154f1539e891d248a7609225cb4cd757422715ba2
+  created_at: '2026-08-28T02:08:15Z'
+  event_hash: f020e3f35811dc4854ae84713ff6a308ead38ceac2399de43d5878928a196214
+- event_id: 6befb59034ad4884a26adb96d83f141d
+  request_id: request-20260828T020722-3694f545
+  kind: check_passed
+  actor: trusted-host
+  payload:
+    check_id: check-20260828T020815-4dd5c544
+    failures: []
+    patch_digest: 17ce9c01a033e40c8f9b698c2c369fcd1505abd9b5440dc96f4902902c839d27
+  previous_hash: f020e3f35811dc4854ae84713ff6a308ead38ceac2399de43d5878928a196214
+  created_at: '2026-08-28T02:08:20Z'
+  event_hash: 9041f4d597e20e6091bb75d4798f88ff5c93466036cb3a90ebfc8654269d3519
+- event_id: 569784cbe1974e7fa2e7c6c4adbac8bb
+  request_id: request-20260828T020722-3694f545
+  kind: gate_updated
+  actor: trusted-host
+  payload:
+    blocked_by: []
+  previous_hash: 9041f4d597e20e6091bb75d4798f88ff5c93466036cb3a90ebfc8654269d3519
+  created_at: '2026-08-28T02:08:20Z'
+  event_hash: 2fd9ea2d4e6e04bf5c952ef98609d9775bf959324c81d2cdcca17c9b0fa1abfe
+projection:
+  request_id: request-20260828T020722-3694f545
+  state: ACTIVE
+  last_event_hash: 2fd9ea2d4e6e04bf5c952ef98609d9775bf959324c81d2cdcca17c9b0fa1abfe
+  workspace_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-worktrees/request-20260828T020722-3694f545
+  patch_digest: 17ce9c01a033e40c8f9b698c2c369fcd1505abd9b5440dc96f4902902c839d27
+  head_sha: db6fd725f8885dd5350c10d5efe061b1c05aa298
+  validation_id: check-20260828T020815-4dd5c544
+  active_writer_run_id: null
+  active_check_run_id: null
+  scope_version: 1
+  outcome: null
+  blocked_by: []
+  violations: []
+approvals: []
+scope_revisions: []
+writer_runs:
+- run_id: writer-20260828T020723-bd783fcd
+  request_id: request-20260828T020722-3694f545
+  attempt: 1
+  status: COMPLETED
+  role_digest: 7b28e5287e91c8d916776fdad30707b97b2bfe6f1c2d11bc5cb3bb35c713c98b
+  scope_version: 1
+  input_digest: 0bdee80f9d21f1f817e9ca54401d84891c6a35ef797486c60229e6b52174f50b
+  base_sha: db6fd725f8885dd5350c10d5efe061b1c05aa298
+  head_sha: db6fd725f8885dd5350c10d5efe061b1c05aa298
+  patch_digest: 17ce9c01a033e40c8f9b698c2c369fcd1505abd9b5440dc96f4902902c839d27
+  feedback_ids: []
+  started_at: '2026-08-28T02:07:23Z'
+  finished_at: '2026-08-28T02:08:15Z'
+  error: null
+  created_at: '2026-08-28T02:07:23Z'
+  record_digest: bbad857d53be34f972c3d0bdeb7c53a543824b883dc8cd27046d19b862e01e9e
+check_runs:
+- check_id: check-20260828T020815-4dd5c544
+  request_id: request-20260828T020722-3694f545
+  writer_run_id: writer-20260828T020723-bd783fcd
+  status: PASSED
+  mode: fast
+  base_sha: db6fd725f8885dd5350c10d5efe061b1c05aa298
+  head_sha: db6fd725f8885dd5350c10d5efe061b1c05aa298
+  patch_digest: 17ce9c01a033e40c8f9b698c2c369fcd1505abd9b5440dc96f4902902c839d27
+  scope_version: 1
+  profile_names:
+  - execution
+  command_results:
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    - tests/test_runner.py
+    - tests/test_service.py
+    - tests/test_config_task_store.py
+    cwd: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-worktrees/request-20260828T020722-3694f545
+    duration_seconds: 4.661260036984459
+    executed_argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-user
+    - --unshare-pid
+    - --ro-bind
+    - /
+    - /
+    - --tmpfs
+    - /tmp
+    - --tmpfs
+    - /home/kelong
+    - --dir
+    - /tmp/autobugfix-home
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --unshare-net
+    - --dir
+    - /home/kelong/pycodes
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-worktrees
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-worktrees/request-20260828T020722-3694f545
+    - --bind
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-worktrees/request-20260828T020722-3694f545
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-worktrees/request-20260828T020722-3694f545
+    - --tmpfs
+    - /run
+    - --ro-bind
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.venv
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-worktrees/request-20260828T020722-3694f545/.venv
+    - --dir
+    - /home/kelong/pycodes
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.venv
+    - --ro-bind
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.venv
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.venv
+    - --dir
+    - /home/kelong/.local
+    - --dir
+    - /home/kelong/.local/share
+    - --dir
+    - /home/kelong/.local/share/uv
+    - --dir
+    - /home/kelong/.local/share/uv/python
+    - --dir
+    - /home/kelong/.local/share/uv/python/cpython-3.13-linux-x86_64-gnu
+    - --ro-bind
+    - /home/kelong/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu
+    - /home/kelong/.local/share/uv/python/cpython-3.13-linux-x86_64-gnu
+    - --dir
+    - /tmp/autobugfix-bin
+    - --ro-bind
+    - /home/kelong/.local/bin/uv
+    - /tmp/autobugfix-bin/uv
+    - --dir
+    - /home/kelong/pycodes
+    - --dir
+    - /home/kelong/pycodes/autobugfix-loop
+    - --dir
+    - /home/kelong/pycodes/autobugfix-loop/.git
+    - --dir
+    - /home/kelong/pycodes/autobugfix-loop/.git/worktrees
+    - --dir
+    - /home/kelong/pycodes/autobugfix-loop/.git/worktrees/request-20260828T020722-3694f545
+    - --ro-bind
+    - /home/kelong/pycodes/autobugfix-loop/.git/worktrees/request-20260828T020722-3694f545
+    - /home/kelong/pycodes/autobugfix-loop/.git/worktrees/request-20260828T020722-3694f545
+    - --dir
+    - /home/kelong/pycodes
+    - --dir
+    - /home/kelong/pycodes/autobugfix-loop
+    - --dir
+    - /home/kelong/pycodes/autobugfix-loop/.git
+    - --ro-bind
+    - /home/kelong/pycodes/autobugfix-loop/.git
+    - /home/kelong/pycodes/autobugfix-loop/.git
+    - --chdir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-worktrees/request-20260828T020722-3694f545
+    - --
+    - /tmp/autobugfix-bin/uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - pytest
+    - -q
+    - tests/test_runner.py
+    - tests/test_service.py
+    - tests/test_config_task_store.py
+    exit_code: 0
+    finished_at: '2026-08-28T02:08:20Z'
+    name: execution-tests
+    passed: true
+    sandbox: bubblewrap
+    sandbox_inherited: false
+    started_at: '2026-08-28T02:08:15Z'
+    stderr_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-artifacts/request-20260828T020722-3694f545/checks/check-20260828T020815-4dd5c544/01-execution-tests.stderr.log
+    stdout_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/operator-artifacts/request-20260828T020722-3694f545/checks/check-20260828T020815-4dd5c544/01-execution-tests.stdout.log
+    timed_out: false
+    timeout_seconds: 240
+  failures: []
+  semantic_verdict_id: null
+  started_at: '2026-08-28T02:08:15Z'
+  finished_at: '2026-08-28T02:08:20Z'
+  created_at: '2026-08-28T02:08:15Z'
+  record_digest: f49e063e8bf2dece14f64a4548902261567bec69f10bce7fba879c1726f4df6a
+gate:
+  request_id: request-20260828T020722-3694f545
+  patch_digest: 17ce9c01a033e40c8f9b698c2c369fcd1505abd9b5440dc96f4902902c839d27
+  scope_version: 1
+  scope: PASS
+  tests: PASS
+  semantic: SKIPPED
+  approval: PASS
+  merge: PENDING
+  check_run_id: check-20260828T020815-4dd5c544
+  created_at: '2026-08-28T02:08:20Z'
+  record_digest: e41720be6cbbf3af423a9d0e3117048f76ba3c5eb9c6bcdc7ff830022840a319
+promotions: []
+exported_at: '2026-08-28T02:18:46Z'
+bundle_digest: 1fec086be9e2ddf306fb3d32341def0254703e0711385fba952bc2fe65afd14e
