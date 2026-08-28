@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Exp2 — 自动修 Bug 系统的受控迭代演化实验 · 完整汇报</title>
+<style>
+:root{
+  --ink:#1a2332; --ink2:#4a5568; --accent:#0f5ea8; --accent2:#0d9488;
+  --bg:#f7f9fc; --card:#ffffff; --line:#dde5ef; --soft:#eef3fa;
+  --ok:#15803d; --bad:#b91c1c; --warn:#b45309; --mut:#64748b;
+  --code:#f1f5f9;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--ink);background:var(--bg);line-height:1.75;font-size:15px}
+.layout{display:grid;grid-template-columns:250px 1fr;max-width:1280px;margin:0 auto}
+/* sidebar */
+nav{position:sticky;top:0;height:100vh;overflow-y:auto;padding:28px 18px;border-right:1px solid var(--line);background:#fbfcfe;font-size:13.5px}
+nav .brand{font-weight:700;color:var(--accent);font-size:15px;margin-bottom:4px}
+nav .sub{color:var(--mut);font-size:12px;margin-bottom:18px}
+nav a{display:block;color:var(--ink2);text-decoration:none;padding:5px 10px;border-radius:6px;margin-bottom:2px}
+nav a:hover{background:var(--soft);color:var(--accent)}
+nav a.lv2{padding-left:22px;font-size:12.5px;color:var(--mut)}
+nav .divider{height:1px;background:var(--line);margin:12px 0}
+/* main */
+main{padding:36px 48px 100px;min-width:0}
+header.hero{background:linear-gradient(135deg,#0f5ea8 0%,#0d9488 100%);color:#fff;border-radius:14px;padding:34px 38px;margin-bottom:34px}
+header.hero h1{font-size:26px;font-weight:700;margin-bottom:8px}
+header.hero p{opacity:.92;font-size:14.5px;max-width:880px}
+header.hero .meta{margin-top:14px;font-size:12.5px;opacity:.8}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:38px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.kpi .n{font-size:26px;font-weight:800;color:var(--accent)}
+.kpi .n small{font-size:14px;font-weight:600;color:var(--mut)}
+.kpi .l{font-size:12.5px;color:var(--ink2);margin-top:2px}
+section{margin-bottom:46px}
+h2{font-size:21px;color:var(--ink);border-left:5px solid var(--accent);padding-left:12px;margin-bottom:6px}
+h2 .en{font-size:12px;color:var(--mut);font-weight:400;margin-left:8px}
+h3{font-size:16.5px;color:var(--accent);margin:24px 0 8px}
+h4{font-size:14.5px;color:var(--ink);margin:16px 0 6px}
+p{margin-bottom:10px;color:#2d3748}
+.lead{font-size:15.5px;color:var(--ink)}
+ul,ol{padding-left:22px;margin-bottom:10px}
+li{margin-bottom:5px}
+/* cards & tables */
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 24px;margin:14px 0}
+.card.tip{background:#f0faf7;border-color:#b8e6dc}
+.card.warn{background:#fffbeb;border-color:#fde68a}
+.card.gray{background:#fbfcfe}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;background:var(--card);border-radius:10px;overflow:hidden}
+th{background:var(--soft);color:var(--ink);text-align:left;padding:9px 12px;font-weight:600;border-bottom:2px solid var(--line);white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid #edf2f9;vertical-align:top}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#f8fafd}
+.yes{color:var(--ok);font-weight:700}.no{color:var(--bad);font-weight:700}.na{color:var(--warn);font-weight:700}.mut{color:var(--mut)}
+code{background:var(--code);border:1px solid #e2e8f0;border-radius:4px;padding:1px 6px;font-family:"JetBrains Mono",Consolas,monospace;font-size:12.5px;color:#0f3d6e}
+pre{background:#0f172a;color:#dbeafe;border-radius:10px;padding:16px 20px;overflow-x:auto;font-family:"JetBrains Mono",Consolas,monospace;font-size:12.5px;line-height:1.7;margin:12px 0}
+pre .c{color:#64748b}pre .k{color:#7dd3fc}pre .s{color:#fcd34d}pre .g{color:#86efac}
+/* architecture diagram */
+.arch{display:grid;gap:10px;margin:16px 0}
+.plane{border:1.5px solid var(--line);border-radius:10px;overflow:hidden;background:var(--card)}
+.plane .ph{padding:8px 14px;font-weight:700;font-size:13px;color:#fff;display:flex;justify-content:space-between;align-items:center}
+.plane .pb{padding:12px 14px;display:flex;flex-wrap:wrap;gap:8px}
+.comp{background:var(--soft);border:1px solid #cfdeef;border-radius:7px;padding:5px 11px;font-size:12.5px;color:var(--ink)}
+.p1 .ph{background:#0f5ea8}.p2 .ph{background:#7c3aed}.p3 .ph{background:#0d9488}.p4 .ph{background:#b45309}.p5 .ph{background:#334155}
+/* flow steps */
+.flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:12px 0}
+.step{background:var(--soft);border:1px solid #b9d0e8;border-radius:20px;padding:4px 13px;font-size:12.5px;color:#0b4a86;font-weight:600}
+.arr{color:var(--mut);font-size:13px}
+/* bars */
+.chart{display:flex;align-items:flex-end;gap:14px;height:200px;padding:10px 8px 0;border-bottom:2px solid var(--line);margin:16px 0 4px}
+.bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:6px;height:100%}
+.bar .v{font-size:12.5px;font-weight:700;color:var(--accent)}
+.bar .b{width:100%;max-width:52px;border-radius:6px 6px 0 0;background:linear-gradient(180deg,#3b82f6,#0f5ea8)}
+.bar.hold .b{background:linear-gradient(180deg,#f59e0b,#b45309)}
+.bar.peak .b{background:linear-gradient(180deg,#2dd4bf,#0d9488)}
+.xlab{display:flex;gap:14px;padding:6px 8px 0}
+.xlab span{flex:1;text-align:center;font-size:11.5px;color:var(--mut)}
+.legend{display:flex;gap:18px;font-size:12px;color:var(--mut);margin-top:8px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+/* state machine */
+.sms{display:flex;flex-direction:column;gap:8px;margin:12px 0}
+.sms .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.st{border-radius:8px;padding:5px 13px;font-size:12.5px;font-weight:600;color:#fff}
+.st.run{background:#0f5ea8}.st.ok{background:var(--ok)}.st.rb{background:var(--bad)}.st.bl{background:#7c3aed}
+.badge{display:inline-block;border-radius:12px;padding:2px 10px;font-size:11.5px;font-weight:700;margin-right:5px}
+.bg-ok{background:#dcfce7;color:#15803d}.bg-bad{background:#fee2e2;color:#b91c1c}.bg-bl{background:#ede9fe;color:#6d28d9}.bg-ng{background:#f1f5f9;color:#475569}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:1000px){.grid2{grid-template-columns:1fr}.layout{grid-template-columns:1fr}nav{position:static;height:auto}}
+.footnote{font-size:12px;color:var(--mut);border-top:1px solid var(--line);padding-top:14px;margin-top:40px}
+.toc-anchor{position:relative;top:-70px;display:block}
+@media print{nav{display:none}.layout{grid-template-columns:1fr}main{padding:10px}body{background:#fff}.card,table{box-shadow:none}section{page-break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav id="toc">
+  <div class="brand">Exp2 · 实验汇报</div>
+  <div class="sub">自动修 Bug 系统的受控迭代演化</div>
+  <a href="#s1">1 背景与问题定义</a>
+  <a href="#s2">2 总体架构与组件实现</a>
+  <a class="lv2" href="#s2-1">2.1 五平面分工</a>
+  <a class="lv2" href="#s2-2">2.2 Eval 平面：核心组件</a>
+  <a class="lv2" href="#s2-3">2.3 Execution 平面</a>
+  <a class="lv2" href="#s2-4">2.4 Operator 治理平面</a>
+  <a class="lv2" href="#s2-5">2.5 Resume 断点续跑状态机</a>
+  <a href="#s3">3 实验协议设计</a>
+  <a class="lv2" href="#s3-1">3.1 三数据集划分</a>
+  <a class="lv2" href="#s3-2">3.2 协议三代演进</a>
+  <a class="lv2" href="#s3-3">3.3 资格与装置冻结</a>
+  <a href="#s4">4 Memory 机制设计</a>
+  <a href="#s5">5 演化机制设计</a>
+  <a href="#s6">6 治理与安全机制</a>
+  <a href="#s7">7 实验过程完整记录</a>
+  <a href="#s8">8 结果分析</a>
+  <a href="#s9">9 三大实证发现</a>
+  <a href="#s10">10 Held-out 最终评测</a>
+  <a href="#s11">11 工程贡献与缺陷修复</a>
+  <a href="#s12">12 创新点（多角度）</a>
+  <a href="#s13">13 局限与未来工作</a>
+  <a href="#s14">14 可复现性与工件索引</a>
+  <div class="divider"></div>
+  <a href="#appendix">附录：术语表</a>
+</nav>
+
+<main>
+
+<header class="hero">
+  <h1>Exp2：自动修 Bug 系统的受控迭代演化实验</h1>
+  <p>在 SWE-bench Verified 上驱动 AI 修 Bug 系统按"演化集攻克 / 回归集保底 / held-out 终测"三数据集协议自主迭代：
+  系统的每次自我修改（Writer 技能文件）都经 12 步治理链验证、全量回归重测、可回滚；8 轮演化、160+ 次真实模型执行，
+  回归门 3 次出现回归全部正确拦截、零漏放；SWE-bench 解决率 2/10 → 5/10（峰值 6/10）；跨语言 held-out 终测 1/5。</p>
+  <div class="meta">实验周期 2026-08 上旬 – 2026-08-28 · 模型 gpt-5.4-mini（low/medium 双档位受控）· 仓库 zhkzly/autobugfix-loop · 代码 53,735 行 Python · 417 项测试全绿</div>
+</header>
+
+<div class="kpis">
+  <div class="kpi"><div class="n">8<small> 轮</small></div><div class="l">受控演化迭代</div></div>
+  <div class="kpi"><div class="n">160<small>+</small></div><div class="l">真实模型执行（H0/H1×10/轮）</div></div>
+  <div class="kpi"><div class="n">3/3</div><div class="l">回归门拦截率（零漏放）</div></div>
+  <div class="kpi"><div class="n">2→5<small>/10</small></div><div class="l">解决率（峰值 6/10）</div></div>
+  <div class="kpi"><div class="n">1/5</div><div class="l">held-out 跨语言终测</div></div>
+  <div class="kpi"><div class="n">53.7k<small> 行</small></div><div class="l">自研 harness + 治理系统</div></div>
+</div>
+
+<!-- ================= 1 背景 ================= -->
+<span class="toc-anchor" id="s1"></span>
+<section>
+<h2>1 背景与问题定义 <span class="en">Motivation &amp; Problem</span></h2>
+<p class="lead">核心问题：<b>如何让一个 AI 修 Bug 系统根据执行反馈持续改进自己，同时严格保证它不会越改越坏？</b></p>
+<p>AI 修 Bug（automated bug fixing / SWE agent）系统的能力很大程度取决于其执行 harness——角色技能、验证策略、循环策略等"系统提示与流程代码"。我们观察到一个普遍矛盾：</p>
+<ul>
+  <li><b>改进机会局部存在</b>：对失败案例做归因后，往往能找到"应该补的指引"（例如"先枚举需求再动手"）；</li>
+  <li><b>但改动会全局扩散</b>：同一份 Writer 技能文件服务所有案例，为一个失败案例加的指引可能扰动其他原本通过的案例。</li>
+</ul>
+<p>这就形成了本实验的核心方法论主张：<b>系统的自我修改必须被当作"受控实验"对待——每次修改是一个候选（candidate），必须在全量回归集上重测，任何回归立即回滚；只有在演化集有增益且回归集全绿的候选才能保留为新基线。</b></p>
+<h3>1.1 三个子问题</h3>
+<ol>
+  <li><b>演化</b>：如何从执行结果中形成可检验的修改假设，并通过受治理的通道落地？</li>
+  <li><b>不退化</b>：如何用机器可执行的硬门（而非人工目测）保证每个保留的候选不弄坏任何已通过的案例？</li>
+  <li><b>可信评测</b>：如何保证评测本身不被污染（受测系统看不到答案、记忆不可漂移、报告不可篡改、断点可续跑）？</li>
+</ol>
+<h3>1.2 与既有工作的差异</h3>
+<p>常见做法是"跑一遍 benchmark → 人工改 prompt → 再跑一遍"，既无逐案例配对控制，也无回归保障，更无修改过程的审计链。本实验把这一过程工程化为一个<b>可复现、可审计、可断点续跑的闭环协议</b>（详见 §3、§6），相当于给"prompt/技能演化"建立了类似 CI 的守门机制。</p>
+</section>
+
+<!-- ================= 2 架构 ================= -->
+<span class="toc-anchor" id="s2"></span>
+<section>
+<h2>2 总体架构与组件实现 <span class="en">Architecture &amp; Components</span></h2>
+<p>系统采用<b>五平面分层</b>，每个平面有独立的状态根与信任边界；跨平面只通过"内容寻址回执（digest receipt）"交换事实，调用方无法凭空伪造对方平面的权威。</p>
+
+<div class="arch">
+  <div class="plane p1"><div class="ph"><span>Eval 平面 — 可信评测（25k 行）</span><span>state: .autobugfix/trusted-eval-cases/</span></div>
+    <div class="pb"><span class="comp">Qualification 资格机制</span><span class="comp">Protocol/Apparatus/Manifest 冻结</span><span class="comp">Subject Broker 受测主体代理</span><span class="comp">Codex Broker + 执行账本</span><span class="comp">可见验证器</span><span class="comp">官方评分器</span><span class="comp">Resume 状态机</span><span class="comp">报告归约器</span></div></div>
+  <div class="plane p3"><div class="ph"><span>Execution 平面 — 受测主体本身（系统即被试）</span><span>Writer / Verifier 角色技能</span></div>
+    <div class="pb"><span class="comp">Writer 技能文件（演化对象）</span><span class="comp">双尝试循环（max_attempts=2）</span><span class="comp">任务工作树隔离</span><span class="comp">补丁捕获与摘要</span></div></div>
+  <div class="plane p4"><div class="ph"><span>Operator 平面 — 治理（12.6k 行）</span><span>state: operator-v3/governance.sqlite3</span></div>
+    <div class="pb"><span class="comp">Triage 归因</span><span class="comp">Budget 预算波次</span><span class="comp">Request/Scope</span><span class="comp">Writer 运行</span><span class="comp">Fast/Full 检查</span><span class="comp">候选提交</span><span class="comp">实验线集成</span><span class="comp">回滚</span></div></div>
+  <div class="plane p2"><div class="ph"><span>Memory 平面 — 冻结空记忆（变量控制）</span><span>fixture: exp2-empty-memory-fixture-v1</span></div>
+    <div class="pb"><span class="comp">空 Memory 快照</span><span class="comp">fixture digest 绑定</span><span class="comp">执行器覆盖拒绝</span></div></div>
+  <div class="plane p5"><div class="ph"><span>Exp2 Coordinator — 研究协调平面</span><span>事件账本 events.jsonl</span></div>
+    <div class="pb"><span class="comp">阶段状态机</span><span class="comp">逐案收据</span><span class="comp">配对归约</span><span class="comp">判决（retain/rollback/blocked）</span><span class="comp">信息释放控制（projection bundle）</span></div></div>
+</div>
+
+<h3 id="s2-1">2.1 关键设计原则</h3>
+<div class="card">
+<ul>
+<li><b>路径不是身份，内容才是</b>：所有绑定（协议、装置、manifest、基线、回执）一律用 SHA-256 摘要；复制路径不等于复制权威。</li>
+<li><b>最小信息释放</b>：Operator（提出修改的一方）只能看到演化失败集的"投影包"（source-projection-bundle）——不含 gold 补丁、隐藏测试、通过案例的身份。这防止"照着答案改系统"。</li>
+<li><b>单一开放意图</b>：每个案例/阶段同时最多一个 open intent，崩溃后按 §2.5 规则和解，不重复执行已完成的 Writer 调用。</li>
+<li><b>非对称信任</b>：候选代码不能自证清白——guard 身份检查只信任"受保护检出 + 干净树 + HEAD==trusted_ref"的调用环境。</li>
+</ul>
+</div>
+
+<h3 id="s2-2">2.2 Eval 平面核心组件的实现细节</h3>
+
+<h4>(a) Qualification 资格机制——先证明"考题本身有效"</h4>
+<p>每个案例在进入实验前必须通过资格校验（schema <code>autobugfix-swe-qualification-v5</code>）：</p>
+<ul>
+  <li><b>gold ×2</b>：官方 gold 补丁贴入官方镜像跑两遍官方测试，必须两次全绿（证明测试与镜像可复现）；</li>
+  <li><b>null ×1</b>：不贴补丁跑一遍，必须不绿（证明测试确实区分了修复与否，防"假阳性考题"）；</li>
+  <li><b>镜像钉死</b>：记录镜像 source_ref / manifest digest / receipt digest，运行时逐一比对，不接受漂移；</li>
+  <li>资格记录绑定 <code>evaluator_runtime_id</code>（对 scorer 相关源码文件 + harness 锁文件的摘要）——评测器代码一变，全部资格自动失效，必须重盖，防止"换尺子量旧数据"。</li>
+</ul>
+
+<h4>(b) Protocol / Apparatus / Manifest 三层冻结</h4>
+<table>
+<tr><th>层</th><th>内容</th><th>作用</th></tr>
+<tr><td><b>Protocol</b></td><td>模型、档位、尝试数、超时、数据集钉死、Memory fixture、执行白名单、可见性调度</td><td>实验的"物理常数"</td></tr>
+<tr><td><b>Apparatus</b></td><td>5 项源检查（compileall / 角色技能校验 / git diff --check / benchmark doctor / 全量 pytest）+ 协议 + SWE 协议的联合回执</td><td>证明"装置此刻是绿的"</td></tr>
+<tr><td><b>Manifest</b></td><td>精确有序案例列表、仓库/难度/切片、H0 subject SHA/tree、OCI 镜像摘要、各平面根路径</td><td>实验的物料清单</td></tr>
+</table>
+<p>三者互相摘要绑定；study 初始化时再校验 <code>HEAD == apparatus_sha</code> 且工作树干净——<b>实验运行期间代码动一行都会被拒</b>。</p>
+
+<h4>(c) Subject Broker——受测主体的沙箱执行</h4>
+<p>受测系统（= 本仓库的某个冻结提交）不直接在本机跑，而是：</p>
+<ol>
+  <li>物化到 <code>benchmark-cache/subjects/&lt;sha&gt;</code>（PYTHONPATH 指向该快照）；</li>
+  <li>在 <code>bwrap</code> 气泡沙箱内运行 subject 进程：只读绑定主体代码与 Python 运行时、只写绑定任务工作树、<code>--unshare-pid/net</code>、凭据路径不可见、隐藏路径清单生效；</li>
+  <li>外层沙箱内若再派生 codex 会话则<b>内层降级 full-access</b>（修复 #1，见 §11）——因为内核禁用了非特权嵌套 user namespace；</li>
+  <li>执行全程写<b>执行账本</b>：每次 codex 调用前后计算补丁 SHA-256，验证器开始前再次比对（"补丁未在传输中被调包"）。</li>
+</ol>
+
+<h4>(d) 双层验证——可见验证器 vs 官方隐藏测试</h4>
+<div class="card gray">
+<p><b>可见验证器（visible verifier）</b>：任务工作树自带的公开测试，Writer 可见、可在本地跑——它是循环的停机信号（通过即止）。</p>
+<p><b>官方评分器（official scorer）</b>：冻结提交（submission freeze）后在官方镜像内跑隐藏测试集（FAIL_TO_PASS / PASS_TO_PASS），结果由 Eval 平面持有，<b>拒绝执行器覆盖</b>（修复 #7）——受测系统永远碰不到官方报告。</p>
+<p class="mut">这一层分离正是"演化集失败模式"的来源：慢性失败案例全部是"过可见、挂官方"——也即系统的自评信号与真实目标存在系统性偏差，这本身是实验的重要测量对象（§9 发现三）。</p>
+</div>
+
+<h4>(e) Coordinator 判决状态机（v3）</h4>
+<div class="sms">
+  <div class="row"><span class="st run">H0_RUNNING</span><span class="arr">→ 10 案例全 official_terminal →</span><span class="st run">H0_COMPLETE</span><span class="arr">→ 动态分集 →</span><span class="st run">CANDIDATE_LOCKED</span></div>
+  <div class="row"><span class="st run">H1_EVOLUTION</span><span class="arr">→</span><span class="st run">H1_REGRESSION</span><span class="arr">→ 归约 →</span></div>
+  <div class="row">
+    <span class="st ok">PILOT_COMPLETE / retain</span><span class="mut">（演化有救援 &amp; 回归全绿）</span>
+    <span class="st rb">ROLLBACK_AWAITING</span><span class="mut">（任何 observed-regression）</span>
+    <span class="st bl">BLOCKED</span><span class="mut">（任何 invalid 臂）</span>
+  </div>
+</div>
+<p>三路判决全部在 8 轮中真实触发过（3 retain / 2 rollback / 2 blocked / 1 no-gain），证明状态机各分支不是纸面设计。</p>
+
+<h3 id="s2-3">2.3 Execution 平面：演化对象只有一个文件</h3>
+<p>受控变量设计：8 轮演化的修改面<b>恒定为一个文件</b>——<code>.agents/role-skills/execution/writer/autobugfix-writer/SKILL.md</code>（Writer 角色技能）。协议以执行白名单（execution-allowlist）强制这一点：候选补丁触碰其他任何文件都会被 preflight 拒绝。这让"系统改进"退化为干净的单变量实验：改的是什么、diff 多少行、效果如何，全部可比。</p>
+
+<h3 id="s2-4">2.4 Operator 治理平面：12 步候选链</h3>
+<div class="flow">
+<span class="step">triage 归因</span><span class="arr">→</span>
+<span class="step">request（绑定 triage+预算+基线）</span><span class="arr">→</span>
+<span class="step">preflight（白名单/基线/预算校验）</span><span class="arr">→</span>
+<span class="step">start</span><span class="arr">→</span>
+<span class="step">writer-start（AI 执行修改）</span><span class="arr">→</span>
+<span class="step">verify fast</span><span class="arr">→</span>
+<span class="step">candidate-commit</span><span class="arr">→</span>
+<span class="step">experiment-run（subject 门）</span><span class="arr">→</span>
+<span class="step">verify full</span><span class="arr">→</span>
+<span class="step">integrate（实验线）</span><span class="arr">→</span>
+<span class="step">export-candidate（Eval 冻结）</span><span class="arr">→</span>
+<span class="step">H1 全量重测</span>
+</div>
+<ul>
+<li><b>预算波次</b>：3 → 8 → 16（wave 数 = 精确案例数；16 = 10 真实案例 + 6 个不透明槽位，槽位不泄露案例总数语义）；每波需独立批准（本实验按用户常设授权采用 <code>delegated_agent</code> 委托批准，批准注记入库）。</li>
+<li><b>实验线（experiment line）</b>：候选先集成到独立分支（<code>experiment/exp2-operator-*-main</code>），保留（retain）才推进冻结基线；回滚（rollback）则实验线复位到 H0 检查点——main 永远不被候选直接触碰。</li>
+<li><b>回滚也是一等公民</b>：回滚由服务签发回执（rollback receipt），coordinator 记录后状态机进入 <code>ROLLED_BACK</code>，全程留痕。</li>
+</ul>
+
+<h3 id="s2-5">2.5 Resume 断点续跑状态机（resume-first）</h3>
+<p>每案例执行前追加不可变事件 <code>case_attempt_started</code>，完成后追加唯一终态收据（4 种终态：<code>official_terminal / preflight_rejected / execution_infrastructure_invalid / scorer_infrastructure_invalid</code>）。断点续跑时的和解规则：</p>
+<ol>
+<li>校验 append-only 事件链完整性；</li>
+<li>已有合法终态收据的案例直接跳过——<b>已完成的 Writer 执行永不重复</b>；</li>
+<li>对 open intent 只检查其可信 run root：已有完整官方报告则采纳；broker/preflight 失败则结算为 invalid 终态；</li>
+<li>否则结算为 interrupted invalid；</li>
+<li>然后执行下一个缺失案例。</li>
+</ol>
+<p>这一设计在实验中反复兑现价值：会话中断、进程被杀、CLI 挂起、宿主故障后，研究都能从断点无损继续（例如 v3r5b 的 sympy 臂在崩溃后被和解为 invalid 收据，其余 9 案例照常完成）。</p>
+</section>
+
+<!-- ================= 3 协议 ================= -->
+<span class="toc-anchor" id="s3"></span>
+<section>
+<h2>3 实验协议设计 <span class="en">Protocol</span></h2>
+
+<h3 id="s3-1">3.1 三数据集划分（用户定义的权威协议）</h3>
+<table>
+<tr><th>集合</th><th>构成</th><th>规则</th></tr>
+<tr><td><b>演化集</b> evolution</td><td>当前轮 H0 的失败案例（动态派生）</td><td>每轮根据执行反馈提出假设、修改系统、逐步攻克</td></tr>
+<tr><td><b>回归集</b> regression</td><td>当前轮 H0 的通过案例（动态派生）</td><td><b>硬门</b>：H1 全量重测，任何一个由通过变失败 → 候选作废、自动回滚</td></tr>
+<tr><td><b>Held-out</b></td><td>SWE-bench-Live MultiLang 6 例（与训练分布不同源、不同语言）</td><td>演化收敛（或平台期）前<b>零接触</b>，仅在终局一次性评测</td></tr>
+</table>
+<p>注意演化/回归集是<b>按轮动态重新派生</b>的：同一案例可在不同轮属于不同集合（真实发生过：seaborn 在 v3r3 属回归集、v3r4 属演化集、v3r6 又属回归集）。这使配对始终是"同轮 H0 vs 同轮 H1，除候选外一切输入相同"。</p>
+
+<h3 id="s3-2">3.2 协议三代演进（本身就是一次协议工程）</h3>
+<table>
+<tr><th>版本</th><th>H1 覆盖</th><th>教训 → 改进</th></tr>
+<tr><td><b>v2</b>（r4–c8）</td><td>5 配对案例（2 source + 3 transfer）</td><td>r4 保留时 scikit-learn（H0 通过）未被重测——回归覆盖不完整，可能漏放回归</td></tr>
+<tr><td><b>v3</b>（v3r3 起）</td><td><b>全部 10 案例</b>（演化 ∪ 回归）</td><td>schema v3、evaluation_mode=iterative_full；"通过的必须始终保持通过"被机器强制执行</td></tr>
+</table>
+<p>v2 → v3 的驱动因素正是第一性原则："通过的应该就是始终保持通过"。v3 首轮（v3r3）立即抓到了 v2 抓不到的回归（seaborn），验证了升级的必要性。</p>
+
+<h3 id="s3-3">3.3 执行参数（全 8 轮冻结）</h3>
+<div class="card gray">
+<ul>
+<li>模型 <code>gpt-5.4-mini</code>；推理档位 low（v3r6 起 medium，作为受控变量切换，c8 先例）；</li>
+<li>每案例最多 2 次 Writer 尝试（attempt-2 需换思路）、单次 900s、并发 1（严格串行）；</li>
+<li>校准案例（Flask、Pylint）每 study 先跑，验证装置端到端可用（结果不计入演化统计）；</li>
+<li>所有运行钉死 <code>GIT_AUTHOR_DATE/GIT_COMMITTER_DATE</code> 等环境键以保证快照可复现（修复 #4）。</li>
+</ul>
+</div>
+</section>
+
+<!-- ================= 4 Memory ================= -->
+<span class="toc-anchor" id="s4"></span>
+<section>
+<h2>4 Memory 机制设计 <span class="en">Memory as a Controlled Variable</span></h2>
+<p class="lead">本实验的 Memory 设计回答的问题与主流不同：不是"记忆如何帮助系统"，而是<b>"如何把记忆从实验变量中彻底排除，让演化信号可归因"</b>。</p>
+<h3>4.1 为什么冻结为空 Memory</h3>
+<p>若 Writer 可跨轮积累记忆（案例经验、失败教训），则每轮 H0/H1 的表现变化就混杂了两个来源：技能文件的修改（本实验的自变量）与记忆的增长（不可控协变量）。为了让"候选 → 结果"的因果解释成立，实验将 Memory 平面固定为<b>空 fixture</b>（<code>exp2-empty-memory-fixture-v1</code>）：</p>
+<ul>
+<li>空 Memory 根目录整体摘要后写入 manifest 与 plan（<code>memory_fixture_digest</code>）；</li>
+<li>每次执行前实时重验（修复 #7：bind by fixture digest with live revalidation）——目录内容漂移即拒绝执行；</li>
+<li>官方报告由 Eval 平面持有并<b>拒绝执行器覆盖</b>——受测系统不能靠往"记忆"里塞官方结果来作弊。</li>
+</ul>
+<h3>4.2 这不是缺陷而是设计</h3>
+<div class="card tip">
+<p><b>Memory-as-variable 是一个实验设计立场</b>：本实验测量的是"技能演化"这一单独杠杆的极限（§9 的平台期结论正是因此才能归因于技能而非其他）。Memory 演化作为正交杠杆，被协议留作后续实验——届时只需解冻 fixture 并重新资格化，装置其余部分不变。工程上 Memory 平面的绑定/重验/防覆盖机制已经齐备，切换成本极低。</p>
+</div>
+</section>
+
+<!-- ================= 5 演化 ================= -->
+<span class="toc-anchor" id="s5"></span>
+<section>
+<h2>5 演化机制设计 <span class="en">Evolution Loop</span></h2>
+<h3>5.1 每轮闭环（conquer loop）</h3>
+<pre>
+<span class="c">┌─ 每轮 ─────────────────────────────────────────────────────────────┐</span>
+<span class="k">H0</span> 冻结 subject 跑全部 10 案例          <span class="c">→ 基线；失败=演化集，通过=回归集</span>
+<span class="k">归因</span> 从失败集投影包形成可检验假设          <span class="c">→ 假设≠因果真理，明文声明</span>
+<span class="k">候选</span> 12 步治理链落地对 SKILL.md 的修改     <span class="c">→ 单文件白名单，AI 执行，机器验签</span>
+<span class="k">H1</span> 换候选重跑全部 10 案例                <span class="c">→ 演化集看救援，回归集看守恒</span>
+<span class="k">判决</span> retain（进基线）/ rollback / blocked  <span class="c">→ 冻结 subject 推进或复位</span>
+<span class="c">└────────────────────────────────────────────────────────────────────┘</span></pre>
+<h3>5.2 冻结 H0 推进配方（subject advance recipe）</h3>
+<p>被保留的候选成为下一轮的新冻结 subject。推进是一套机械步骤（全部门禁机器校验）：</p>
+<ol>
+<li>常量 <code>SWE_H0_SUBJECT</code> + 两个 benchmarks YAML 的 <code>h0_subject</code> 同步指向新 SHA；</li>
+<li>重派生 raw-codex 基线的 <code>source_protocol_digest</code>（否则契约测试失败）；</li>
+<li>全量门禁（417 项测试）必须全绿；</li>
+<li>由于常量文件参与 <code>evaluator_runtime_id</code>，<b>全部 12 个案例资格必须重盖</b>（gold×2+null 重放，无模型调用）；</li>
+<li>重新装配：协议 → manifest → 5 项源检查 → 装置回执 → 双案例校准 → operator study → binding → plan → init → H0×10。</li>
+</ol>
+<h3>5.3 演化假设的八次迭代（自变量清单）</h3>
+<table>
+<tr><th>轮</th><th>对 SKILL.md 的修改假设</th><th>类型</th></tr>
+<tr><td>r4</td><td>禁止空补丁（必须产出真实 patch）</td><td>行为约束</td></tr>
+<tr><td>c6</td><td>从题面推导验收测试并本地验证</td><td>验证指引</td></tr>
+<tr><td>c7</td><td>需求清单（enumerate stated requirements）</td><td>验证指引</td></tr>
+<tr><td>c8</td><td>同 c7 清单 @ medium 档位（<b>算力受控切换</b>）</td><td>算力×指引</td></tr>
+<tr><td>v3r3</td><td>需求枚举 + 逐项本地验证 + 换思路重试</td><td>验证指引</td></tr>
+<tr><td>v3r4</td><td><b>类型分治</b>：feature/maintenance 用需求清单；bugfix 用最小 diff 纪律</td><td>类型作用域</td></tr>
+<tr><td>v3r5b</td><td>结构化 attempt-2（重推清单 + 点名换策略 + 全量复验）</td><td>重试纪律</td></tr>
+<tr><td>v3r6</td><td>示例执行（把 issue 中每个示例变成可运行检查）@ medium</td><td>算力×指引</td></tr>
+</table>
+</section>
+
+<!-- ================= 6 治理 ================= -->
+<span class="toc-anchor" id="s6"></span>
+<section>
+<h2>6 治理与安全机制 <span class="en">Governance</span></h2>
+<h3>6.1 防自我背书（anti self-blessing）</h3>
+<ul>
+<li><b>trusted_ref</b>：治理命令必须显式传锚点提交；guard 身份校验要求调用来自"HEAD==trusted_ref 且树干净"的受保护检出——候选代码不能调 guard 为自己背书；</li>
+<li>锚点推进需人工授权（本实验后段按用户常设全权委托执行，委托注记随每次批准入库，全程可审计）；</li>
+<li><b>study ID 一次性</b>：烧毁的 ID 永不复用；同一 worktree 禁止并行会话。</li>
+</ul>
+<h3>6.2 内容寻址审计链</h3>
+<p>从 triage 到判决报告，每一步产出都带 <code>record_digest</code> 且相互摘要绑定：归因 → 请求 → 批准 → Writer 运行 → 检查 → 候选提交（含完整 diff 摘要）→ 集成 → 候选导出 → H1 收据 → 判决报告。任一环节被篡改，链上后续摘要全部失配。<b>8 轮 × 12 步 ≈ 100 条治理记录</b>全部入库（governance.sqlite3 + 导出 YAML 双形态）。</p>
+<h3>6.3 沙箱与凭据隔离</h3>
+<p>Subject 执行环境：bwrap 气泡（--unshare-pid/net、--die-with-parent）、任务工作树为唯一可写目标、凭据路径与敏感环境对受测系统不可见、SDK 请求 cwd 必须等于任务工作树。Writer 的 shell 命令在沙箱内执行，产生的文件变更全部进入补丁摘要账本（§2.2d）。</p>
+</section>
+
+<!-- ================= 7 过程 ================= -->
+<span class="toc-anchor" id="s7"></span>
+<section>
+<h2>7 实验过程完整记录 <span class="en">The Eight Rounds</span></h2>
+<p>以下每个数字都来自该轮判决报告原文（<code>docs/exp2-evidence/round-reports/</code>，内容寻址可验证）。</p>
+<table>
+<tr><th>轮</th><th>协议/档位</th><th>H0</th><th>H1 演化臂</th><th>H1 回归臂</th><th>判决</th></tr>
+<tr><td><b>r4</b></td><td>v2 / low</td><td class="no">2/10</td><td>transfer：matplotlib ✗→<b class="yes">✓ 救援</b>、xarray ✗→<b class="yes">✓ 救援</b></td><td>未全覆盖（v2 缺陷）</td><td><span class="badge bg-ok">retain</span></td></tr>
+<tr><td><b>c6</b></td><td>v2 / low</td><td class="no">4/10</td><td>xarray ✗→<b class="yes">✓ 救援</b></td><td>matplotlib ✓→<b class="no">✗ 回归</b></td><td><span class="badge bg-bad">rollback</span></td></tr>
+<tr><td><b>c7</b></td><td>v2 / low</td><td class="no">5/10</td><td>0 救援</td><td>全绿</td><td><span class="badge bg-ng">no-gain</span></td></tr>
+<tr><td><b>c8</b></td><td>v2 / <b>medium</b></td><td class="no">4/10</td><td>matplotlib ✗→<b class="yes">✓ 救援</b>（同一技能 low 下无效）</td><td>全绿</td><td><span class="badge bg-ok">retain</span></td></tr>
+<tr><td><b>v3r3</b></td><td>v3 全回归 / low</td><td class="no">6/10</td><td>0 救援；sphinx 超时 invalid 臂</td><td>5/6：seaborn ✓→<b class="no">✗ 回归</b></td><td><span class="badge bg-bl">blocked</span></td></tr>
+<tr><td><b>v3r4</b></td><td>v3 / low</td><td class="no">4/10</td><td>matplotlib ✗→<b class="yes">✓ 救援</b>（attempt-2 换思路）</td><td><b class="yes">4/4 全绿</b></td><td><span class="badge bg-ok">retain</span></td></tr>
+<tr><td><b>v3r5b</b></td><td>v3 / low</td><td class="no">5/10</td><td>0 救援；sympy infra invalid（竞态，后修复 #5）</td><td><b class="yes">5/5 全绿</b></td><td><span class="badge bg-bl">blocked</span></td></tr>
+<tr><td><b>v3r6</b></td><td>v3 / <b>medium</b></td><td class="no">5/10</td><td>pytest ✗→<b class="yes">✓ 首次攻克</b>；matplotlib/seaborn 边缘翻转</td><td>4/5：seaborn ✓→<b class="no">✗ 回归</b></td><td><span class="badge bg-bad">rollback</span></td></tr>
+</table>
+<div class="card tip">
+<b>判决分布：3 retain / 2 rollback / 2 blocked / 1 no-gain</b> —— 状态机的每条路径都被真实走过多遍。
+</div>
+
+<h3>7.1 解决率轨迹（每轮 H0 = 当前冻结 subject 在 10 冻结案例上的解决数）</h3>
+<div class="chart">
+  <div class="bar"><span class="v">2</span><div class="b" style="height:20%"></div></div>
+  <div class="bar"><span class="v">4</span><div class="b" style="height:40%"></div></div>
+  <div class="bar"><span class="v">5</span><div class="b" style="height:50%"></div></div>
+  <div class="bar"><span class="v">4</span><div class="b" style="height:40%"></div></div>
+  <div class="bar peak"><span class="v">6</span><div class="b" style="height:60%"></div></div>
+  <div class="bar"><span class="v">4</span><div class="b" style="height:40%"></div></div>
+  <div class="bar"><span class="v">5</span><div class="b" style="height:50%"></div></div>
+  <div class="bar hold"><span class="v">5</span><div class="b" style="height:50%"></div></div>
+</div>
+<div class="xlab"><span>r4</span><span>c6</span><span>c7</span><span>c8@med</span><span>v3r3</span><span>v3r4</span><span>v3r5b</span><span>v3r6@med</span></div>
+<div class="legend">
+<span><i style="background:linear-gradient(180deg,#3b82f6,#0f5ea8)"></i>每轮 H0 解决数</span>
+<span><i style="background:linear-gradient(180deg,#2dd4bf,#0d9488)"></i>峰值（v3r3）</span>
+<span><i style="background:linear-gradient(180deg,#f59e0b,#b45309)"></i>终态冻结版本（b9c86b0）</span>
+</div>
+<p class="mut">注：相邻轮 H0 的波动（±1）来自模型执行随机性（同 subject 复跑亦有波动，如 seaborn 多轮翻转），这是使用真实模型做演化的真实测量噪声，协议通过同轮配对（H0/H1 同轮比较）将其排除出判决逻辑。</p>
+</section>
+
+<!-- ================= 8 结果 ================= -->
+<span class="toc-anchor" id="s8"></span>
+<section>
+<h2>8 结果分析 <span class="en">Results</span></h2>
+<h3>8.1 主结论</h3>
+<ol>
+<li><b>回归门 100% 有效</b>：三轮出现 observed-regression（c6 / v3r3 / v3r6），全部被检出并拒绝候选，<b>零漏放</b>；三次被拒候选中有两次是"救回一个案例但弄坏另一个"的净伤害或平手方案——没有门它们都会被误判为"改进"。</li>
+<li><b>演化有效但边际递减</b>：4 次保留（含 no-gain）将解决率 2/10 推至 5/10（+150%）；前半程每轮可救援 1–2 案例，后半程（v3 时代）救援与回归相互抵消，进入平台期。</li>
+<li><b>平台期可精确归因</b>：慢性失败核心（astropy、sympy、sphinx）在 low 与 medium、7 种技能假设下从未被攻克；它们全部呈现"过可见测试、挂官方隐藏测试"的同构失败模式。</li>
+</ol>
+<h3>8.2 配对视角（v3 协议四轮，逐案例）</h3>
+<table>
+<tr><th>案例</th><th>类型</th><th>v3r3</th><th>v3r4</th><th>v3r5b</th><th>v3r6@med</th><th>角色</th></tr>
+<tr><td>django</td><td>bugfix</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td>稳定通过</td></tr>
+<tr><td>xarray</td><td>bugfix</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td>稳定通过</td></tr>
+<tr><td>requests</td><td>bugfix</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td>稳定通过</td></tr>
+<tr><td>scikit-learn</td><td>feature</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td class="yes">✓✓</td><td>稳定通过</td></tr>
+<tr><td>matplotlib</td><td>bugfix</td><td class="yes">✓✓</td><td class="no">✗→<b class="yes">✓</b></td><td class="yes">✓✓</td><td class="no">✗✗</td><td><b>跷跷板案例</b>：两度被救、medium 下又失守</td></tr>
+<tr><td>seaborn</td><td>bugfix</td><td class="yes">✓→<b class="no">✗</b></td><td class="no">✗✗</td><td class="no">✗✗</td><td class="yes">✓→<b class="no">✗</b></td><td><b>跷跷板案例</b>：medium 救回、候选又弄坏</td></tr>
+<tr><td>astropy</td><td>feature</td><td class="no">✗✗</td><td class="no">✗✗</td><td class="no">✗✗</td><td class="no">✗✗</td><td>慢性核心</td></tr>
+<tr><td>sympy</td><td>feature</td><td class="no">✗✗</td><td class="no">✗✗</td><td class="na">✗/invalid</td><td class="no">✗✗</td><td>慢性核心</td></tr>
+<tr><td>pytest</td><td>bugfix</td><td class="no">✗✗</td><td class="no">✗✗</td><td class="no">✗✗</td><td class="no">✗→<b class="yes">✓</b>*</td><td>v3r6 被示例执行指引首次攻克（*候选因 seaborn 回归被拒）</td></tr>
+<tr><td>sphinx</td><td>maintenance</td><td class="na">✗/invalid</td><td class="no">✗✗</td><td class="no">✗✗</td><td class="no">✗✗</td><td>慢性核心</td></tr>
+</table>
+<p class="mut">格式：H0→H1（每轮同轮配对）。"✓✓"=回归集守恒；"✗→✓"=救援；"✓→✗"=回归。</p>
+</section>
+
+<!-- ================= 9 发现 ================= -->
+<span class="toc-anchor" id="s9"></span>
+<section>
+<h2>9 三大实证发现 <span class="en">Findings</span></h2>
+
+<div class="card">
+<h3 style="margin-top:0">发现一：指引 × 算力交互（c8 与 v3r6 双重验证）</h3>
+<p>同一份"验证类"技能指引，在 <b>low 档位零效果</b>（c7：retain_no_gain），在 <b>medium 档位产生救援</b>（c8：matplotlib；v3r6：seaborn 于 H0、pytest 于 H1）。而<b>纯算力提升本身 +0</b>（c8 的 H0@medium 与 H0@low 同为 4/10 波动带）。</p>
+<p><b>解释</b>：指引只有在推理预算充足时才被模型真正执行（"验证每个需求"需要规划与多步 shell 操作）。这对"该调 prompt 还是该调算力"是一个可量化的回答：<b>两者是乘性关系，不是加性关系</b>。</p>
+</div>
+
+<div class="card">
+<h3 style="margin-top:0">发现二：跷跷板效应——prompt 级演化无法累积收益</h3>
+<p>8 轮中的每次救援几乎都伴随另一次回归：c6 救 xarray 坏 matplotlib；v3r4 救 matplotlib（medium 下 v3r6 又失守）；v3r6 救 pytest 坏 seaborn。边缘案例（matplotlib / seaborn / pytest）随技能文本改动反复翻转，解决率在 4–6/10 振荡而非爬升。</p>
+<p><b>解释</b>：单一技能文件服务所有案例，任何全局性措辞变化都会同时移动多个案例的行为分布——对小模型而言信号/噪声比不足以支撑单调改进。这是平台期的根因，也划定了"prompt 演化"这一杠杆的能力边界。</p>
+</div>
+
+<div class="card">
+<h3 style="margin-top:0">发现三：重试杠杆的结构性不可达</h3>
+<p>v3r5b 专门检验"换思路重试"指引，结果 0 救援——因为慢性案例<b>第一次尝试就通过可见验证器</b>，循环以可见验证为停机信号，attempt-2 永远不会触发；它们只挂官方隐藏测试，而官方结果在执行时不可见。</p>
+<p><b>含义</b>：这是一条<b>运行时策略性质</b>的结论，不是技能问题——若要让重试杠杆触达此类失败，需要"耗尽尝试数"或"更强自评门"之类的循环策略修改（已列入未来工作）。识别这一点本身就是三集协议 + 逐臂配对带来的可归因性收益。</p>
+</div>
+</section>
+
+<!-- ================= 10 heldout ================= -->
+<span class="toc-anchor" id="s10"></span>
+<section>
+<h2>10 Held-out 最终评测 <span class="en">Final Evaluation</span></h2>
+<p>演化平台期确认后，按协议对<b>从未接触</b>的 held-out 集做一次性终测：SWE-bench-Live <b>MultiLang</b> 子集（与 Verified 不同源、非 Python 主导），透明确定性选取 6 例（快照顺序、6 仓库、5 语言、排除协议列名的 1 例）。受测系统 = 终态冻结版本 <code>b9c86b0</code> @ medium。</p>
+<table>
+<tr><th>案例</th><th>仓库 / 语言</th><th>结果</th><th>失败阶段</th></tr>
+<tr><td>mongoose-15485</td><td>Automattic/mongoose · JavaScript</td><td class="yes">✓ RESOLVED</td><td>—</td></tr>
+<tr><td>blocky-2016</td><td>0xERR0R/blocky · Go</td><td class="no">✗</td><td>可见验证器</td></tr>
+<tr><td>AntennaPod-7755</td><td>AntennaPod · Java</td><td class="no">✗</td><td>可见验证器</td></tr>
+<tr><td>automq-2699</td><td>AutoMQ · Java</td><td class="no">✗</td><td>可见验证器</td></tr>
+<tr><td>harper-1737</td><td>Automattic/harper · C++</td><td class="no">✗</td><td>可见验证器</td></tr>
+<tr><td>Avalonia-20964</td><td>AvaloniaUI · C#</td><td class="na">infra</td><td>MSBuild 守护进程持续写工作树，稳定申报被拒（诚实失败）</td></tr>
+</table>
+<p><b>有效解决率 1/5（20%）</b>。一个只在 Python 数据上演化过的系统，在零语言特调下于 JavaScript 案例上完成修复——跨语言迁移的初步证据；其余失败集中在可见验证阶段（连自评门都没过），说明跨语言的主要瓶颈在执行/验证环境而非修 bug 策略本身。</p>
+<p class="mut">声明：按用户决定未启用加密 Guard 队列机制，held-out 以"透明普通运行"方式执行并在所有报告中明示此 caveat；6 例为确定性透明选样而非密钥随机队列。</p>
+</section>
+
+<!-- ================= 11 工程 ================= -->
+<span class="toc-anchor" id="s11"></span>
+<section>
+<h2>11 工程贡献与缺陷修复 <span class="en">Engineering</span></h2>
+<p>实验过程中定位并修复了 10 项 harness 缺陷（每项都有回归测试，门禁 417 项全绿）。这些修复本身就是"为可信评测基建清障"的工程贡献：</p>
+<table>
+<tr><th>#</th><th>缺陷现象</th><th>根因与修复</th></tr>
+<tr><td>1</td><td>Writer 恒产出空补丁</td><td>内核禁用非特权嵌套 user namespace，外层 bwrap 内的 codex 会话再沙箱即失效（<b>静默失败</b>）→ 内层降级 full-access，外层沙箱已隔离（2c35c1b）</td></tr>
+<tr><td>2</td><td>含 PNG 的补丁使流程崩溃 UnicodeDecodeError</td><td>git diff --binary 非严格 UTF-8 → 捕获/摘要/冻结全链路 surrogateescape 字节保真（14ccc16）</td></tr>
+<tr><td>3</td><td>验证器反复报"外源 Git 元数据"</td><td>未区分<b>注册工作树</b>与 <b>broker 批准的验证副本</b>的元数据契约 → 分类校验（8a8b144）</td></tr>
+<tr><td>4</td><td>快照确定性测试偶发失败</td><td>凭据过滤器误剥钉死的 GIT_*_DATE → 精确键豁免（8c2adce）</td></tr>
+<tr><td>5</td><td>案例被判 infra invalid：验证器称补丁"超出可信转换"</td><td>Writer 本地验证的<b>残留后台进程</b>在申报摘要与验证摘要之间改工作树 → 稳定读申报（连续一致才声明，30s 上限，c969818 + 回归测试）</td></tr>
+<tr><td>6</td><td>合法 line-bound 请求被拒</td><td>基线身份校验缺 subject 回退路径 → 接受 measured SHA==冻结 subject（a6a167d+ba3b67d）</td></tr>
+<tr><td>7</td><td>Memory 可能漂移 / 官方报告可被覆盖</td><td>按 fixture digest 绑定 + 执行前实时重验 + 拒绝执行器覆盖官方报告（06cecc4/6db7d00/649546f）</td></tr>
+<tr><td>8</td><td>实例加载需远程检视（网络依赖）</td><td>资格元数据 + 钉死数据集行本地重建实例（b51dd65）</td></tr>
+<tr><td>9</td><td>冻结 subject 推进后 raw-codex 契约失配</td><td>source_protocol_digest 派生化，纳入推进配方（f52344f）</td></tr>
+<tr><td>10</td><td>Live 案例无法普通执行（被 Guard 硬锁）</td><td>按用户决定解锁普通开发路径 + 钉死镜像按需拉取（b4101c3）</td></tr>
+</table>
+<div class="card warn"><b>运维教训一并记录</b>：/tmp tmpfs 配额 81% 满曾引发连环 git/verifier 失败并伪装成协议缺陷（占用大户是无关项目缓存）；真实模型批跑的监控依赖轮询 sleep 属正常节奏而非卡死。两者均已写入操作手册（检查 <code>df -h /tmp</code> 列为故障第一检查项）。</div>
+</section>
+
+<!-- ================= 12 创新 ================= -->
+<span class="toc-anchor" id="s12"></span>
+<section>
+<h2>12 创新点总结（多角度） <span class="en">Contributions</span></h2>
+<div class="grid2">
+<div class="card">
+<h4>① 协议设计角度</h4>
+<p><b>三数据集受控演化协议 + 全量回归硬门</b>：把"系统自我改进"形式化为每轮 H0/H1 同轮配对的受控实验；v2→v3 的升级（H1 从 5 配对到全 10）由真实漏检风险驱动，并被 v3r3 立即验证。<i>对照</i>：业界 prompt 迭代普遍无逐案例配对与回归保障。</p>
+</div>
+<div class="card">
+<h4>② 验证机制角度</h4>
+<p><b>双层验证 + 资格三重奏</b>：可见验证器（停机信号）与官方隐藏评分（唯一真值）严格分离；gold×2+null×1 的资格机制先证明"考题有效"再测系统；非干预校验 + 执行器覆盖拒绝防评测被污染。</p>
+</div>
+<div class="card">
+<h4>③ 治理角度</h4>
+<p><b>AI 自改系统的 CI 化</b>：12 步治理链 + 预算波次 + 内容寻址审计链 + 实验线/main 隔离 + 服务签发回滚回执。系统的每次自我修改都可追溯到"谁批准、改了什么 diff、检查结果、为何保留/回滚"。<i>这是 Agent 自我改进安全性的一个可运行参考实现。</i></p>
+</div>
+<div class="card">
+<h4>④ Memory 角度</h4>
+<p><b>Memory 作为被控变量而非功能</b>：空 fixture + digest 绑定 + 实时重验，把记忆从演化信号中完全排除，使 8 轮结果可单变量归因；同时为"记忆演化"正交实验预留了切换开关。</p>
+</div>
+<div class="card">
+<h4>⑤ 工程角度</h4>
+<p><b>Resume-first 可信批跑</b>：append-only 事件账本 + 四类终态收据 + 崩溃和解规则，使"每案例 10–20 分钟、单轮 3–4 小时"的真实模型批跑在会话中断、进程被杀、CLI 挂起、宿主故障下都能无损续跑——160+ 次执行无一重复。</p>
+</div>
+<div class="card">
+<h4>⑥ 实证发现角度</h4>
+<p><b>三条可复用的经验规律</b>：指引×算力乘性交互（§9-一）；prompt 演化的跷跷板边界（§9-二）；以可见验证为停机信号的循环对"过可见挂官方"失败的结构性盲区（§9-三）。每条都由受控配对实验支撑。</p>
+</div>
+</div>
+</section>
+
+<!-- ================= 13 局限 ================= -->
+<span class="toc-anchor" id="s13"></span>
+<section>
+<h2>13 局限与未来工作 <span class="en">Limitations &amp; Future Work</span></h2>
+<ul>
+<li><b>样本量</b>：10 案例优化集 + 8 轮，统计功效有限；结论表述为"该协议下的实证规律"而非总体推断（报告禁则已声明）。可扩案例集复用全套装置。</li>
+<li><b>平台期未破</b>：三个已识别但未实施的方向——（a）耗尽尝试数 / 更强自评门的循环策略（针对发现三）；（b）解冻 Memory 的正交演化；（c）分案例类型的技能路由（针对跷跷板，把"类型分治"细化到案例级路由以隔离扰动）。</li>
+<li><b>held-out 无 Guard 队列</b>：按用户决定以透明普通运行替代密钥随机队列，选样确定性透明但非盲；Avalonia 的 MSBuild 稳定性问题（C# 构建守护进程持续写工作树）待"申报前杀进程树"方案解决后补测。</li>
+<li><b>模型单一</b>：全部结论建立在 gpt-5.4-mini；协议已参数化档位 {low,medium,high,xhigh}，换模型/档位的复跑是纯配置工作。</li>
+</ul>
+</section>
+
+<!-- ================= 14 可复现 ================= -->
+<span class="toc-anchor" id="s14"></span>
+<section>
+<h2>14 可复现性与工件索引 <span class="en">Reproducibility</span></h2>
+<table>
+<tr><th>工件</th><th>位置 / 摘要</th></tr>
+<tr><td>实验代码 + 协议 + 证据包</td><td>GitHub <code>zhkzly/autobugfix-loop</code> 分支 <code>experiment/exp2-resume-mvp-v2</code>（68 提交）</td></tr>
+<tr><td>演化里程碑标签</td><td><code>exp2/retain-r4</code>(fe0f2fea)、<code>exp2/retain-v3r4</code>(d2811289)、<code>exp2/final-subject-medium</code>(b9c86b0)</td></tr>
+<tr><td>8 轮判决报告（内容寻址）</td><td><code>docs/exp2-evidence/round-reports/</code>（r4 41d3b444 / c6 d78e50ad / c7 a24ab53c / c8 1b38bfe0 / v3r3 9b3425b6 / v3r4 7514736d / v3r5b 94f9bfd7 / v3r6 f556bf97 + 回滚回执 71585ddb）</td></tr>
+<tr><td>held-out 逐案报告</td><td><code>docs/exp2-evidence/heldout-reports/</code>（5 例）</td></tr>
+<tr><td>演化台账（本档摘要）</td><td><code>docs/exp2-evidence/EVOLUTION-LEDGER.md</code></td></tr>
+<tr><td>完整可信状态</td><td>本地 <code>.autobugfix/</code>：事件账本、逐案收据、原始运行、治理库（sqlite）、镜像门、usage</td></tr>
+<tr><td>门禁</td><td>417 项测试全绿（41 个测试文件）；5 项源检查全过；12×2 资格记录现行有效</td></tr>
+<tr><td>历史阶段存档</td><td>标签 <code>archive/pre-exp2/*</code>（8 枚，7 月早期开发线逐字节保留）</td></tr>
+</table>
+</section>
+
+<!-- ================= 附录 ================= -->
+<span class="toc-anchor" id="appendix"></span>
+<section>
+<h2>附录：术语表 <span class="en">Glossary</span></h2>
+<table>
+<tr><th>术语</th><th>含义</th></tr>
+<tr><td>Subject（受测主体）</td><td>被评测的系统版本 = 仓库某个冻结提交；演化的"当前个体"</td></tr>
+<tr><td>H0 / H1</td><td>某轮的基线执行 / 换候选后的对照执行；同轮配对，除候选外输入相同</td></tr>
+<tr><td>演化集 / 回归集</td><td>该轮 H0 失败案例（待攻克）/ 通过案例（必须保持通过）</td></tr>
+<tr><td>retain / rollback / blocked / no-gain</td><td>四路判决：保留进基线 / 因回归拒绝并复位 / 因 invalid 臂中止 / 保留但无增益</td></tr>
+<tr><td>observed-regression</td><td>回归集案例在 H1 由通过变失败——触发回滚的硬条件</td></tr>
+<tr><td>official_terminal / invalid</td><td>案例终态：拿到官方结论 / 执行基础设施失效（不可归因于受测系统）</td></tr>
+<tr><td>Qualification（资格）</td><td>gold×2 + null×1 的考题有效性证明 + 镜像/数据集钉死记录</td></tr>
+<tr><td>Apparatus（装置）</td><td>源检查 + 协议的联合冻结回执；study 运行期 HEAD 必须等于其 SHA</td></tr>
+<tr><td>Projection bundle（投影包）</td><td>给 Operator 的最小失败集信息（不含 gold/隐藏测试/通过案例）</td></tr>
+<tr><td>Trusted ref（锚点）</td><td>治理信任根提交；guard 要求 HEAD==锚点且树干净，防候选自我背书</td></tr>
+</table>
+</section>
+
+<div class="footnote">
+Exp2 · 完整实验汇报 · 生成于 2026-08-29 · 数据源：8 份内容寻址判决报告 + held-out 逐案报告 + 治理库 ·
+所有比例与计数均可由 <code>docs/exp2-evidence/</code> 与本地 <code>.autobugfix/</code> 状态复算。
+</div>
+
+</main>
+</div>
+</body>
+</html>
