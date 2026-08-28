@@ -16,6 +16,7 @@ from autobugfix.eval.benchmarks.subject_broker import (
     SWESubjectBroker,
     SWESubjectBrokerError,
 )
+import autobugfix.eval.benchmarks.swe_codex as swe_codex_module
 from autobugfix.eval.benchmarks.swe_codex import (
     SWECodexServer,
     SWEExecutionLedger,
@@ -801,3 +802,45 @@ def test_visible_verifier_cleanup_failure_invalidates_run(
     verifier._docker_step = fake_step
     with pytest.raises(SWERuntimeError, match="run is not isolated"):
         verifier.run(worktree, tmp_path / "ignored", 30)
+
+
+def test_codex_broker_declares_only_a_settled_patch_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worktree still changing after the CLI exits must not be declared.
+
+    The sympy v3r5b arm died as execution_infrastructure_invalid because a
+    lingering writer-side process mutated the task worktree between the
+    broker's declared digest and the verifier's own read. The declaration
+    must wait for the worktree to stop changing (or fail loudly).
+    """
+    clock = {"now": 0.0}
+    monkeypatch.setattr(
+        swe_codex_module.time, "monotonic", lambda: clock["now"]
+    )
+    monkeypatch.setattr(
+        swe_codex_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+
+    class DriftingThenSettled:
+        reads = 0
+
+        def _patch_sha256(self, cwd: Path) -> str:
+            type(self).reads += 1
+            if type(self).reads < 3:
+                return f"drifting-{type(self).reads}"
+            return "settled"
+
+    server = DriftingThenSettled()
+    digest = SWECodexServer._settled_patch_sha256(server, cast(Path, None))
+    assert digest == "settled"
+    assert type(server).reads == 5  # two drifts, then three stable reads
+
+    class NeverSettles:
+        def _patch_sha256(self, cwd: Path) -> str:
+            return f"always-changing-{clock['now']}"
+
+    with pytest.raises(SWERuntimeError, match="cannot declare a settled patch"):
+        SWECodexServer._settled_patch_sha256(NeverSettles(), cast(Path, None))

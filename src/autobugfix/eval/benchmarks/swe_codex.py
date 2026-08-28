@@ -436,6 +436,40 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
         patch = diff_for_task(self.repo, cwd, "HEAD")
         return hashlib.sha256(patch.encode("utf-8")).hexdigest()
 
+    def _settled_patch_sha256(
+        self,
+        cwd: Path,
+        *,
+        settle_seconds: float = 1.0,
+        stable_reads: int = 3,
+        timeout_seconds: float = 30.0,
+    ) -> str:
+        """Patch digest that stays identical across consecutive reads.
+
+        The writer's local verification may leave short-lived background
+        processes that keep mutating the task worktree for a few seconds
+        after the Codex CLI exits. Declaring the digest on the first read
+        raced those processes and made the verifier reject the observed
+        patch as an untrusted transition. Wait until the worktree stops
+        changing before declaring.
+        """
+        last = self._patch_sha256(cwd)
+        stable = 1
+        deadline = time.monotonic() + timeout_seconds
+        while stable < stable_reads:
+            time.sleep(settle_seconds)
+            current = self._patch_sha256(cwd)
+            if current == last:
+                stable += 1
+            else:
+                stable = 1
+                last = current
+            if stable < stable_reads and time.monotonic() >= deadline:
+                raise SWERuntimeError(
+                    "task worktree keeps changing; cannot declare a settled patch"
+                )
+        return last
+
     def _handle(self, connection: socket.socket) -> None:
         stream = connection.makefile("rwb")
         response: dict[str, Any]
@@ -454,18 +488,22 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
             try:
                 result = self._run(role, prompt, cwd, sequence)
             except BaseException:
+                try:
+                    declared = self._settled_patch_sha256(cwd)
+                except BaseException:
+                    declared = self._patch_sha256(cwd)
                 self.ledger.finish_codex(
                     role,
                     sequence,
                     passed=False,
-                    patch_sha256=self._patch_sha256(cwd),
+                    patch_sha256=declared,
                 )
                 raise
             self.ledger.finish_codex(
                 role,
                 sequence,
                 passed=True,
-                patch_sha256=self._patch_sha256(cwd),
+                patch_sha256=self._settled_patch_sha256(cwd),
             )
             response = {
                 "result": {
