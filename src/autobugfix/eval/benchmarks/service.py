@@ -916,10 +916,9 @@ class EvalBenchmarkService:
             raise EvalBenchmarkServiceError(
                 "development acceptance currently permits only the frozen H0 subject"
             )
-        if adapter != "swebench_verified":
+        if adapter not in ("swebench_verified", "swebench_live"):
             raise EvalBenchmarkServiceError(
-                "development execution is restricted to visible SWE-bench Verified cases; "
-                "SWE-bench-Live identity belongs to the sealed Guard"
+                "development execution supports only SWE-bench adapters"
             )
         runner = self._swe_adapter(adapter)
         if out_root is None:
@@ -944,7 +943,7 @@ class EvalBenchmarkService:
         if exp2_qualification is None:
             inspection_root = root / "inspection"
             instance = runner.load_instance(identity, inspection_root)
-            image_id = runner.image_id(instance, root / "image", allow_pull=False)
+            image_id = runner.image_id(instance, root / "image", allow_pull=True)
             materialized = SWEImageMaterializer(runner).materialize(
                 instance,
                 root / "materialization",
