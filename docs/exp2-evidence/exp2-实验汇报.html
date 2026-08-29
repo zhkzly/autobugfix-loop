@@ -110,6 +110,7 @@ pre .c{color:#64748b}pre .k{color:#7dd3fc}pre .s{color:#fcd34d}pre .g{color:#86e
   <a class="lv2" href="#s3-1">3.1 三数据集划分</a>
   <a class="lv2" href="#s3-2">3.2 协议三代演进</a>
   <a class="lv2" href="#s3-3">3.3 资格与装置冻结</a>
+  <a class="lv2" href="#s3-4">3.4 形式化模型 H=(S,C)</a>
   <a href="#s4">4 Memory 机制设计</a>
   <a href="#s5">5 演化机制设计</a>
   <a href="#s6">6 治理与安全机制</a>
@@ -308,6 +309,20 @@ pre .c{color:#64748b}pre .k{color:#7dd3fc}pre .s{color:#fcd34d}pre .g{color:#86e
 <li>校准案例（Flask、Pylint）每 study 先跑，验证装置端到端可用（结果不计入演化统计）；</li>
 <li>所有运行钉死 <code>GIT_AUTHOR_DATE/GIT_COMMITTER_DATE</code> 等环境键以保证快照可复现（修复 #4）。</li>
 </ul>
+</div>
+
+<h3 id="s3-4">3.4 形式化模型：H=(S, C) 与三通道变更系统</h3>
+<p>每一代受测 Agent 表示为配置 <b>H = (S, C)</b>：S 为技能指令层（Writer SKILL.md，由选择机制演化的变量，7/8 轮）；C 为算力处理层（推理档位等运行时参数，谱系开关变量，2 次切换）。实验中系统发生过的全部变更分为三类，<b>各自走不同的验证通道</b>——这是归因严格性的结构保证：</p>
+<table>
+<tr><th>变更</th><th>通道</th><th>验证义务</th></tr>
+<tr><td><b>ΔS</b>（技能文本）</td><td><b>候选通道</b>：白名单锁单文件 → 同轮 H0/H1 配对 → rescue−regression−invalid 选择</td><td>过回归门才保留（retain）</td></tr>
+<tr><td><b>ΔC</b>（算力档位）</td><td><b>谱系开关通道</b>：重定基线（新 H0 重建演化/回归划分），不作为对旧谱系的候选</td><td>算力效应由跨谱系交互对比确认（同一 S 在两档位下的配对差：c7 no-gain@low vs c8 rescue@medium）</td></tr>
+<tr><td><b>ΔM</b>（装置代码维护，~10 项缺陷修复）</td><td><b>维护通道</b>：不经候选选择</td><td>全量门禁 + subject 门基线 + 涉及测量行为时强制重盖全部 12 案例资格（<code>evaluator_runtime_id</code> 变更即作废）+ 显式中性声明</td></tr>
+</table>
+<p>两点精确说明：(1) c8 被保留的不是"算力候选"而是新谱系（C=medium）下重新配对评估的 S——medium 的证据形态是<b>交互对比</b>而非同轮配对；(2) Memory 与循环策略（max_attempts、停机信号）作为<b>负控制变量冻结</b>，发现三（§9）恰好证明循环策略是下一个应解锁的演化变量。</p>
+<div class="card tip">
+<b>三通道分离回答了自改进系统的根本问题："改进自己"与"弄坏尺子"如何不混在一起。</b>
+若 ΔM 冒充能力改进走候选通道会污染归因；若 ΔS 绕过回归门走维护通道则回归不可拦。本实验中 3/3 的回归拦截率是"ΔS 只能走候选通道"这一约束的<b>结构性结果</b>，而非提议层智力的产物——<code>evaluator_runtime_id</code> 让尺子动了自己会喊（测量代码一变，资格全部自动作废）。
 </div>
 </section>
 
