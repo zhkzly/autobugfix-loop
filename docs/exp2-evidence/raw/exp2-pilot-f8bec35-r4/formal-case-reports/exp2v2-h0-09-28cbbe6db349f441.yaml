@@ -1,0 +1,276 @@
+schema: autobugfix-swe-formal-case-v2
+protocol_digest: a9a041bd3a0ef7f4e71a934d7e813b57f98843f44ef46c4d69ba0f2f890211fb
+codex_runtime:
+  model: gpt-5.4-mini
+  reasoning_effort: low
+  service_tier: null
+  sdk_package: openai-codex
+  sdk_version: 0.144.4
+  cli_package: openai-codex-cli-bin
+  cli_version: 0.144.4
+  max_attempts: 2
+  timeout_seconds: 900
+subject_runtime_contract_digest: 13f382d03a0ab2cbc2358990cd3179d928ea67b6c9083aca633c2251a2832035
+subject_runtime_digest: 86214516b744e09ac28dcf692e52a7fd3c61ef84c1c392083ab20071d8cb662f
+evaluator_runtime_id: sha256:f07c65efd40920fa80854c46c84ab85555473ef02d86c3d0b32fb8e04cc7328e
+case_token: opt-bd29d68eaf3bedbf54125fa9
+experiment_role: optimization
+study_id: exp2-operator-f8bec35-r1
+cohort_id: exp2-operator-f8bec35-r1
+treatment: H_general
+study_binding_digest: 3d8a4f3128788e450fec80b9944f19b8657165ec8d5d623cbbeebfe542816a00
+memory_digest: 8d05dbaf479104b078a95d8d2c25ae9a0abd454a0cfc34d4d9d2490d0fa89c45
+role_config_digest: 9aadc52ced03ebe88f91eb634b3c7a9b9282cb6e7f659da083637cc1cef87c46
+policy_digest: a7c783fdd1cae02d22795172619396d71af236b2378b80d59ba01dd4376c985a
+executed_subject_sha: f529f09de53183d7ddbf9e05b31a9d3b3fbde008
+executed_subject_tree: f91806f9383d048c254ed933825ce400c80976e8
+submission_digest: 98ff098e79b148c0435ee42a77c6044185edadd55efa8ffad6f08e681a9bb181
+official_result:
+  schema: autobugfix-swe-official-result-v1
+  adapter: swebench_verified
+  instance_id: scikit-learn__scikit-learn-13439
+  run_id: exp2v2-h0-09-28cbbe6db349f441
+  resolved: true
+  passed: true
+  harness_error: ''
+  image: sweb.eval.x86_64.scikit-learn__scikit-learn-13439:latest
+  image_id: sha256:125ac4b2346631615a0846fa8b077fc1e15dc3da12034f28aafd26f7896f26ac
+  command:
+    name: official-swe-score
+    argv:
+    - /usr/bin/bwrap
+    - --die-with-parent
+    - --new-session
+    - --unshare-pid
+    - --unshare-ipc
+    - --unshare-uts
+    - --ro-bind
+    - /
+    - /
+    - --dev
+    - /dev
+    - --proc
+    - /proc
+    - --tmpfs
+    - /home
+    - --tmpfs
+    - /mnt
+    - --tmpfs
+    - /tmp
+    - --tmpfs
+    - /media
+    - --tmpfs
+    - /srv
+    - --tmpfs
+    - /root
+    - --tmpfs
+    - /var/lib/docker
+    - --dir
+    - /home/kelong
+    - --dir
+    - /home/kelong/pycodes
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2
+    - --ro-bind
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2
+    - --tmpfs
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix
+    - --tmpfs
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix-memory
+    - --tmpfs
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.codex
+    - --tmpfs
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.trellis
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/benchmark-cache
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/benchmark-cache
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/official
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/official
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/scorer-client-state
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score
+    - --dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/scorer-client-state
+    - --dir
+    - /home/kelong/.local
+    - --dir
+    - /home/kelong/.local/bin
+    - --dir
+    - /home/kelong/.local/share
+    - --dir
+    - /home/kelong/.local/share/uv
+    - --dir
+    - /home/kelong/.local/share/uv/python
+    - --dir
+    - /home/kelong/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu
+    - --ro-bind
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/benchmark-cache
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/benchmark-cache
+    - --ro-bind
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/prediction.jsonl
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/prediction.jsonl
+    - --bind
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/official
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/official
+    - --bind
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/scorer-client-state
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/scorer-client-state
+    - --ro-bind
+    - /home/kelong/.local/bin/uv
+    - /home/kelong/.local/bin/uv
+    - --ro-bind
+    - /home/kelong/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu
+    - /home/kelong/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu
+    - --chdir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/official
+    - --
+    - /home/kelong/.local/bin/uv
+    - run
+    - --project
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/harnesses/swebench
+    - --frozen
+    - python
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/harnesses/swebench/scripts/run_official.py
+    - --build-network-mode
+    - default
+    - --module
+    - swebench.harness.run_evaluation
+    - --dataset_name
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/benchmark-cache/datasets/swebench_verified/c104f840cc67f8b6eec6f759ebc8b2693d585d4a/canonical-v2/test.jsonl
+    - --predictions_path
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/prediction.jsonl
+    - --instance_ids
+    - scikit-learn__scikit-learn-13439
+    - --max_workers
+    - '1'
+    - --run_id
+    - exp2v2-h0-09-28cbbe6db349f441
+    - --namespace
+    - none
+    - --cache_level
+    - instance
+    - --clean
+    - 'false'
+    - --timeout
+    - '5400'
+    - --report_dir
+    - /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/official
+    cwd: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/official
+    started_at: '2026-08-24T09:08:44Z'
+    finished_at: '2026-08-24T09:09:39Z'
+    duration_seconds: 55.03813927599549
+    exit_code: 0
+    timed_out: false
+    passed: true
+    stdout_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/command/stdout.log
+    stderr_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/command/stderr.log
+    stdout_sha256: 6b45b4de102e60f24e7c9de1bf63923237506e6c23289352847a1068be66326d
+    stderr_sha256: 6761d931ff6681cb035feb0f91ee36d2c7569d0b678da166d201639c381be4cf
+    environment_digest: 76c23abdeb61559ae17edc7dd7985461733a5e545a594eeec8f36abacf061440
+    record_digest: 4bdc17bb0534bc17cdd9c0eb0089d762bd47e117ec0135e9a77b4cb440e8f078
+  report_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/official/logs/run_evaluation/exp2v2-h0-09-28cbbe6db349f441/autobugfix-subject/scikit-learn__scikit-learn-13439/report.json
+  report_sha256: 75faa90bd36fc70a9fdfa5756a1264188ae4230e8aa713e0ae4adf3bc193e357
+  output_root: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/official-score/official
+  started_at: '2026-08-24T09:08:44Z'
+  finished_at: '2026-08-24T09:09:39Z'
+  record_digest: a2a025bac86c7fb54a69fd53db40149da264cf74e288f874af753b22ff0849ed
+noninterference:
+  schema: autobugfix-swe-noninterference-v1
+  case_token: opt-bd29d68eaf3bedbf54125fa9
+  submission_digest: 98ff098e79b148c0435ee42a77c6044185edadd55efa8ffad6f08e681a9bb181
+  official_result_digest: a2a025bac86c7fb54a69fd53db40149da264cf74e288f874af753b22ff0849ed
+  unchanged: true
+  before:
+    record_digest: 98ff098e79b148c0435ee42a77c6044185edadd55efa8ffad6f08e681a9bb181
+    record_sha256: 9b086d36ba1c680f992fd7811562a1edea8a494de43a2b25de32ba8292cd6810
+    patch_sha256: 67e43ef24eab7ecb249d05b58a185b5d5c9ee449e2026ff3c4b87f9f0b469b6b
+    evidence_manifest_digest: 8d5ef5a957a639028e968ac32485103471f00516c68c1bc91a2ae8681763db23
+    evidence_manifest_sha256: feeb73f2ffe0726516dffa6b7b5307f7915565e44a650b65309a7f8468710e22
+  after:
+    record_digest: 98ff098e79b148c0435ee42a77c6044185edadd55efa8ffad6f08e681a9bb181
+    record_sha256: 9b086d36ba1c680f992fd7811562a1edea8a494de43a2b25de32ba8292cd6810
+    patch_sha256: 67e43ef24eab7ecb249d05b58a185b5d5c9ee449e2026ff3c4b87f9f0b469b6b
+    evidence_manifest_digest: 8d5ef5a957a639028e968ac32485103471f00516c68c1bc91a2ae8681763db23
+    evidence_manifest_sha256: feeb73f2ffe0726516dffa6b7b5307f7915565e44a650b65309a7f8468710e22
+  checked_at: '2026-08-24T09:09:39Z'
+  record_digest: 6bc732105243517263b4282fe8aa372b8a7c6b3a42d3b0150cc8e60512d3d3c7
+resolved: true
+harness_error: ''
+execution_receipt:
+  schema: autobugfix-exp2-execution-receipt-v1
+  execution_mode: protected
+  direct_sdk_in_process: false
+  outer_bubblewrap: true
+  broker_command_digest: 1657b199c52655bddd27e2ed5e4957c1e8fe6265ec7b9b0316eb61ccb8b11cbd
+  broker_result_digest: 8c2c84f6d9835eaad170b3ddc1d349e7cfffce32d413a55681984710f63e4f19
+  task_worktree_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/exp2/exp2-pilot-f8bec35-r4/runs/runs/exp2v2-h0-09-28cbbe6db349f441/subject-run/target/worktrees/20260824-swe-eval-opt-bd29d68eaf3bedbf54125fa-eed94020
+  workspace_only_preflight_digest: null
+  execution_ledger_digest: 5a80999133b537a8acba9eb48bc4743f5559e44a1630be99556a7dbed0772f9b
+  sdk_call_receipt_digests:
+  - a2ab3322c1195e20ba9a6c4ddbd7daf0736c52b0569e6b628648bd28b0f05bb3
+  - 18077a95200027797fa2101c1e9057ea445d7abd13e44bb7f8e44e2e4ab8afd2
+  record_digest: d29be3cd720eed808cb8c8d843da0672d87147839fcd656127eec6aeff416c8e
+image_digest: 125ac4b2346631615a0846fa8b077fc1e15dc3da12034f28aafd26f7896f26ac
+failure_stage: unknown
+record_digest: 5ff98703c2556395322b1fcd9d93fa2a7985c825e853e08dac17887824006252

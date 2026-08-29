@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import threading
+import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -22,6 +23,27 @@ from autobugfix.git_utils import git_common_dir
 from autobugfix.models import CodexResult, utc_now
 from autobugfix.role_config import resolve_role
 from autobugfix.worktree import diff_for_task
+
+
+def _usage_value(value: Any, names: set[str]) -> int | None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if str(key) in names:
+                try:
+                    parsed = int(item)
+                except (TypeError, ValueError):
+                    return None
+                return parsed if parsed >= 0 else None
+        for item in value.values():
+            found = _usage_value(item, names)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _usage_value(item, names)
+            if found is not None:
+                return found
+    return None
 
 
 class SWEExecutionLedger:
@@ -348,7 +370,10 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
             raise SWERuntimeError(
                 "workspace-only Codex dispatch cannot use a Bubblewrap worker backend"
             )
+        started_monotonic = time.monotonic()
         result = backend.run(request)
+        duration_seconds = time.monotonic() - started_monotonic
+        raw_usage = result.raw.get("response") if isinstance(result.raw, dict) else None
         receipt = record_with_digest(
             {
                 "schema": "autobugfix-swe-codex-call-v1",
@@ -369,9 +394,35 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
                     if self.expected_task_worktree is not None
                     else None
                 ),
+                "hidden_paths": sorted(
+                    str(path.resolve()) for path in self.hidden_paths
+                ),
+                "hidden_paths_digest": hashlib.sha256(
+                    json.dumps(
+                        sorted(
+                            str(path.resolve()) for path in self.hidden_paths
+                        ),
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "result_sha256": hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
                 "exit_code": result.exit_code,
+                "input_tokens": _usage_value(
+                    raw_usage, {"input_tokens", "inputTokens"}
+                ),
+                "cached_input_tokens": _usage_value(
+                    raw_usage,
+                    {"cached_input_tokens", "cachedInputTokens"},
+                ),
+                "output_tokens": _usage_value(
+                    raw_usage, {"output_tokens", "outputTokens"}
+                ),
+                "reasoning_tokens": _usage_value(
+                    raw_usage,
+                    {"reasoning_tokens", "reasoningTokens"},
+                ),
+                "duration_seconds": duration_seconds,
                 "started_at": started_at,
                 "finished_at": utc_now(),
             }
@@ -384,6 +435,40 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
     def _patch_sha256(self, cwd: Path) -> str:
         patch = diff_for_task(self.repo, cwd, "HEAD")
         return hashlib.sha256(patch.encode("utf-8")).hexdigest()
+
+    def _settled_patch_sha256(
+        self,
+        cwd: Path,
+        *,
+        settle_seconds: float = 1.0,
+        stable_reads: int = 3,
+        timeout_seconds: float = 30.0,
+    ) -> str:
+        """Patch digest that stays identical across consecutive reads.
+
+        The writer's local verification may leave short-lived background
+        processes that keep mutating the task worktree for a few seconds
+        after the Codex CLI exits. Declaring the digest on the first read
+        raced those processes and made the verifier reject the observed
+        patch as an untrusted transition. Wait until the worktree stops
+        changing before declaring.
+        """
+        last = self._patch_sha256(cwd)
+        stable = 1
+        deadline = time.monotonic() + timeout_seconds
+        while stable < stable_reads:
+            time.sleep(settle_seconds)
+            current = self._patch_sha256(cwd)
+            if current == last:
+                stable += 1
+            else:
+                stable = 1
+                last = current
+            if stable < stable_reads and time.monotonic() >= deadline:
+                raise SWERuntimeError(
+                    "task worktree keeps changing; cannot declare a settled patch"
+                )
+        return last
 
     def _handle(self, connection: socket.socket) -> None:
         stream = connection.makefile("rwb")
@@ -403,18 +488,22 @@ class SWECodexServer(AbstractContextManager["SWECodexServer"]):
             try:
                 result = self._run(role, prompt, cwd, sequence)
             except BaseException:
+                try:
+                    declared = self._settled_patch_sha256(cwd)
+                except BaseException:
+                    declared = self._patch_sha256(cwd)
                 self.ledger.finish_codex(
                     role,
                     sequence,
                     passed=False,
-                    patch_sha256=self._patch_sha256(cwd),
+                    patch_sha256=declared,
                 )
                 raise
             self.ledger.finish_codex(
                 role,
                 sequence,
                 passed=True,
-                patch_sha256=self._patch_sha256(cwd),
+                patch_sha256=self._settled_patch_sha256(cwd),
             )
             response = {
                 "result": {

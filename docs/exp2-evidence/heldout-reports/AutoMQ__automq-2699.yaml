@@ -1,0 +1,49 @@
+schema: autobugfix-swe-development-run-v1
+development_only: true
+protocol_digest: a9b1c2e5007517c7474718b57a10b038e80aa077fd28b8642693e10254c523e8
+codex_runtime:
+  model: gpt-5.4-mini
+  reasoning_effort: medium
+  service_tier: null
+  sdk_package: openai-codex
+  sdk_version: 0.144.4
+  cli_package: openai-codex-cli-bin
+  cli_version: 0.144.4
+  max_attempts: 2
+  timeout_seconds: 900
+subject_runtime_contract_digest: f37d4634683ace600361b2024b51b32dbaa5757421793e1ab93d409ad02a921f
+subject_runtime_digest: 0f3fa7cd327f97c8101afa1262a4cd050a9810b12ddb10e8323b9814227cfeab
+evaluator_runtime_id: sha256:7ee8b97e874ec7ff361aee9c391c356db51892f55d333f0da09c2627d4c008a9
+memory_digest: 602e35a92eec4bc0a2ec6ae113f07bfc6933322fb69fe8dee416e5a67217e2a2
+role_config_digest: a0106e44dd8420587fa91787f0c0f4e171caf758952015b6544769a39d798f1b
+policy_digest: e9f78e2eb77adbac8edb4b7a8c87a4db1154d89da3b821eebb12eddaa6ce1d1d
+adapter: swebench_live
+instance_id: AutoMQ__automq-2699
+visible_case_digest: 11fa0deaae44304d30bff02b1abf4eec168bc75576886048ab575c90aaad53f1
+visible_case_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/development-visible/swebench_live/AutoMQ__automq-2699/11fa0deaae44304d30bff02b1abf4eec168bc75576886048ab575c90aaad53f1.yaml
+executed_subject_sha: b9c86b0cc621a950a4db02041661c238091f6dae
+executed_subject_tree: 1bde5f278e4fa98e9331bffeb0b8424116fe7b33
+submission_digest: 94caf0ad074248514e940e62229c9e5f98bb8d366dfc1737ece709c717c44e47
+official_result_digest: a1bc2d0f3c0041ff9a414f526c9f31f8d04f43bee635241eb5fb3be87a374a14
+official_result_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/official-results/swebench_live/AutoMQ__automq-2699/a1bc2d0f3c0041ff9a414f526c9f31f8d04f43bee635241eb5fb3be87a374a14.yaml
+noninterference_digest: 6ae9817ddc5caa52839675bcf4288d9c30bb3e98516a5debc754b567faee0b70
+noninterference_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/noninterference/swebench_live/AutoMQ__automq-2699/6ae9817ddc5caa52839675bcf4288d9c30bb3e98516a5debc754b567faee0b70.yaml
+execution_receipt:
+  schema: autobugfix-exp2-execution-receipt-v1
+  execution_mode: protected
+  direct_sdk_in_process: false
+  outer_bubblewrap: true
+  broker_command_digest: ceaa9fff49128c2d1d7c8be96710b21b95959a34db6d67b747832752819fa99f
+  broker_result_digest: 3a898ad13108d109ef3fd9fd6e99c3061a1cb02c9881493a6f875db94ba300d0
+  task_worktree_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/development-runs/swebench_live/AutoMQ__automq-2699/exp2-holdout-final-v2-AutoMQ__automq-2699/subject-run/target/worktrees/20260828-swe-eval-dev-e2fed2c7a17031adfc65df3-890a000e
+  workspace_only_preflight_digest: null
+  execution_ledger_digest: f2591a3abfe93e498f0d545385d83311215d651a4842a89c805127b316b8cb8f
+  sdk_call_receipt_digests:
+  - b5e9e2a3002c6bb03b959c68f26f081f1dd20e8e337219c973b38b3fe8589d24
+  - 6ba25ad4090a5563dce72ba235e5ce79829c0a47e5fbb25a1c49afa429f23171
+  record_digest: ce2c371d6bfe1eb5d200daa67033502b1f0a8dfb80ad8c080423c8c72bad0c55
+image_digest: 62bcb6a45c1631ca9ceeb3b678aab5a0312fdc7743551c36ccd02fd3dc48e0bc
+failure_stage: visible_verifier
+resolved: false
+harness_error: ''
+record_digest: 7274ea8bdf1804d8dde917fc2c619ee919c9d9054ea685ec01bd19c307f78374

@@ -1,0 +1,43 @@
+schema: autobugfix-swe-selected-image-manifest-v1
+platform: linux/amd64
+registry_namespace: swebench
+swebench_commit: 726c5461e2ef52d83cf1ea2107870a8bb3328d57
+swebench_tree: f178530b37202c549b1b2b3300db2da90da648db
+images:
+  - instance_id: pallets__flask-5014
+    source_ref: swebench/sweb.eval.x86_64.pallets_1776_flask-5014@sha256:eaf597005c159361cb8ee26018fb3741b320f331065f0c95726d83ccf2f1fba4
+    manifest_digest: eaf597005c159361cb8ee26018fb3741b320f331065f0c95726d83ccf2f1fba4
+  - instance_id: pylint-dev__pylint-4970
+    source_ref: swebench/sweb.eval.x86_64.pylint-dev_1776_pylint-4970@sha256:0bcc3ef7203790a1f612af4fb9241041bd5bc2d90dcbb168a30e26dde49858dd
+    manifest_digest: 0bcc3ef7203790a1f612af4fb9241041bd5bc2d90dcbb168a30e26dde49858dd
+  - instance_id: astropy__astropy-13398
+    source_ref: swebench/sweb.eval.x86_64.astropy_1776_astropy-13398@sha256:4d7e922ae3b796147f85b37861f6dec5463001a964bd941ed6933109245fe69f
+    manifest_digest: 4d7e922ae3b796147f85b37861f6dec5463001a964bd941ed6933109245fe69f
+  - instance_id: django__django-10097
+    source_ref: swebench/sweb.eval.x86_64.django_1776_django-10097@sha256:1070029012296376173a209d7b4017bac70e27d5ab631b7fccfe3045cfa31c90
+    manifest_digest: 1070029012296376173a209d7b4017bac70e27d5ab631b7fccfe3045cfa31c90
+  - instance_id: matplotlib__matplotlib-24627
+    source_ref: swebench/sweb.eval.x86_64.matplotlib_1776_matplotlib-24627@sha256:526b4c5c1b786ecf4dbfecb7c3ef847a0749d2de721932871abb46d8ca3dd6d8
+    manifest_digest: 526b4c5c1b786ecf4dbfecb7c3ef847a0749d2de721932871abb46d8ca3dd6d8
+  - instance_id: pydata__xarray-2905
+    source_ref: swebench/sweb.eval.x86_64.pydata_1776_xarray-2905@sha256:1fb7fb411d115d06cf2f34fde3b6f8a33427f2d6f36e1ab8df3b1b977195bd61
+    manifest_digest: 1fb7fb411d115d06cf2f34fde3b6f8a33427f2d6f36e1ab8df3b1b977195bd61
+  - instance_id: sympy__sympy-13091
+    source_ref: swebench/sweb.eval.x86_64.sympy_1776_sympy-13091@sha256:471f39923e1ace96073b57b4585fcb180fe825176ee42589c46d50ccca9ed9a6
+    manifest_digest: 471f39923e1ace96073b57b4585fcb180fe825176ee42589c46d50ccca9ed9a6
+  - instance_id: mwaskom__seaborn-3187
+    source_ref: swebench/sweb.eval.x86_64.mwaskom_1776_seaborn-3187@sha256:6c0cd3296b90a84889796531ab87a0ed8779015b2bbd2e8d99adbdef95397b03
+    manifest_digest: 6c0cd3296b90a84889796531ab87a0ed8779015b2bbd2e8d99adbdef95397b03
+  - instance_id: psf__requests-6028
+    source_ref: swebench/sweb.eval.x86_64.psf_1776_requests-6028@sha256:515bfc8e8e0ab4ab176c69960958abde78797ee9de59192d305f6de92bed9e30
+    manifest_digest: 515bfc8e8e0ab4ab176c69960958abde78797ee9de59192d305f6de92bed9e30
+  - instance_id: pytest-dev__pytest-10051
+    source_ref: swebench/sweb.eval.x86_64.pytest-dev_1776_pytest-10051@sha256:e44f9e532acb710b07626a0b927addd9ee24adf5abb554e25af149a7ab19cf9f
+    manifest_digest: e44f9e532acb710b07626a0b927addd9ee24adf5abb554e25af149a7ab19cf9f
+  - instance_id: scikit-learn__scikit-learn-13439
+    source_ref: swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-13439@sha256:125ac4b2346631615a0846fa8b077fc1e15dc3da12034f28aafd26f7896f26ac
+    manifest_digest: 125ac4b2346631615a0846fa8b077fc1e15dc3da12034f28aafd26f7896f26ac
+  - instance_id: sphinx-doc__sphinx-9229
+    source_ref: swebench/sweb.eval.x86_64.sphinx-doc_1776_sphinx-9229@sha256:ed5fc083440abc3c9219eec2102bc4977540194d914db119f9e4d758ef8ff24a
+    manifest_digest: ed5fc083440abc3c9219eec2102bc4977540194d914db119f9e4d758ef8ff24a
+record_digest: b163a8ddf3413054cea7138f4f55429386b4054690a606cac4974916844cbbb4

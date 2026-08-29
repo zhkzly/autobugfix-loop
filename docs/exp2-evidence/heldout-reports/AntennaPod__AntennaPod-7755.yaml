@@ -1,0 +1,49 @@
+schema: autobugfix-swe-development-run-v1
+development_only: true
+protocol_digest: a9b1c2e5007517c7474718b57a10b038e80aa077fd28b8642693e10254c523e8
+codex_runtime:
+  model: gpt-5.4-mini
+  reasoning_effort: medium
+  service_tier: null
+  sdk_package: openai-codex
+  sdk_version: 0.144.4
+  cli_package: openai-codex-cli-bin
+  cli_version: 0.144.4
+  max_attempts: 2
+  timeout_seconds: 900
+subject_runtime_contract_digest: f37d4634683ace600361b2024b51b32dbaa5757421793e1ab93d409ad02a921f
+subject_runtime_digest: 0f3fa7cd327f97c8101afa1262a4cd050a9810b12ddb10e8323b9814227cfeab
+evaluator_runtime_id: sha256:7ee8b97e874ec7ff361aee9c391c356db51892f55d333f0da09c2627d4c008a9
+memory_digest: 602e35a92eec4bc0a2ec6ae113f07bfc6933322fb69fe8dee416e5a67217e2a2
+role_config_digest: 06c23cbf56ac083f0b31e39c2a9ec1c1c56e7f22731e32bcdb20f95eb1430d17
+policy_digest: e9f78e2eb77adbac8edb4b7a8c87a4db1154d89da3b821eebb12eddaa6ce1d1d
+adapter: swebench_live
+instance_id: AntennaPod__AntennaPod-7755
+visible_case_digest: 6ee8e0884b461640ade0b7a1d9557866fe01a89a04a00322ed94de178f9223aa
+visible_case_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/development-visible/swebench_live/AntennaPod__AntennaPod-7755/6ee8e0884b461640ade0b7a1d9557866fe01a89a04a00322ed94de178f9223aa.yaml
+executed_subject_sha: b9c86b0cc621a950a4db02041661c238091f6dae
+executed_subject_tree: 1bde5f278e4fa98e9331bffeb0b8424116fe7b33
+submission_digest: dfae6e9b755a7ec7ee163a1e12f8de694258d65a214ebf514a8a61cb77535192
+official_result_digest: 55f33087ff0126bf6c8e44833a5142c33afde4c7e81f6ae1dede6acb969bd994
+official_result_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/official-results/swebench_live/AntennaPod__AntennaPod-7755/55f33087ff0126bf6c8e44833a5142c33afde4c7e81f6ae1dede6acb969bd994.yaml
+noninterference_digest: f0fc8a7520d9c9d653068808a6ee6316e34a1af31481d228046f776cdd87f787
+noninterference_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/noninterference/swebench_live/AntennaPod__AntennaPod-7755/f0fc8a7520d9c9d653068808a6ee6316e34a1af31481d228046f776cdd87f787.yaml
+execution_receipt:
+  schema: autobugfix-exp2-execution-receipt-v1
+  execution_mode: protected
+  direct_sdk_in_process: false
+  outer_bubblewrap: true
+  broker_command_digest: 46bad0fb4545184d31b42692115cb78682d6e5239e29c5c600563f3c47dec407
+  broker_result_digest: 32b2450b358db3939dd739e94d0efa3a8d0d2bd02cd5bea801853925f6134404
+  task_worktree_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/development-runs/swebench_live/AntennaPod__AntennaPod-7755/exp2-holdout-final-v2-AntennaPod__AntennaPod-7755/subject-run/target/worktrees/20260828-swe-eval-dev-160cf910a1cce6c8cfc915d-eb989a5f
+  workspace_only_preflight_digest: null
+  execution_ledger_digest: 7018d32a11b6ce3d79d4fb57cc4c99f553892653e347db6a276887e7190e078f
+  sdk_call_receipt_digests:
+  - d9b9f4515cc3be589f499e41f660b9ea50366721879b39bb61cd38366594b999
+  - 41c4d984546c7fc0365ac7d549bb0811cbf5b26da28914703752e1241eb3766e
+  record_digest: 62255c67bc41d01f5499f45e7de4016abb382217a5ffe434f5934600123a46bd
+image_digest: 3f3dd8c127a81bfd6561b97f15f4b2952da9e84e7b7c03184536e197edb79e72
+failure_stage: visible_verifier
+resolved: false
+harness_error: ''
+record_digest: fe10ddc415d6aa453741b1ccbab3c3ec58602fe4a414851f7ef5df5e3ae20ddc

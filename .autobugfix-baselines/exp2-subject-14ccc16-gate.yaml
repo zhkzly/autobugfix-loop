@@ -1,0 +1,40 @@
+name: exp2-subject-14ccc16-gate
+base_sha: 14ccc16eafaaa395289981a4c3ba5889c4dcb0b9
+profile: exp2-subject-gate
+profile_contract:
+  commands:
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - -m
+    - pytest
+    - -q
+    - tests/test_locks.py
+    - tests/test_prompts.py
+    - tests/test_dataset.py
+    - tests/test_projection.py
+    name: subject-unit-gate
+  timeout_seconds: 900
+profile_digest: 8e0e195344f3bba72b438d9342479144bd9fa653627408daea2f34ced4f4c569
+profile_values: {}
+input_digest: fffe0e727bae26345d85fa78ba0410f254a713b5355bb679f530f0137aff13c9
+metrics:
+  artifact_completeness: 1.0
+  pass_rate: 1.0
+  runtime_seconds: 0.7223170789657161
+receipt_digest: c509e8d5e6756cd822f5b1de47c5ad86ca6658a5394a1362b983e16421a04dac
+commands:
+- name: subject-unit-gate
+  exit_code: 0
+  passed: true
+  timed_out: false
+  duration_seconds: 0.7223170789657161
+  stdout_sha256: 1fe0a5d05103e725adb9b8255b68b09f479d93a75d94d241e9f791b04b716537
+  stderr_sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+notes: v3r2 frozen subject unit baseline (14ccc16, includes the binary-diff fix) for
+  line-bound candidate requests
+created_at: '2026-08-27T15:12:31Z'
+baseline_digest: 719a517a00987e3fca7b6987e5a65ec11d602f3170c46c60d99075a1523e1f17

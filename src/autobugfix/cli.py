@@ -19,7 +19,21 @@ from autobugfix.eval.benchmarks.exp2_coordinator import (
     Exp2Coordinator,
     Exp2CoordinatorError,
 )
-from autobugfix.eval.benchmarks.exp2_records import Exp2StudyPlan
+from autobugfix.eval.benchmarks.exp2_resume import (
+    EXP2_WRITER_SKILL_PATH,
+    Exp2AttributionHypothesis,
+    Exp2ResumeCoordinator,
+    Exp2ResumeError,
+    Exp2ResumeProtocol,
+    Exp2ResumeStudyPlan,
+)
+from autobugfix.eval.benchmarks.exp2_runtime import (
+    Exp2EvalAuthority,
+    build_exp2_apparatus_receipt,
+    build_exp2_resume_protocol,
+    build_exp2_study_plan,
+    run_exp2_source_check,
+)
 from autobugfix.eval.benchmarks.service import EvalBenchmarkService
 from autobugfix.eval.diagnosis import diagnose_run
 from autobugfix.eval.improvements import (
@@ -311,94 +325,313 @@ def command_eval(args: argparse.Namespace) -> int:
             if getattr(args, "state_root", None)
             else default_state_root
         )
-        coordinator = Exp2Coordinator(state_root, args.study_id)
-        if args.exp2_action == "init":
-            plan = Exp2StudyPlan(
+        if state_root != default_state_root or (
+            Path(args.state_root).is_symlink()
+            if getattr(args, "state_root", None)
+            else False
+        ):
+            raise Exp2ResumeError(
+                "Exp2 state root must be the configured trusted Eval study root"
+            )
+        if args.exp2_action == "build-protocol-v2":
+            artifact_root = (
+                Path(args.artifact_root).resolve()
+                if args.artifact_root
+                else (
+                    config.eval.benchmarks.trusted_case_root
+                    / "exp2-protocol-builds"
+                    / args.study_id
+                ).resolve()
+            )
+            protocol = build_exp2_resume_protocol(
+                Path.cwd(),
+                protocol_id=args.protocol_id,
+                swe_protocol_path=Path(args.swe_protocol),
+                empty_memory_fixture_path=Path(args.empty_memory_fixture),
+                execution_allowlist=tuple(args.execution_allowlist),
+                artifact_root=artifact_root,
+                evaluation_mode=args.evaluation_mode,
+            )
+            output = Path(args.out).resolve()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if output.exists() or output.is_symlink():
+                raise Exp2ResumeError(
+                    "Exp2 v2 protocol output already exists"
+                )
+            output.write_text(
+                yaml.safe_dump(protocol.to_dict(), sort_keys=False),
+                encoding="utf-8",
+            )
+            _print_yaml(
+                {
+                    "protocol_path": str(output),
+                    "protocol_digest": protocol.record_digest,
+                    "qualification_status": protocol.qualification_status,
+                    "image_count": len(protocol.oci_images),
+                }
+            )
+            return 0
+        if args.exp2_action == "build-plan-v2":
+            memory_root = Path(args.memory_root).expanduser()
+            output = Path(args.out).resolve()
+            resolved_memory_root = memory_root.resolve()
+            if output == resolved_memory_root or output.is_relative_to(
+                resolved_memory_root
+            ):
+                raise Exp2ResumeError(
+                    "Exp2 plan output must not mutate the empty Memory root"
+                )
+            plan = build_exp2_study_plan(
+                Path.cwd(),
                 study_id=args.study_id,
-                calibration_protocol_path=str(Path(args.calibration_protocol).resolve()),
-                public_manifest_path=str(Path(args.manifest).resolve()),
-                h0_binding_path=str(Path(args.h0_binding).resolve()),
-                candidate_binding_path=str(Path(args.candidate_binding).resolve()),
-                calibration_case_ids=tuple(args.calibration_case),
-                public_case_ids=tuple(args.public_case),
-                execution_mode=args.execution_mode,
-                disposable_root=(
-                    str(Path(args.disposable_root).resolve())
-                    if args.disposable_root
+                study_kind=args.study_kind,
+                protocol_path=Path(args.protocol_v2),
+                swe_protocol_path=Path(args.swe_protocol),
+                apparatus_receipt_path=Path(args.apparatus_receipt),
+                memory_fixture_spec_path=Path(args.empty_memory_fixture),
+                memory_root=memory_root,
+                disposable_root=Path(args.disposable_root),
+                guard_root=Path(args.guard_root),
+                public_manifest_path=(
+                    Path(args.public_manifest)
+                    if args.public_manifest
                     else None
                 ),
-                cohort_audit_path=(
-                    str(Path(args.cohort_audit).resolve())
-                    if args.cohort_audit
-                    else None
+                h0_binding_path=(
+                    Path(args.h0_binding) if args.h0_binding else None
                 ),
-                policy_path=(
-                    str(Path(args.policy).resolve()) if args.policy else None
-                ),
-                apparatus_receipt_path=(
-                    str(Path(args.apparatus_receipt).resolve())
-                    if args.apparatus_receipt
-                    else None
-                ),
-                empty_memory_fixture_path=(
-                    str(Path(args.empty_memory_fixture).resolve())
-                    if args.empty_memory_fixture
+                calibration_terminal_receipt_path=(
+                    Path(args.calibration_terminal_receipt)
+                    if args.calibration_terminal_receipt
                     else None
                 ),
             )
-            _print_yaml(coordinator.initialize(plan))
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if output.exists() or output.is_symlink():
+                raise Exp2ResumeError("Exp2 v2 plan output already exists")
+            output.write_text(
+                yaml.safe_dump(plan.to_dict(), sort_keys=False),
+                encoding="utf-8",
+            )
+            _print_yaml(
+                {
+                    "plan_path": str(output),
+                    "plan_digest": plan.record_digest,
+                    "study_kind": plan.study_kind,
+                }
+            )
             return 0
+        if args.exp2_action == "build-apparatus-receipt-v2":
+            receipt = build_exp2_apparatus_receipt(
+                Path.cwd(),
+                protocol_path=Path(args.protocol_v2),
+                swe_protocol_path=Path(args.swe_protocol),
+                check_artifacts=tuple(Path(item) for item in args.check_artifact),
+            )
+            output = Path(args.out).resolve()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if output.exists() or output.is_symlink():
+                raise Exp2ResumeError(
+                    "Exp2 apparatus receipt output already exists"
+                )
+            output.write_text(
+                yaml.safe_dump(receipt, sort_keys=False),
+                encoding="utf-8",
+            )
+            _print_yaml(
+                {
+                    "apparatus_receipt_path": str(output),
+                    "apparatus_receipt_digest": receipt["record_digest"],
+                    "apparatus_sha": receipt["apparatus_sha"],
+                }
+            )
+            return 0
+        if args.exp2_action == "export-h0-binding":
+            exported = OperatorGovernanceService(
+                Path.cwd()
+            ).export_exp2_h0_binding(args.operator_study_id)
+            _print_yaml(exported)
+            return 0
+        if args.exp2_action == "source-check-v2":
+            receipt = run_exp2_source_check(
+                Path.cwd(),
+                name=args.name,
+                argv=tuple(args.command),
+                artifact_root=Path(args.artifact_root),
+                timeout_seconds=args.timeout_seconds,
+            )
+            output = Path(args.out).resolve()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if output.exists() or output.is_symlink():
+                raise Exp2ResumeError(
+                    "Exp2 source-check receipt output already exists"
+                )
+            output.write_text(
+                yaml.safe_dump(receipt, sort_keys=False),
+                encoding="utf-8",
+            )
+            _print_yaml(
+                {
+                    "receipt_path": str(output),
+                    "receipt_digest": receipt["record_digest"],
+                    "passed": receipt["passed"],
+                }
+            )
+            return 0 if receipt["passed"] else 1
+        if args.exp2_action == "prepare-manifest-v2":
+            _print_yaml(
+                EvalBenchmarkService(Path.cwd()).prepare_exp2_resume_manifest(
+                    Path(args.swe_protocol)
+                )
+            )
+            return 0
+        if args.exp2_action == "init":
+            if not args.study_kind or not args.plan_v2 or not args.protocol_v2:
+                raise Exp2ResumeError(
+                    "new Exp2 studies require --study-kind, --plan-v2, and --protocol-v2; v1 initialization is audit-only"
+                )
+            plan = Exp2ResumeStudyPlan.from_dict(
+                _read_yaml_mapping(args.plan_v2, "Exp2 v2 study plan")
+            )
+            protocol = Exp2ResumeProtocol.from_dict(
+                _read_yaml_mapping(args.protocol_v2, "Exp2 v2 protocol")
+            )
+            if plan.study_kind != args.study_kind:
+                raise Exp2ResumeError(
+                    "Exp2 --study-kind differs from the v2 plan"
+                )
+            coordinator = Exp2ResumeCoordinator(state_root, args.study_id)
+            _print_yaml(coordinator.initialize(plan, protocol))
+            return 0
+
+        plan_source = state_root / "plan.yaml"
+        raw_plan = _read_yaml_mapping(plan_source, "Exp2 persisted study plan")
+        is_v2 = raw_plan.get("schema") == "autobugfix-exp2-resume-study-plan-v2"
+        if is_v2:
+            coordinator_v2 = Exp2ResumeCoordinator(state_root, args.study_id)
+            if args.exp2_action == "resume":
+                authority = Exp2EvalAuthority(Path.cwd(), coordinator_v2)
+                _print_yaml(authority.resume(execute=args.execute))
+                return 0
+            if args.exp2_action == "record-attribution":
+                draft = _read_yaml_mapping(
+                    args.record,
+                    "Exp2 attribution draft",
+                )
+                operator = OperatorGovernanceService(Path.cwd())
+                exported = operator.export_exp2_attribution(
+                    exp2_study_id=args.study_id,
+                    operator_study_id=args.operator_study_id,
+                    evidence_id=args.evidence_id,
+                    expected_mechanism=str(
+                        draft.get("expected_mechanism") or ""
+                    ),
+                    execution_scope=tuple(
+                        str(item)
+                        for item in draft.get("execution_scope") or ()
+                    ),
+                    validation_plan=tuple(
+                        str(item)
+                        for item in draft.get("validation_plan") or ()
+                    ),
+                    hypothesis=str(draft.get("hypothesis") or ""),
+                )
+                attribution = {
+                    key: value
+                    for key, value in exported.items()
+                    if key != "artifact_path"
+                }
+                _print_yaml(
+                    {
+                        "operator_artifact_path": exported["artifact_path"],
+                        "status": coordinator_v2.record_attribution(
+                            Exp2AttributionHypothesis.from_dict(attribution),
+                            operator_service=operator,
+                        ),
+                    }
+                )
+                return 0
+            if args.exp2_action == "register-h0":
+                operator = OperatorGovernanceService(Path.cwd())
+                _print_yaml(
+                    Exp2EvalAuthority(
+                        Path.cwd(), coordinator_v2
+                    ).register_operator_h0(
+                        args.operator_study_id,
+                        operator_service=operator,
+                    )
+                )
+                return 0
+            if args.exp2_action == "export-candidate":
+                context = coordinator_v2.candidate_handoff_context()
+                operator = OperatorGovernanceService(Path.cwd())
+                exported = operator.export_exp2_candidate_transition(
+                    operator_study_id=args.operator_study_id,
+                    request_id=args.request_id,
+                    attribution_digest=str(context["attribution_digest"]),
+                )
+                transition = {
+                    key: value
+                    for key, value in exported.items()
+                    if key != "artifact_path"
+                }
+                _print_yaml(
+                    {
+                        "operator_artifact_path": exported["artifact_path"],
+                        "status": coordinator_v2.record_candidate_transition(
+                            transition,
+                            operator_service=operator,
+                        ),
+                    }
+                )
+                return 0
+            if args.exp2_action == "rollback":
+                transition = coordinator_v2.load_candidate_transition()
+                if transition is None:
+                    raise Exp2ResumeError(
+                        "Exp2 study has no locked candidate to roll back"
+                    )
+                authorization = coordinator_v2.rollback_authorization()
+                operator = OperatorGovernanceService(Path.cwd())
+                exported = operator.export_exp2_rollback_receipt(
+                    transition.to_dict(),
+                    rollback_authorization_path=Path(
+                        authorization["authorization_path"]
+                    ),
+                    reason=args.reason,
+                    push_remote=args.push_remote,
+                )
+                rollback = {
+                    key: value
+                    for key, value in exported.items()
+                    if key != "artifact_path"
+                }
+                _print_yaml(
+                    {
+                        "operator_artifact_path": exported["artifact_path"],
+                        "status": coordinator_v2.record_rollback(
+                            rollback,
+                            operator_service=operator,
+                        ),
+                    }
+                )
+                return 0
+            if args.exp2_action == "report":
+                _print_yaml(coordinator_v2.publish_report())
+                return 0
+            raise Exp2ResumeError(
+                f"Exp2 v1 action {args.exp2_action!r} is unavailable for a v2 study"
+            )
+
+        coordinator = Exp2Coordinator(state_root, args.study_id)
         if args.exp2_action == "resume":
+            if args.execute:
+                raise Exp2CoordinatorError(
+                    "Exp2 v1 execution is audit-only; initialize a v2 study"
+                )
             if not args.execute:
                 _print_yaml(coordinator.resume())
                 return 0
-            plan = coordinator.load_plan()
-            service = EvalBenchmarkService(Path.cwd())
-            run_root = (
-                config.eval.benchmarks.trusted_case_root
-                / "exp2"
-                / args.study_id
-                / "runs"
-            ).resolve()
-
-            def execute_stage(stage, cases, binding, arm):
-                reports = []
-                expected_kinds = {"BASELINE"} if arm == "H0" else {"CANDIDATE"}
-                for index, case_id in enumerate(cases, start=1):
-                    run_id = f"{stage.lower()}-{index:02d}-{case_id}"
-                    disposable_root = (
-                        Path(plan.disposable_root)
-                        if plan.disposable_root
-                        else None
-                    )
-                    if stage == "H0_CALIBRATION":
-                        reports.append(
-                            service.run_swe_exp2_calibration_case(
-                                Path(plan.calibration_protocol_path),
-                                adapter="swebench_verified",
-                                instance_id=case_id,
-                                run_id=run_id,
-                                execution_mode=plan.execution_mode,
-                                disposable_root=disposable_root,
-                            )
-                        )
-                    else:
-                        reports.append(
-                            service.run_swe_exp2_case(
-                                Path(plan.public_manifest_path),
-                                case_selector=case_id,
-                                study_binding_path=binding,
-                                out_root=run_root,
-                                run_id=run_id,
-                                expected_binding_kinds=expected_kinds,
-                                execution_mode=plan.execution_mode,
-                                disposable_root=disposable_root,
-                            )
-                        )
-                return reports
-
-            _print_yaml(coordinator.resume(execute_stage))
-            return 0
         if args.exp2_action == "budget-plan":
             _print_yaml(coordinator.budget_allocation(args.wave))
             return 0
@@ -842,6 +1075,8 @@ def command_operator(args: argparse.Namespace) -> int:
                 primary_model=args.model,
                 target_checkpoint_name=args.target_checkpoint,
                 memory_root=args.memory_root,
+                empty_memory_fixture=args.empty_memory_fixture,
+                guard_root=args.guard_root,
             )
             _print_yaml(service.study_status(study.study_id)["study"])
         elif args.study_action == "show":
@@ -950,22 +1185,29 @@ def command_operator(args: argparse.Namespace) -> int:
             )
             _print_yaml(request.to_dict())
         elif args.budget_action == "approve":
-            if not sys.stdin.isatty():
+            if args.approval_kind == "delegated_agent":
+                if not args.delegation_note:
+                    raise RuntimeError(
+                        "delegated budget approval requires --delegation-note recording the standing user instruction"
+                    )
+            elif not sys.stdin.isatty():
                 raise RuntimeError(
                     "budget approval requires an interactive human terminal"
                 )
-            expected = f"APPROVE {args.confirm_request_digest}"
-            entered = input(
-                "Type the exact budget approval phrase "
-                f"'{expected}' to authorize model spend: "
-            )
-            if entered.strip() != expected:
-                raise RuntimeError("budget approval confirmation did not match")
+            if args.approval_kind != "delegated_agent":
+                expected = f"APPROVE {args.confirm_request_digest}"
+                entered = input(
+                    "Type the exact budget approval phrase "
+                    f"'{expected}' to authorize model spend: "
+                )
+                if entered.strip() != expected:
+                    raise RuntimeError("budget approval confirmation did not match")
             grant = service.approve_budget_grant(
                 args.budget_request_id,
                 approver=args.approver,
                 confirm_request_digest=args.confirm_request_digest,
                 approval_kind=args.approval_kind,
+                delegation_note=args.delegation_note,
             )
             _print_yaml(grant.to_dict())
         elif args.budget_action == "show":
@@ -1168,6 +1410,7 @@ def command_operator(args: argparse.Namespace) -> int:
                 profile=args.profile,
                 values=_parse_values(args.value or []),
                 notes=args.notes or "",
+                base_ref=args.base,
             )
             _print_yaml(report)
         elif args.baseline_action == "compare":
@@ -1335,22 +1578,100 @@ def build_parser() -> argparse.ArgumentParser:
     exp2_sub = exp2.add_subparsers(dest="exp2_action", required=True)
     exp2_init = exp2_sub.add_parser("init")
     exp2_init.add_argument("--study-id", required=True)
-    exp2_init.add_argument("--calibration-protocol", required=True)
-    exp2_init.add_argument("--manifest", required=True)
-    exp2_init.add_argument("--h0-binding", required=True)
-    exp2_init.add_argument("--candidate-binding", required=True)
-    exp2_init.add_argument("--calibration-case", action="append", required=True)
-    exp2_init.add_argument("--public-case", action="append", required=True)
+    exp2_init.add_argument(
+        "--study-kind", choices=["calibration", "resume_pilot"]
+    )
+    exp2_init.add_argument("--plan-v2")
+    exp2_init.add_argument("--protocol-v2")
+    exp2_init.add_argument("--calibration-protocol")
+    exp2_init.add_argument("--manifest")
+    exp2_init.add_argument("--h0-binding")
+    exp2_init.add_argument("--candidate-binding")
+    exp2_init.add_argument("--calibration-case", action="append")
+    exp2_init.add_argument("--public-case", action="append")
     exp2_init.add_argument(
         "--execution-mode", choices=["protected", "workspace_only"], default="protected"
     )
     exp2_init.add_argument("--disposable-root")
-    exp2_init.add_argument("--cohort-audit", required=True)
-    exp2_init.add_argument("--policy", required=True)
-    exp2_init.add_argument("--apparatus-receipt", required=True)
-    exp2_init.add_argument("--empty-memory-fixture", required=True)
+    exp2_init.add_argument("--cohort-audit")
+    exp2_init.add_argument("--policy")
+    exp2_init.add_argument("--apparatus-receipt")
+    exp2_init.add_argument("--empty-memory-fixture")
     exp2_init.add_argument("--state-root")
     exp2_init.set_defaults(func=command_eval)
+    exp2_build_protocol = exp2_sub.add_parser("build-protocol-v2")
+    exp2_build_protocol.add_argument("--study-id", required=True)
+    exp2_build_protocol.add_argument(
+        "--protocol-id", default="exp2-resume-mvp-v2"
+    )
+    exp2_build_protocol.add_argument("--swe-protocol", required=True)
+    exp2_build_protocol.add_argument(
+        "--empty-memory-fixture", required=True
+    )
+    exp2_build_protocol.add_argument(
+        "--execution-allowlist",
+        action="append",
+        choices=[EXP2_WRITER_SKILL_PATH],
+        required=True,
+    )
+    exp2_build_protocol.add_argument(
+        "--evaluation-mode",
+        choices=["legacy_pilot", "iterative_full"],
+        default="iterative_full",
+    )
+    exp2_build_protocol.add_argument("--artifact-root")
+    exp2_build_protocol.add_argument("--out", required=True)
+    exp2_build_protocol.add_argument("--state-root")
+    exp2_build_protocol.set_defaults(func=command_eval)
+    exp2_build_plan = exp2_sub.add_parser("build-plan-v2")
+    exp2_build_plan.add_argument("--study-id", required=True)
+    exp2_build_plan.add_argument(
+        "--study-kind", choices=["calibration", "resume_pilot"], required=True
+    )
+    exp2_build_plan.add_argument("--protocol-v2", required=True)
+    exp2_build_plan.add_argument("--swe-protocol", required=True)
+    exp2_build_plan.add_argument("--apparatus-receipt", required=True)
+    exp2_build_plan.add_argument("--empty-memory-fixture", required=True)
+    exp2_build_plan.add_argument("--memory-root", required=True)
+    exp2_build_plan.add_argument("--disposable-root", required=True)
+    exp2_build_plan.add_argument("--guard-root", required=True)
+    exp2_build_plan.add_argument("--public-manifest")
+    exp2_build_plan.add_argument("--h0-binding")
+    exp2_build_plan.add_argument("--calibration-terminal-receipt")
+    exp2_build_plan.add_argument("--out", required=True)
+    exp2_build_plan.add_argument("--state-root")
+    exp2_build_plan.set_defaults(func=command_eval)
+    exp2_build_apparatus = exp2_sub.add_parser(
+        "build-apparatus-receipt-v2"
+    )
+    exp2_build_apparatus.add_argument("--study-id", required=True)
+    exp2_build_apparatus.add_argument("--protocol-v2", required=True)
+    exp2_build_apparatus.add_argument("--swe-protocol", required=True)
+    exp2_build_apparatus.add_argument(
+        "--check-artifact", action="append", required=True
+    )
+    exp2_build_apparatus.add_argument("--out", required=True)
+    exp2_build_apparatus.add_argument("--state-root")
+    exp2_build_apparatus.set_defaults(func=command_eval)
+    exp2_export_h0 = exp2_sub.add_parser("export-h0-binding")
+    exp2_export_h0.add_argument("--study-id", required=True)
+    exp2_export_h0.add_argument("--operator-study-id", required=True)
+    exp2_export_h0.add_argument("--state-root")
+    exp2_export_h0.set_defaults(func=command_eval)
+    exp2_source_check = exp2_sub.add_parser("source-check-v2")
+    exp2_source_check.add_argument("--study-id", required=True)
+    exp2_source_check.add_argument("--name", required=True)
+    exp2_source_check.add_argument("--artifact-root", required=True)
+    exp2_source_check.add_argument("--out", required=True)
+    exp2_source_check.add_argument("--timeout-seconds", type=int, default=7200)
+    exp2_source_check.add_argument("command", nargs=argparse.REMAINDER)
+    exp2_source_check.add_argument("--state-root")
+    exp2_source_check.set_defaults(func=command_eval)
+    exp2_prepare_manifest = exp2_sub.add_parser("prepare-manifest-v2")
+    exp2_prepare_manifest.add_argument("--study-id", required=True)
+    exp2_prepare_manifest.add_argument("--swe-protocol", required=True)
+    exp2_prepare_manifest.add_argument("--state-root")
+    exp2_prepare_manifest.set_defaults(func=command_eval)
     exp2_resume = exp2_sub.add_parser("resume")
     exp2_resume.add_argument("--study-id", required=True)
     exp2_resume.add_argument("--state-root")
@@ -1367,9 +1688,28 @@ def build_parser() -> argparse.ArgumentParser:
     exp2_budget.set_defaults(func=command_eval)
     exp2_attribution = exp2_sub.add_parser("record-attribution")
     exp2_attribution.add_argument("--study-id", required=True)
+    exp2_attribution.add_argument("--operator-study-id", required=True)
+    exp2_attribution.add_argument("--evidence-id", required=True)
     exp2_attribution.add_argument("--record", required=True)
     exp2_attribution.add_argument("--state-root")
     exp2_attribution.set_defaults(func=command_eval)
+    exp2_register_h0 = exp2_sub.add_parser("register-h0")
+    exp2_register_h0.add_argument("--study-id", required=True)
+    exp2_register_h0.add_argument("--operator-study-id", required=True)
+    exp2_register_h0.add_argument("--state-root")
+    exp2_register_h0.set_defaults(func=command_eval)
+    exp2_export_candidate = exp2_sub.add_parser("export-candidate")
+    exp2_export_candidate.add_argument("--study-id", required=True)
+    exp2_export_candidate.add_argument("--operator-study-id", required=True)
+    exp2_export_candidate.add_argument("--request-id", required=True)
+    exp2_export_candidate.add_argument("--state-root")
+    exp2_export_candidate.set_defaults(func=command_eval)
+    exp2_rollback = exp2_sub.add_parser("rollback")
+    exp2_rollback.add_argument("--study-id", required=True)
+    exp2_rollback.add_argument("--reason", required=True)
+    exp2_rollback.add_argument("--push-remote", action="store_true")
+    exp2_rollback.add_argument("--state-root")
+    exp2_rollback.set_defaults(func=command_eval)
     exp2_sealed_aggregate = exp2_sub.add_parser("record-sealed-aggregate")
     exp2_sealed_aggregate.add_argument("--study-id", required=True)
     exp2_sealed_aggregate.add_argument("--record", required=True)
@@ -1652,6 +1992,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="H_bug",
     )
     study_create.add_argument("--memory-root")
+    study_create.add_argument(
+        "--empty-memory-fixture", action="store_true"
+    )
+    study_create.add_argument("--guard-root")
     study_create.set_defaults(func=command_operator)
     study_show = study_sub.add_parser("show")
     governance_options(study_show)
@@ -1744,8 +2088,12 @@ def build_parser() -> argparse.ArgumentParser:
     budget_approve.add_argument("--confirm-request-digest", required=True)
     budget_approve.add_argument(
         "--approval-kind",
-        choices=["interactive"],
+        choices=["interactive", "delegated_agent"],
         default="interactive",
+    )
+    budget_approve.add_argument(
+        "--delegation-note",
+        help="records the standing user instruction behind a delegated approval",
     )
     budget_approve.set_defaults(func=command_operator)
     budget_show = budget_sub.add_parser("show")
@@ -1981,6 +2329,10 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_record.add_argument("--profile")
     baseline_record.add_argument("--value", action="append", help="Experiment input as key=value")
     baseline_record.add_argument("--notes")
+    baseline_record.add_argument(
+        "--base",
+        help="explicit measurement base ref (defaults to the configured trusted ref)",
+    )
     baseline_record.set_defaults(func=command_operator)
     baseline_compare = baseline_sub.add_parser("compare")
     governance_options(baseline_compare)

@@ -39,7 +39,10 @@ VALID_CHECKPOINT_NAMES: tuple[str, ...] = ("H0", "H_bug", "H_general")
 VALID_BUDGET_WAVES: tuple[int, ...] = (3, 8, 16)
 VALID_USAGE_STATUSES: tuple[str, ...] = ("RESERVED", "COMPLETED", "INDETERMINATE")
 VALID_STUDY_METRIC_KINDS: tuple[str, ...] = ("BASELINE", "CANDIDATE")
-VALID_STUDY_EVIDENCE_KINDS: tuple[str, ...] = ("optimization_case",)
+VALID_STUDY_EVIDENCE_KINDS: tuple[str, ...] = (
+    "optimization_case",
+    "exp2_source_projection",
+)
 
 
 class OperatorModelError(ValueError):
@@ -1395,6 +1398,7 @@ class BudgetGrantRecord:
     case_concurrency: int
     approved_by: str
     approval_kind: str
+    delegation_note: str | None = None
     previous_grant_id: str | None = None
     expires_at: str | None = None
     created_at: str = field(default_factory=utc_now)
@@ -1450,6 +1454,7 @@ class BudgetGrantRecord:
             "case_concurrency": self.case_concurrency,
             "approved_by": self.approved_by,
             "approval_kind": self.approval_kind,
+            "delegation_note": self.delegation_note,
             "previous_grant_id": self.previous_grant_id,
             "expires_at": self.expires_at,
             "created_at": self.created_at,

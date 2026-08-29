@@ -67,7 +67,7 @@ def guard_store(tmp_path: Path) -> SWEGuardStore:
 def qualification(canary: str) -> dict[str, object]:
     return record_with_digest(
         {
-            "schema": "autobugfix-swe-qualification-v4",
+            "schema": "autobugfix-swe-qualification-v5",
             "qualification_contract_digest": PROTOCOL,
             "evaluator_runtime_id": RUNTIME,
             "adapter": "swebench_live",
@@ -679,6 +679,8 @@ def test_prepare_swe_builds_10_plus_6_without_plaintext_holdout(
     protocol = SimpleNamespace(
         protocol_digest=PROTOCOL,
         qualification_contract_digest=PROTOCOL,
+        qualification_repeats=2,
+        verified_image_mode="local-build",
         codex_runtime=TREATMENT,
         optimization_count=10,
         holdout_count=6,
@@ -760,16 +762,49 @@ def test_prepare_swe_builds_10_plus_6_without_plaintext_holdout(
 
     def qualification(instance: SWEInstance) -> dict[str, Any]:
         source_digest = (instance.instance_id.encode().hex()[:64]).ljust(64, "1")
+        image_id = live_runner.image_id(instance, tmp_path)
         return record_with_digest(
             {
-                "schema": "autobugfix-swe-qualification-v4",
+                "schema": "autobugfix-swe-qualification-v5",
                 "qualification_contract_digest": PROTOCOL,
                 "evaluator_runtime_id": RUNTIME,
                 "adapter": instance.adapter,
                 "instance_id": instance.instance_id,
                 "recorded": True,
                 "repository": instance.repository,
-                "image_id": live_runner.image_id(instance, tmp_path),
+                "image_id": image_id,
+                "image_source_mode": (
+                    "guard-private"
+                    if instance.adapter == "swebench_live"
+                    else "local-build"
+                ),
+                "official_attempts": [
+                    {
+                        "attempt": 1,
+                        "record_digest": "1" * 64,
+                        "record_path": "encrypted:gold-1",
+                        "resolved": True,
+                        "harness_error": "",
+                        "image_id": image_id,
+                    },
+                    {
+                        "attempt": 2,
+                        "record_digest": "2" * 64,
+                        "record_path": "encrypted:gold-2",
+                        "resolved": True,
+                        "harness_error": "",
+                        "image_id": image_id,
+                    },
+                ],
+                "null_attempt": {
+                    "record_digest": "3" * 64,
+                    "record_path": "encrypted:null",
+                    "resolved": False,
+                    "harness_error": "",
+                    "image_id": image_id,
+                },
+                "official_result_digest": "2" * 64,
+                "official_result_path": "encrypted:gold-2",
                 "source_path": str(tmp_path / "source" / instance.instance_id),
                 "source_tree": "b" * 40,
                 "source_digest": source_digest,

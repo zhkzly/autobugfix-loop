@@ -1,6 +1,6 @@
 schema_version: 1
 treatment_id: swe-raw-codex-sdk-one-turn
-source_protocol_digest: f430c7dcedf8b14c67d6db931c3955cac572932419b56661ba12951776371096
+source_protocol_digest: bc16183a2f04d25967d6b5bfc1dea5c5ec0fbc5c7273d012fc3b7f73650207f6
 benchmark: swebench_verified
 experiment_role: optimization
 expected_case_count: 10

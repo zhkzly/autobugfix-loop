@@ -277,12 +277,12 @@ This keeps LLM execution inside a real loop and a real harness.
 
 ---
 
-## Scenario: Experiment 2 Execution-Only Study Apparatus
+## Scenario: Legacy Experiment 2 Execution-Only Study Apparatus (v1 audit only)
 
 ### 1. Scope / Trigger
 
-- Trigger: Any change to the Exp2 execution-only coordinator, direct
-  workspace-only SWE dispatch, formal Exp2 adapter, or its study records.
+- Trigger: Reading or auditing legacy Exp2 v1 state. New studies must use the
+  resume-first v2 contract below; v1 execution is disabled.
 - This apparatus is measurement infrastructure. It may select exact H0/H1
   subjects, record transitions, and dispatch the existing Eval scorer, but it
   must not evolve Memory, Eval semantics, Operator skills/policy, or the
@@ -397,4 +397,211 @@ Freeze cohort + policy + apparatus + empty-Memory records -> prove the
 disposable direct-mode boundary -> execute the dedicated task worktree -> freeze
 and officially score -> persist the execution receipt -> expose only the public
 projection -> advance the append-only coordinator from typed receipts.
+```
+
+---
+
+## Scenario: Exp2 Resume-First Protected Pilot (v2)
+
+### 1. Scope / Trigger
+
+- Trigger: creating, executing, recovering, reporting, or governing an Exp2
+  resume-first calibration/pilot study.
+- V2 is a bounded resume-first apparatus. Execution is the only treatment;
+  Eval owns official score/submission/noninterference/image evidence; Operator
+  owns attribution/candidate/rollback; Memory is one frozen empty tree.
+- Formal v2 uses `execution_mode: protected`. `workspace_only` is not a legal
+  formal protocol on a host without a separately verified OS isolation
+  attestation. Hidden-path metadata alone is not isolation.
+
+### 2. Signatures
+
+- `Exp2ResumeCoordinator.initialize(plan, protocol) -> Mapping`
+- `Exp2EvalAuthority.resume(execute: bool = False) -> Mapping`
+- `Exp2EvalAuthority.register_operator_h0(operator_study_id,
+  operator_service) -> Mapping`
+- `EvalBenchmarkService.run_swe_exp2_calibration_case(...,
+  execution_mode="protected", out_root=...) -> Mapping`
+- `EvalBenchmarkService.run_swe_exp2_case(...,
+  execution_mode="protected", out_root=...) -> Mapping`
+- `OperatorGovernanceService.export_exp2_attribution(...) -> Mapping`
+- `OperatorGovernanceService.validate_exp2_empty_memory_root(path) -> digest`
+- `OperatorGovernanceService.create_study(..., memory_root=path,
+  empty_memory_fixture=True, guard_root=path) -> StudyRecord`
+- `OperatorGovernanceService.export_exp2_candidate_transition(
+  operator_study_id, request_id, attribution_digest) -> Mapping`
+- `Exp2ResumeCoordinator.rollback_authorization() -> Mapping`
+- `OperatorGovernanceService.export_exp2_rollback_receipt(
+  transition, rollback_authorization_path, reason, ...) -> Mapping`
+- CLI production path: `autobugfix eval exp2 resume --study-id ID --execute`.
+
+### 3. Contracts
+
+- Plan initialization reopens and validates the v2 protocol, SWE protocol,
+  apparatus receipt, passing source-check receipts, empty-Memory fixture spec,
+  calibration receipt (pilot only), public manifest (pilot only), and H0 Study
+  binding (pilot only). Paths and semantic digests are both authority.
+- Exp2 uses a dedicated external empty-Memory root, not the project's
+  canonical `.autobugfix-memory`. The root must be an absolute, unredirected,
+  current-user-owned `0700`-style tree containing exactly `active/` and
+  `skills/approved/`, must be disjoint from project/Eval/Operator/Guard state,
+  and must match the frozen materialized-tree digest. Eval validates it when
+  building and reopening a plan; Operator validates it again before taking
+  the immutable Study snapshot. The canonical Memory tree is neither read nor
+  mutated by Exp2.
+- Protocol image entries bind one eligible official qualification plus current
+  OCI manifest/config/layers/platform. A tag alone is never execution-ready.
+- Resume-MVP Verified qualification imports only the selected official images
+  from a versioned manifest whose entries use registry `@sha256` references.
+  Eval verifies the pulled descriptor/platform, binds the same layers to the
+  local scorer tag, and records an import receipt. Re-solving a historical
+  repository's open-ended dependency file is not equivalent authority.
+- OCI evidence keeps registry manifest/config/compressed-layer digests distinct
+  from Docker's local image ID and rootfs diff IDs. In particular, `.Id` must
+  not be relabelled as the config digest on containerd-backed Docker stores.
+- Protocol freeze replays the current service-validated qualification receipt
+  for case/repository/base/image/source metadata. It must not call upstream
+  `make_test_spec` or refetch historical requirements after qualification;
+  those network-dependent inputs were already consumed and bound by the
+  qualification and pinned-image import receipts.
+- A v5 qualification is eligible only when two official gold submissions
+  resolve, one explicit null/base submission remains unresolved without a
+  harness error, all three observations use one image ID, and source
+  materialization succeeds. Earlier qualification schemas are not reusable.
+- Formal protected Execution must prove:
+  - broker command used outer Bubblewrap;
+  - SDK call used the isolated worker (`sdk_in_process=false`,
+    `sdk_bubblewrap=true`);
+  - SDK cwd and expected cwd equal the task worktree;
+  - project/Eval/Operator/Memory/Guard/home roots are hidden;
+  - no workspace-only preflight is claimed.
+- Authority validation and every executing resume require an empty
+  `git status --porcelain=v1 --untracked-files=all`; matching `HEAD`/tree alone
+  is insufficient because Python executes dirty working-tree source.
+- The broker publishes one canonical trusted evidence tree at
+  `subject-run/frozen-execution-evidence/` (or
+  `failed-execution-evidence/`). Adoption verifies its manifest and reads the
+  ledger/SDK receipts only from that tree. Tests must not invent a second
+  layout.
+- Journal writes use a process lock, predecessor compare-and-swap, append plus
+  `fsync`, and immutable event digests. A non-newline final fragment is a torn
+  tail: replay ignores it and the next locked append truncates it before
+  continuing. A complete invalid line remains corruption and fails closed.
+- A non-blocking process-wide study lease covers replay, open-intent
+  reconciliation, dispatch, model/scorer execution, and terminal append. A
+  second executing resume returns `in_progress`; it must not reconcile an
+  intent owned by the live process. Initialization uses the same lease and
+  atomic compare-and-create links rather than replacement writes.
+- CLI state root is exactly
+  `<configured trusted_case_root>/exp2/<study_id>`; caller-selected external or
+  redirected roots are rejected.
+- H0 Operator handoff contains only three aggregate scalars
+  (`apparatus_valid`, `h0_terminal_coverage`, `adaptation_feasible`) and the
+  source-pair projection. It must not disclose ten-case resolved counts or any
+  transfer/reserve identity/outcome before candidate lock.
+- Attribution must be persisted and reverified by Operator against a registered
+  `exp2_source_projection` evidence record. Candidate transition derives study
+  ID, source digest, requested/allowed scope, and runtime from that attribution,
+  request, and frozen Study manifest; callers do not author those values.
+- Operator rollback mutation requires a coordinator-issued, trusted-Eval
+  `Exp2RollbackAuthorization` bound to transfer metrics and the locked
+  candidate. Authorization lookup occurs before Operator rollback starts.
+- Operator policy/Memory/runtime/operator-skill identities remain equal to H0.
+  The Execution role-skill digest may change only when the candidate's actual
+  diff contains an allowlisted `.agents/role-skills/execution/` path; a digest
+  change without that actual scope, or a skill edit without a digest change,
+  is rejected.
+- Reports derive coverage, evidence/noninterference numerators and
+  denominators, Writer/model usage, first visible-verifier outcome, loop
+  rescue, changed files/lines, and empty-patch counts from receipts, ledger, and
+  frozen submission. Unknown pricing/cost remains null.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| Formal protocol requests `workspace_only` without an external OS attestation | reject protocol before SDK dispatch |
+| Guard root is absent, redirected, omitted from broker hidden paths, or not masked by outer Bubblewrap | reject before/adoption; no official receipt |
+| Apparatus checkout has any tracked or untracked change at dispatch | reject before Eval case call |
+| OCI identity or eligible qualification differs | block before case intent/SDK |
+| Selected image is not imported from its pinned official manifest digest, gold is unstable, or null/base resolves | mark qualification ineligible; do not freeze protocol |
+| Protocol freeze attempts a fresh remote instance/test-spec inspection | reject/fix the apparatus; replay the validated qualification metadata instead |
+| Real broker evidence is absent, redirected, manifest-invalid, or stored in an unexpected layout | leave/reconcile intent as infrastructure-invalid; never synthesize official truth |
+| State root escapes configured trusted Eval root | CLI error before read/write |
+| Empty-Memory root is omitted, relative, redirected, nonempty, permissive, digest-mismatched, or overlaps protected/canonical state | reject before SDK/Writer dispatch; preserve canonical Memory |
+| Event predecessor changes between replay and append | CAS error; caller retries from current state |
+| Another process holds the study execution lease | return `in_progress`; do not dispatch or reconcile |
+| Final JSONL fragment has no newline | ignore on replay; preserve/truncate under lock before next append |
+| Complete event line has invalid JSON/digest/chain | permanent corruption error |
+| H0 metric contains resolved counts or fields beyond the fixed feasibility contract | Operator rejects handoff |
+| Candidate exporter cannot rederive persisted attribution, Study runtime, scope, integration, checks, usage, or skills | reject transition |
+| Rollback command runs before `ROLLBACK_AWAITING` authorization exists | coordinator rejects before Operator mutation |
+| Apparatus source check receipt is absent, unstructured, nonzero, or `passed != true` | refuse apparatus/init/execution |
+| Report lacks patch/loop evidence for an official real run | evidence completeness is reduced or source freeze fails; never report an invented zero |
+
+### 5. Good/Base/Bad Cases
+
+- Good: pinned official image import -> two gold + null/base qualification -> content-addressed protocol -> clean apparatus
+  receipt -> protected one-case intent -> real broker -> canonical frozen
+  evidence -> official score -> terminal receipt -> next case.
+- Good: process dies after report publication; resume adopts the report and
+  canonical evidence without a second Writer call.
+- Good: a private external empty-Memory tree is content-bound by the plan and
+  Operator snapshot while a nonempty canonical Memory tree remains unchanged.
+- Base: process dies before a complete event line; replay returns the prior
+  state and the next locked append repairs the torn tail.
+- Bad: a fake service writes ledger/SDK receipts directly under
+  `subject-run/` and calls that a production-layout recovery test.
+- Bad: trust a caller YAML digest for attribution, H0 outcome, runtime,
+  candidate scope, or rollback authorization.
+- Bad: mutate the Operator line first, then ask the coordinator whether
+  rollback was allowed.
+- Bad: empty, move, or reuse the project's canonical Memory tree to make Exp2
+  pass its fixed-empty fixture check.
+
+### 6. Tests Required
+
+- Record round trips reject missing/extra fields, identity drift, visibility
+  leaks, and mutable bindings.
+- Broker-to-authority integration uses the same
+  `SWESubjectBroker._build_evidence_tree` layout as production and verifies its
+  manifest.
+- Interruption tests cover: after intent, after frozen submission, after
+  report, torn final event, duplicate concurrent append, scorer-only retry, and
+  repeated terminal resume.
+- Protected isolation tests assert outer/SDK Bubblewrap, exact task cwd,
+  hidden authorities/Guard/home, and no workspace-only claim.
+- Dirty-apparatus tests modify one tracked or untracked source file after
+  authority construction and assert the service receives zero case calls.
+- Empty-Memory tests cover a valid dedicated tree plus nonempty, permissive,
+  symlinked, digest-mismatched, and protected-root-overlap cases; they assert
+  the canonical Memory tree is unchanged.
+- Operator tests reject forged attribution/source/runtime/scope, a second
+  revision, audience-leaking H0 metrics, and rollback without Eval
+  authorization.
+- Report tests assert raw numerators/denominators, paired source/transfer
+  separation, loop-rescue evidence, patch shape, `not_run` populations, and
+  null unknown pricing.
+- Before source freeze: full pytest, compileall, fatal lint, `git diff --check`,
+  role-skill validation, and SWE doctor. Before calibration: clean committed
+  apparatus plus an independent read-only review.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```text
+callback returns self-consistent report -> coordinator trusts it -> caller
+passes arbitrary attribution/runtime/scope digests -> Operator mutates line ->
+coordinator checks afterward
+```
+
+#### Correct
+
+```text
+protected broker publishes canonical immutable evidence -> Eval authority
+reopens qualification/image/ledger/submission/noninterference -> coordinator
+records one terminal receipt -> Eval releases feasibility + source pair only ->
+Operator rederives attribution/request/integration/runtime -> transfer metrics
+issue rollback authorization -> Operator mutates only after authorization
 ```

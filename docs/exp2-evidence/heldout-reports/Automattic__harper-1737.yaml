@@ -1,0 +1,49 @@
+schema: autobugfix-swe-development-run-v1
+development_only: true
+protocol_digest: a9b1c2e5007517c7474718b57a10b038e80aa077fd28b8642693e10254c523e8
+codex_runtime:
+  model: gpt-5.4-mini
+  reasoning_effort: medium
+  service_tier: null
+  sdk_package: openai-codex
+  sdk_version: 0.144.4
+  cli_package: openai-codex-cli-bin
+  cli_version: 0.144.4
+  max_attempts: 2
+  timeout_seconds: 900
+subject_runtime_contract_digest: f37d4634683ace600361b2024b51b32dbaa5757421793e1ab93d409ad02a921f
+subject_runtime_digest: 0f3fa7cd327f97c8101afa1262a4cd050a9810b12ddb10e8323b9814227cfeab
+evaluator_runtime_id: sha256:7ee8b97e874ec7ff361aee9c391c356db51892f55d333f0da09c2627d4c008a9
+memory_digest: 602e35a92eec4bc0a2ec6ae113f07bfc6933322fb69fe8dee416e5a67217e2a2
+role_config_digest: 353b142ad0c13ca17d2eb709446cebfa305b2935ef842d4228d3359c9c934909
+policy_digest: e9f78e2eb77adbac8edb4b7a8c87a4db1154d89da3b821eebb12eddaa6ce1d1d
+adapter: swebench_live
+instance_id: Automattic__harper-1737
+visible_case_digest: 22242f2a08ce1b8e074d583ddea89853ee22a26365eee462c885c9aed843aa8b
+visible_case_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/development-visible/swebench_live/Automattic__harper-1737/22242f2a08ce1b8e074d583ddea89853ee22a26365eee462c885c9aed843aa8b.yaml
+executed_subject_sha: b9c86b0cc621a950a4db02041661c238091f6dae
+executed_subject_tree: 1bde5f278e4fa98e9331bffeb0b8424116fe7b33
+submission_digest: 47911d7a40803fbd3f973de711af61e35b41704592598abff5804d1f9431d843
+official_result_digest: c9e6147fc5aedf9ccf86e1f38dd4fb949598c537bbd97a6973d55c144fc59d17
+official_result_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/official-results/swebench_live/Automattic__harper-1737/c9e6147fc5aedf9ccf86e1f38dd4fb949598c537bbd97a6973d55c144fc59d17.yaml
+noninterference_digest: 7de022cb750908f08c28f75f25a74f95058b7170a92564b46a3f103c4e691314
+noninterference_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/noninterference/swebench_live/Automattic__harper-1737/7de022cb750908f08c28f75f25a74f95058b7170a92564b46a3f103c4e691314.yaml
+execution_receipt:
+  schema: autobugfix-exp2-execution-receipt-v1
+  execution_mode: protected
+  direct_sdk_in_process: false
+  outer_bubblewrap: true
+  broker_command_digest: 6cd696463d9156c6677d47b64854857706dfbd90b083defdd39dd21655c2bdbd
+  broker_result_digest: 1166216844327f06cb62d184f8c95bd0643d73bde47bea1957a8d2b5c4be69cb
+  task_worktree_path: /home/kelong/pycodes/autobugfix-exp2-resume-mvp-v2/.autobugfix/trusted-eval-cases/swe/development-runs/swebench_live/Automattic__harper-1737/exp2-holdout-final-v2-Automattic__harper-1737/subject-run/target/worktrees/20260828-swe-eval-dev-d7a165667aa090daa9bec74-8b564dfb
+  workspace_only_preflight_digest: null
+  execution_ledger_digest: 6fb1170d12754e10a4908894e3bd948cdd68b5ca71ff61aa77a5d977bd0f8d3b
+  sdk_call_receipt_digests:
+  - f2c58e4c97e98698ada6d2c0848d05aa449befde966640a253f946fca67cd961
+  - 02638af6a3f8f99a48b98defaa8e8ea1b1743053d49b1b2c35bddf9568df5eab
+  record_digest: 2ced4645a0a5325f2d76d899e1d5842ef41ac373731ab85efe5ceaf013575b44
+image_digest: eaef7ba0ef5457fa570c93d08d042a8afd9dfddfb0655503e694d0180d5d7582
+failure_stage: visible_verifier
+resolved: false
+harness_error: ''
+record_digest: 60289d68f2f6c1f760d6ec8373440a00ad5e8ce3847a936e63731a70217469f0

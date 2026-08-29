@@ -173,7 +173,7 @@ class SWEGuardStore:
     ) -> dict[str, Any]:
         verify_record(record)
         if (
-            record.get("schema") != "autobugfix-swe-qualification-v4"
+            record.get("schema") != "autobugfix-swe-qualification-v5"
             or record.get("adapter") != "swebench_live"
             or record.get("qualification_contract_digest") != protocol_digest
             or record.get("evaluator_runtime_id") != runtime_id

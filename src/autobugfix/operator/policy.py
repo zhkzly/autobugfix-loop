@@ -250,7 +250,15 @@ def _call_name(node: ast.Call) -> str:
     return ".".join(reversed(parts))
 
 
-def static_constitution_violations(project_root: Path, constitution: Mapping[str, Any]) -> list[str]:
+def static_constitution_violations(
+    project_root: Path,
+    constitution: Mapping[str, Any],
+    *,
+    invariant_root: Path | None = None,
+) -> list[str]:
+    # Line-bound candidates descend from a frozen subject lineage; production
+    # invariants describe the governing checkout, not the subject tree.
+    effective_root = invariant_root if invariant_root is not None else project_root
     violations: list[str] = []
     invariants = constitution.get("static_invariants") or {}
     if not isinstance(invariants, dict):
@@ -297,7 +305,7 @@ def static_constitution_violations(project_root: Path, constitution: Mapping[str
 
     roles: Mapping[str, Any] = {}
     role_runtime: Mapping[str, Any] = {}
-    config_path = project_root / "src/autobugfix/config.py"
+    config_path = effective_root / "src/autobugfix/config.py"
     if not config_path.is_file():
         violations.append("candidate is missing src/autobugfix/config.py")
     else:
@@ -344,7 +352,7 @@ def static_constitution_violations(project_root: Path, constitution: Mapping[str
                 f"codex.role_runtime.{key} expected {expected_value!r}, got {role_runtime.get(key)!r}"
             )
 
-    service_path = project_root / "src/autobugfix/service.py"
+    service_path = effective_root / "src/autobugfix/service.py"
     if not service_path.is_file():
         violations.append("candidate is missing src/autobugfix/service.py")
     else:
@@ -353,7 +361,7 @@ def static_constitution_violations(project_root: Path, constitution: Mapping[str
             if str(marker) not in service_text:
                 violations.append(f"production service missing required marker: {marker}")
 
-    sdk_path = project_root / "src/autobugfix/codex_sdk.py"
+    sdk_path = effective_root / "src/autobugfix/codex_sdk.py"
     if not sdk_path.is_file():
         violations.append("candidate is missing src/autobugfix/codex_sdk.py")
     else:
@@ -363,7 +371,7 @@ def static_constitution_violations(project_root: Path, constitution: Mapping[str
                 violations.append(f"production SDK runtime missing required marker: {marker}")
 
     forbidden = {str(item) for item in invariants.get("eval_forbidden_calls") or []}
-    eval_root = project_root / "src/autobugfix/eval"
+    eval_root = effective_root / "src/autobugfix/eval"
     if eval_root.exists():
         for path in sorted(eval_root.rglob("*.py")):
             try:
@@ -392,8 +400,18 @@ def evaluate_policy(
     expected_github_repository: str | None = None,
     expected_pull_request: int | None = None,
     scope_version: int = 1,
+    production_root: Path | None = None,
 ) -> PolicyDecision:
     root = project_root.resolve()
+    # Line-bound experiment candidates descend from a frozen subject lineage,
+    # not the production control lineage; production invariants (role
+    # defaults, service/SDK markers, forbidden eval calls) describe the
+    # governing checkout and must not be evaluated against the subject tree.
+    invariant_root = (
+        production_root.resolve()
+        if production_root is not None and request.experiment_line_id
+        else None
+    )
     metadata_patterns = [str(item) for item in constitution.get("governance_metadata_paths") or []]
     snapshot = collect_candidate_snapshot(root, request.base_sha, metadata_patterns)
     changed_layers: dict[str, list[str]] = {}
@@ -507,7 +525,11 @@ def evaluate_policy(
         if not has_merge:
             violations.append("constitutional candidate lacks human merge approval bound to patch or HEAD")
 
-    violations.extend(static_constitution_violations(root, constitution))
+    violations.extend(
+        static_constitution_violations(
+            root, constitution, invariant_root=invariant_root
+        )
+    )
     return PolicyDecision(
         allowed=not violations,
         request_id=request.request_id,

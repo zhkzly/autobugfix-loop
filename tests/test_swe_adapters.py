@@ -10,12 +10,11 @@ from typing import Any, cast
 
 import pytest
 
-from autobugfix.eval.benchmarks.swe_materialize import SWEImageMaterializer
 from autobugfix.eval.benchmarks.models import CommandEvidence, digest_file
+from autobugfix.eval.benchmarks.swe_materialize import SWEImageMaterializer
 from autobugfix.eval.benchmarks.swe_models import SWEInstance, SWESubmission
 from autobugfix.eval.benchmarks.swe_official import SWEOfficialRunner
-from autobugfix.eval.benchmarks.swe_runtime import SWEDatasetSnapshot
-from autobugfix.eval.benchmarks.swe_runtime import SWERuntimeError
+from autobugfix.eval.benchmarks.swe_runtime import SWEDatasetSnapshot, SWERuntimeError
 
 
 def git(repo: Path, *args: str) -> str:
@@ -128,6 +127,7 @@ class OfficialRuntime:
             verified_namespace="official",
             verified_build_network_mode="default",
             scorer_timeout_seconds=30,
+            platform="linux/amd64",
         )
         self.benchmark_config = SimpleNamespace(command_timeout_seconds=30)
         self.live_checkout = root / "live"
@@ -150,6 +150,11 @@ class OfficialRuntime:
         if writable_state_root is not None:
             assert writable_state_root.is_dir()
         return {}
+
+    @staticmethod
+    def verified_image_pin(instance_id: str) -> None:
+        del instance_id
+        return None
 
     def live_command_env(
         self,
@@ -232,6 +237,95 @@ def test_verified_command_binds_explicit_build_network_mode(tmp_path: Path) -> N
     assert str(runtime.config.harness_project / "scripts/run_official.py") in argv
     assert argv[argv.index("--build-network-mode") + 1] == "host"
     assert argv[argv.index("--module") + 1] == "swebench.harness.run_evaluation"
+
+
+def test_verified_pinned_image_import_binds_manifest_and_local_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = OfficialRuntime(tmp_path)
+    runtime.config.verified_namespace = None
+    manifest_digest = "a" * 64
+    image_id = "sha256:" + "b" * 64
+    source_ref = (
+        "swebench/sweb.eval.x86_64.owner_1776_repo-1"
+        f"@sha256:{manifest_digest}"
+    )
+    runtime.verified_image_manifest_digest = "c" * 64
+    runtime.verified_image_pin = lambda instance_id: {
+        "source_ref": source_ref,
+        "manifest_digest": manifest_digest,
+    }
+    runner = SWEOfficialRunner(cast(Any, runtime), "swebench_verified")
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_official.shutil.which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+    calls: list[list[str]] = []
+    inspection = json.dumps(
+        {
+            "Id": image_id,
+            "Descriptor": {"digest": f"sha256:{manifest_digest}"},
+            "Os": "linux",
+            "Architecture": "amd64",
+            "RootFS": {"Layers": ["sha256:" + "d" * 64]},
+        }
+    )
+    manifest = json.dumps(
+        {
+            "config": {"digest": "sha256:" + "e" * 64},
+            "layers": [{"digest": "sha256:" + "f" * 64}],
+        }
+    )
+
+    def fake_run(argv, *, artifact_dir, name, **kwargs):
+        del kwargs
+        calls.append(list(argv))
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        stdout = artifact_dir / "stdout.log"
+        stderr = artifact_dir / "stderr.log"
+        stdout.write_text(
+            (
+                manifest
+                if name == "docker-inspect-pinned-manifest"
+                else inspection
+                if name.startswith("docker-inspect")
+                else "ok\n"
+            ),
+            encoding="utf-8",
+        )
+        stderr.write_text("", encoding="utf-8")
+        return CommandEvidence(
+            name=name,
+            argv=tuple(argv),
+            cwd=str(tmp_path),
+            started_at="2026-07-12T00:00:00Z",
+            finished_at="2026-07-12T00:00:01Z",
+            duration_seconds=1.0,
+            exit_code=0,
+            timed_out=False,
+            stdout_path=str(stdout),
+            stderr_path=str(stderr),
+            stdout_sha256=digest_file(stdout),
+            stderr_sha256=digest_file(stderr),
+            environment_digest="f" * 64,
+        )
+
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_official.run_command", fake_run
+    )
+
+    receipt = runner.prepare_verified_image(
+        instance("c" * 40), tmp_path / "image-import"
+    )
+
+    assert receipt is not None
+    assert receipt["manifest_digest"] == manifest_digest
+    assert receipt["local_image_id"] == image_id
+    assert receipt["config_digest"] == "e" * 64
+    assert receipt["layer_digests"] == ["f" * 64]
+    assert receipt["rootfs_diff_ids"] == ["d" * 64]
+    assert calls[0][-1] == source_ref
+    assert calls[3][-2:] == [source_ref, "sweb.eval.x86_64.owner__repo-1:latest"]
 
 
 def test_official_bridge_pins_host_network_mode() -> None:
@@ -417,6 +511,107 @@ def test_verified_official_empty_patch_is_valid_unresolved(
 
     assert result.resolved is False
     assert result.harness_error == ""
+
+
+def test_verified_official_null_probe_is_explicit_and_unresolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = SWEOfficialRunner(
+        cast(Any, OfficialRuntime(tmp_path)), "swebench_verified"
+    )
+    monkeypatch.setattr(
+        runner,
+        "image_id",
+        lambda *args, **kwargs: "sha256:" + "1" * 64,
+    )
+
+    def fake_run(argv, *, artifact_dir, **kwargs):
+        del kwargs
+        report_root = Path(argv[argv.index("--report_dir") + 1])
+        run_id = argv[argv.index("--run_id") + 1]
+        prediction_path = Path(argv[argv.index("--predictions_path") + 1])
+        prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+        assert prediction["model_name_or_path"] == "autobugfix-null"
+        assert prediction["model_patch"] == ""
+        (report_root / f"autobugfix-null.{run_id}.json").write_text(
+            json.dumps(
+                {
+                    "completed_ids": [],
+                    "empty_patch_ids": ["owner__repo-1"],
+                    "error_ids": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return command_evidence(artifact_dir, list(argv))
+
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_official.run_command", fake_run
+    )
+
+    result = runner.score(
+        instance("c" * 40),
+        tmp_path / "null-score",
+        run_id="null-run",
+        null=True,
+    )
+
+    assert result.resolved is False
+    assert result.harness_error == ""
+
+
+def test_verified_null_timeout_is_harness_error_not_valid_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = SWEOfficialRunner(
+        cast(Any, OfficialRuntime(tmp_path)), "swebench_verified"
+    )
+    monkeypatch.setattr(
+        runner,
+        "image_id",
+        lambda *args, **kwargs: "sha256:" + "1" * 64,
+    )
+
+    def fake_run(argv, *, artifact_dir, **kwargs):
+        del kwargs
+        report_root = Path(argv[argv.index("--report_dir") + 1])
+        run_id = argv[argv.index("--run_id") + 1]
+        log_root = (
+            report_root
+            / "logs/run_evaluation"
+            / run_id
+            / "autobugfix-null"
+            / "owner__repo-1"
+        )
+        log_root.mkdir(parents=True)
+        (log_root / "run_instance.log").write_text(
+            "Test timed out after 900 seconds\n", encoding="utf-8"
+        )
+        (report_root / f"autobugfix-null.{run_id}.json").write_text(
+            json.dumps(
+                {
+                    "completed_ids": [],
+                    "empty_patch_ids": [],
+                    "error_ids": ["owner__repo-1"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return command_evidence(artifact_dir, list(argv))
+
+    monkeypatch.setattr(
+        "autobugfix.eval.benchmarks.swe_official.run_command", fake_run
+    )
+
+    result = runner.score(
+        instance("c" * 40),
+        tmp_path / "null-timeout",
+        run_id="null-timeout",
+        null=True,
+    )
+
+    assert result.resolved is False
+    assert result.harness_error == "official SWE-bench reported a harness error"
     assert runner.runtime.official_network_access == [True]
     assert result.report_path == "missing"
 

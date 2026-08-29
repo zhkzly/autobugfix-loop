@@ -1,0 +1,40 @@
+name: exp2-subject-d2811289-gate
+base_sha: d2811289d7d512843d078e29129f31d356529784
+profile: exp2-subject-gate
+profile_contract:
+  commands:
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - -m
+    - pytest
+    - -q
+    - tests/test_locks.py
+    - tests/test_prompts.py
+    - tests/test_dataset.py
+    - tests/test_projection.py
+    name: subject-unit-gate
+  timeout_seconds: 900
+profile_digest: 8e0e195344f3bba72b438d9342479144bd9fa653627408daea2f34ced4f4c569
+profile_values: {}
+input_digest: fffe0e727bae26345d85fa78ba0410f254a713b5355bb679f530f0137aff13c9
+metrics:
+  artifact_completeness: 1.0
+  pass_rate: 1.0
+  runtime_seconds: 0.676841194042936
+receipt_digest: db9df7d3dbe3b09468d92046975505c7250e78e9a1c522a56afc6752c69edc74
+commands:
+- name: subject-unit-gate
+  exit_code: 0
+  passed: true
+  timed_out: false
+  duration_seconds: 0.676841194042936
+  stdout_sha256: f75f441e390e1d57a5128bcabdc4c5a7679e65ea222d2596e4c952b20c6db153
+  stderr_sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+notes: v3 full-regression subject unit baseline (d2811289) for line-bound candidate
+  requests
+created_at: '2026-08-28T06:23:12Z'
+baseline_digest: 4fad0057ccc7ce3840af48dc49336f24addb0a2aef7e47bf6c6291cf70ffa5c2

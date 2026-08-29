@@ -5,6 +5,10 @@ from pathlib import Path
 import pytest
 
 from autobugfix.eval.benchmarks.models import BenchmarkContractError
+from autobugfix.eval.benchmarks.service import (
+    EvalBenchmarkService,
+    EvalBenchmarkServiceError,
+)
 from autobugfix.eval.benchmarks.swe_models import (
     SWEExperimentProtocol,
     SWESubmission,
@@ -56,6 +60,22 @@ def test_experiment_protocol_pins_h0_upstreams_and_split() -> None:
     assert len(protocol.protocol_digest) == 64
     assert len(protocol.qualification_contract_digest) == 64
     assert len(protocol.subject_runtime_contract_digest) == 64
+    assert protocol.verified_image_mode == "local-build"
+
+
+def test_resume_protocol_uses_pinned_official_images() -> None:
+    baseline = SWEExperimentProtocol.from_yaml(
+        ROOT / "benchmarks/swe-experiment-2.yaml"
+    )
+    resume = SWEExperimentProtocol.from_yaml(
+        ROOT / "benchmarks/swe-experiment-2-resume-mvp-v2.yaml"
+    )
+
+    assert resume.verified_image_mode == "pinned-official-import"
+    assert (
+        resume.qualification_contract_digest
+        != baseline.qualification_contract_digest
+    )
 
 
 def test_experiment_protocol_requires_explicit_holdout_exposure_ledger() -> None:
@@ -95,6 +115,126 @@ def test_qualification_contract_excludes_subject_treatment() -> None:
         changed_protocol.qualification_contract_digest
         == baseline.qualification_contract_digest
     )
+
+
+def test_eligible_qualification_requires_gold_and_null_evidence() -> None:
+    protocol = SWEExperimentProtocol.from_yaml(
+        ROOT / "benchmarks/swe-experiment-2.yaml"
+    )
+    image_id = "sha256:" + "a" * 64
+    record = {
+        "eligible": True,
+        "official_attempts": [
+            {
+                "attempt": 1,
+                "record_digest": "1" * 64,
+                "record_path": "/gold-1.yaml",
+                "resolved": True,
+                "harness_error": "",
+                "image_id": image_id,
+            },
+            {
+                "attempt": 2,
+                "record_digest": "2" * 64,
+                "record_path": "/gold-2.yaml",
+                "resolved": True,
+                "harness_error": "",
+                "image_id": image_id,
+            },
+        ],
+        "null_attempt": {
+            "record_digest": "3" * 64,
+            "record_path": "/null.yaml",
+            "resolved": False,
+            "harness_error": "",
+            "image_id": image_id,
+        },
+        "official_result_digest": "2" * 64,
+        "official_result_path": "/gold-2.yaml",
+        "image_id": image_id,
+        "image_source_mode": "local-build",
+        "source_path": "/source",
+        "source_tree": "b" * 40,
+        "source_digest": "c" * 64,
+    }
+
+    EvalBenchmarkService._validate_swe_qualification_semantics(
+        record,
+        protocol=protocol,
+        adapter="swebench_verified",
+    )
+
+    record["null_attempt"] = {
+        "record_digest": "3" * 64,
+        "record_path": "/null.yaml",
+        "resolved": True,
+        "harness_error": "",
+        "image_id": image_id,
+    }
+    with pytest.raises(EvalBenchmarkServiceError, match="contradicts"):
+        EvalBenchmarkService._validate_swe_qualification_semantics(
+            record,
+            protocol=protocol,
+            adapter="swebench_verified",
+        )
+
+
+def test_pinned_qualification_rejects_another_case_source_ref() -> None:
+    protocol = SWEExperimentProtocol.from_yaml(
+        ROOT / "benchmarks/swe-experiment-2-resume-mvp-v2.yaml"
+    )
+    image_id = "sha256:" + "a" * 64
+    expected_digest = "b" * 64
+    expected_ref = (
+        "swebench/sweb.eval.x86_64.owner_1776_expected-1"
+        f"@sha256:{expected_digest}"
+    )
+    record = {
+        "eligible": True,
+        "official_attempts": [
+            {
+                "attempt": attempt,
+                "record_digest": str(attempt) * 64,
+                "record_path": f"/gold-{attempt}.yaml",
+                "resolved": True,
+                "harness_error": "",
+                "image_id": image_id,
+            }
+            for attempt in (1, 2)
+        ],
+        "null_attempt": {
+            "record_digest": "3" * 64,
+            "record_path": "/null.yaml",
+            "resolved": False,
+            "harness_error": "",
+            "image_id": image_id,
+        },
+        "official_result_digest": "2" * 64,
+        "official_result_path": "/gold-2.yaml",
+        "image_id": image_id,
+        "image_source_mode": "pinned-official-import",
+        "image_source_ref": (
+            "swebench/sweb.eval.x86_64.owner_1776_wrong-1"
+            f"@sha256:{expected_digest}"
+        ),
+        "image_source_manifest_digest": expected_digest,
+        "image_source_receipt_digest": "4" * 64,
+        "image_source_receipt_path": "/import.yaml",
+        "source_path": "/source",
+        "source_tree": "c" * 40,
+        "source_digest": "d" * 64,
+    }
+
+    with pytest.raises(EvalBenchmarkServiceError, match="pinned official"):
+        EvalBenchmarkService._validate_swe_qualification_semantics(
+            record,
+            protocol=protocol,
+            adapter="swebench_verified",
+            expected_image_pin={
+                "source_ref": expected_ref,
+                "manifest_digest": expected_digest,
+            },
+        )
 
 
 def test_visible_case_rejects_private_oracle_fields() -> None:

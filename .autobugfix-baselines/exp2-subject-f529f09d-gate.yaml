@@ -1,0 +1,40 @@
+name: exp2-subject-f529f09d-gate
+base_sha: f529f09de53183d7ddbf9e05b31a9d3b3fbde008
+profile: exp2-subject-gate
+profile_contract:
+  commands:
+  - argv:
+    - uv
+    - run
+    - --cache-dir
+    - /tmp/uv-cache
+    - python
+    - -m
+    - pytest
+    - -q
+    - tests/test_locks.py
+    - tests/test_prompts.py
+    - tests/test_dataset.py
+    - tests/test_projection.py
+    name: subject-unit-gate
+  timeout_seconds: 900
+profile_digest: 8e0e195344f3bba72b438d9342479144bd9fa653627408daea2f34ced4f4c569
+profile_values: {}
+input_digest: fffe0e727bae26345d85fa78ba0410f254a713b5355bb679f530f0137aff13c9
+metrics:
+  artifact_completeness: 1.0
+  pass_rate: 1.0
+  runtime_seconds: 0.6028621040022699
+receipt_digest: e86c38f06b0f1950d6fe53fb9e14b2e2c14070b018c19f47b35412ad986e00d8
+commands:
+- name: subject-unit-gate
+  exit_code: 0
+  passed: true
+  timed_out: false
+  duration_seconds: 0.6028621040022699
+  stdout_sha256: bab734664220e24fb0905da13aae50a3b0ff8232d11eedbdf4dd4247c2bfc088
+  stderr_sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+notes: Frozen H0 subject unit baseline; full-suite and codex profiles cannot run inside
+  the verification sandbox on apparmor_restrict_unprivileged_userns=1 hosts
+created_at: '2026-08-24T08:04:04Z'
+baseline_digest: 8044aed8c05fd1d521084d6def3de84e1025c820d7f07325ee9844a71036784c

@@ -185,6 +185,7 @@ class SWEBenchmarkConfig:
     verified_dataset: str = "princeton-nlp/SWE-bench_Verified"
     verified_dataset_revision: str = "c104f840cc67f8b6eec6f759ebc8b2693d585d4a"
     verified_namespace: str | None = None
+    verified_image_manifest: Path | None = None
     verified_build_network_mode: str = "default"
     live_repository: str = "https://github.com/microsoft/SWE-bench-Live.git"
     live_commit: str = "c5ea7e48b7b8bb0f4bcbbceb182a09dadfabfc2c"

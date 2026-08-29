@@ -9,13 +9,14 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
-from contextlib import nullcontext
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import yaml
 
@@ -35,9 +36,8 @@ from autobugfix.credential_guard import (
 )
 from autobugfix.evaluator import parse_evaluator_decision
 from autobugfix.git_utils import GitError, git_common_dir, rev_parse, run_git
-from autobugfix.models import utc_now
 from autobugfix.memory.config import load_memory_config
-from autobugfix.models import CodexRequest, CodexResult
+from autobugfix.models import CodexRequest, CodexResult, utc_now
 from autobugfix.operator.approvals import (
     approval_signing_payload,
     github_approval,
@@ -46,7 +46,6 @@ from autobugfix.operator.approvals import (
 )
 from autobugfix.operator.guard import (
     TransitionGuard,
-    TransitionGuardError,
     check_scope_authority,
     effective_request,
     max_risk,
@@ -163,6 +162,35 @@ def _path_digest(path: Path) -> str:
         elif item.is_dir():
             digest.update(f"directory\0{relative}\0".encode("utf-8"))
     return digest.hexdigest()
+
+
+def exp2_protected_memory_roots(
+    project_root: Path,
+    config: Any,
+    *,
+    guard_root: Path | None = None,
+) -> tuple[Path, ...]:
+    """Return every authority root that an Exp2 Memory fixture must avoid."""
+
+    benchmark = config.eval.benchmarks
+    operator = config.operator
+    roots = [
+        project_root,
+        project_root / ".autobugfix-memory",
+        benchmark.cache_root,
+        benchmark.trusted_case_root,
+        benchmark.visible_manifest_root,
+        benchmark.raw_codex.runtime_root,
+        operator.state.root,
+        operator.artifacts.root,
+        operator.worktrees.root,
+        operator.experiment_lines.root,
+        operator.experiment_lines.checkpoint_root,
+        operator.experiment_lines.active_release_root,
+    ]
+    if guard_root is not None:
+        roots.append(guard_root)
+    return tuple(dict.fromkeys(path.resolve() for path in roots))
 
 
 def _manifest_digest(path: Path) -> str:
@@ -333,6 +361,26 @@ class OperatorGovernanceService:
             "config_digest": digest_payload(config_snapshot),
             "model_digest": digest_payload({"primary_model": primary_model}),
             "skills_digest": digest_payload({"skills": skill_digests}),
+            "operator_role_skill_digest": digest_payload(
+                {
+                    "base": _path_digest(
+                        source_root / ".agents/role-skills/base"
+                    ),
+                    "operator": _path_digest(
+                        source_root / ".agents/role-skills/operator"
+                    ),
+                }
+            ),
+            "execution_role_skill_digest": digest_payload(
+                {
+                    "base": _path_digest(
+                        source_root / ".agents/role-skills/base"
+                    ),
+                    "execution": _path_digest(
+                        source_root / ".agents/role-skills/execution"
+                    ),
+                }
+            ),
         }
 
     def _experiment_digests_at_subject(
@@ -367,6 +415,130 @@ class OperatorGovernanceService:
             if worktree.exists():
                 shutil.rmtree(worktree)
                 run_git(self.project_root, ["worktree", "prune"], check=False)
+
+    def _write_exp2_operator_record(
+        self,
+        category: str,
+        record: Mapping[str, Any],
+    ) -> Path:
+        record_digest = str(record.get("record_digest") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", record_digest):
+            raise OperatorGovernanceError(
+                "Exp2 Operator record has no valid content digest"
+            )
+        root = (self.config.operator.artifacts.root / category).resolve()
+        root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path = root / f"{record_digest}.yaml"
+        serialized = yaml.safe_dump(dict(record), sort_keys=False)
+        if path.exists():
+            if path.is_symlink() or path.read_text(encoding="utf-8") != serialized:
+                raise OperatorGovernanceError(
+                    "content-addressed Exp2 Operator artifact already differs"
+                )
+            return path
+        descriptor = os.open(
+            path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(serialized)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return path
+
+    def exp2_role_skill_digests(
+        self,
+        *,
+        subject_sha: str,
+        primary_model: str,
+    ) -> dict[str, str]:
+        """Resolve the frozen Operator and Execution role-skill trees."""
+
+        digests = self._experiment_digests_at_subject(
+            study_id="exp2-protocol",
+            subject_sha=subject_sha,
+            primary_model=primary_model,
+        )
+        return {
+            "operator_role_skill_digest": digests[
+                "operator_role_skill_digest"
+            ],
+            "execution_role_skill_digest": digests[
+                "execution_role_skill_digest"
+            ],
+        }
+
+    @staticmethod
+    def exp2_empty_memory_digest() -> str:
+        """Digest the exact empty Memory tree materialized for a Study."""
+
+        with tempfile.TemporaryDirectory(prefix="autobugfix-exp2-memory-") as raw:
+            root = Path(raw)
+            (root / "active").mkdir()
+            (root / "skills/approved").mkdir(parents=True)
+            return _path_digest(root)
+
+    @staticmethod
+    def exp2_memory_tree_digest(memory_root: Path | str) -> str:
+        """Directory-inclusive digest of a Memory tree, as validation computes it."""
+
+        return _path_digest(Path(memory_root))
+
+    @classmethod
+    def validate_exp2_empty_memory_root(
+        cls,
+        memory_root: Path | str,
+    ) -> str:
+        """Validate a private, exact empty-Memory tree without canonical data."""
+
+        source = Path(memory_root).expanduser()
+        try:
+            root = source.resolve(strict=True)
+        except OSError as exc:
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory root must be an absolute real directory"
+            ) from exc
+        if not source.is_absolute() or source != root or not root.is_dir():
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory root must be an absolute real directory"
+            )
+        expected_uid = getattr(os, "geteuid", lambda: root.stat().st_uid)()
+        entries = tuple(
+            sorted(
+                root.rglob("*"),
+                key=lambda item: item.relative_to(root).as_posix(),
+            )
+        )
+        if {
+            item.relative_to(root).as_posix() for item in entries
+        } != {"active", "skills", "skills/approved"}:
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory root differs from the frozen empty fixture"
+            )
+        for item in (root, *entries):
+            if item.is_symlink():
+                raise OperatorGovernanceError(
+                    "Exp2 empty Memory root must not contain symlinks"
+                )
+            if item != root and not item.is_dir():
+                raise OperatorGovernanceError(
+                    "Exp2 empty Memory root differs from the frozen empty fixture"
+                )
+            observed = item.stat()
+            if observed.st_uid != expected_uid or observed.st_mode & 0o077:
+                raise OperatorGovernanceError(
+                    "Exp2 empty Memory root must be current-user private"
+                )
+        digest = _path_digest(root)
+        if digest != cls.exp2_empty_memory_digest():
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory root differs from the frozen empty fixture"
+            )
+        return digest
 
     @staticmethod
     def _remove_release_tree(path: Path) -> None:
@@ -1273,6 +1445,118 @@ class OperatorGovernanceService:
         self.store.write_study_evidence(evidence)
         return evidence
 
+    def register_exp2_h0_handoff(
+        self,
+        operator_study_id: str,
+        *,
+        binding_path: Path | str,
+        metric_path: Path | str,
+        source_projection_path: Path | str,
+    ) -> dict[str, Any]:
+        """Register H0 privately and expose only the source projection to Operator."""
+
+        from autobugfix.eval.benchmarks.exp2_resume import (
+            Exp2SourceProjectionBundle,
+        )
+
+        study = self.store.read_study(operator_study_id)
+        if not study.cohort_id:
+            raise OperatorGovernanceError(
+                "Exp2 Operator Study lacks a frozen cohort"
+            )
+        binding_source = Path(binding_path).resolve()
+        binding = self._load_operator_yaml(
+            binding_source,
+            label="Exp2 H0 Study binding",
+        )
+        expected_binding = self.guard_study_binding(
+            operator_study_id,
+            kind="BASELINE",
+        )
+        if binding != expected_binding:
+            raise OperatorGovernanceError(
+                "Exp2 H0 binding differs from current Operator authority"
+            )
+        source = Path(source_projection_path)
+        if source.is_symlink():
+            raise OperatorGovernanceError(
+                "Exp2 source projection cannot be redirected"
+            )
+        source = source.resolve()
+        trusted_root = self.config.eval.benchmarks.trusted_case_root.resolve()
+        if not source.is_file() or not source.is_relative_to(trusted_root):
+            raise OperatorGovernanceError(
+                "Exp2 source projection must originate in trusted Eval state"
+            )
+        raw_source = self._load_operator_yaml(
+            source,
+            label="Exp2 source projection bundle",
+        )
+        bundle = Exp2SourceProjectionBundle.from_dict(raw_source)
+        content = source.read_bytes()
+        artifact, artifact_sha = self.store.write_study_evidence_artifact(
+            content,
+            study_id=study.study_id,
+            filename=source.name,
+        )
+        evidence = StudyEvidenceRecord(
+            evidence_id=self.store.next_id("study-evidence"),
+            study_id=study.study_id,
+            cohort_id=study.cohort_id,
+            treatment=study.target_checkpoint_name,
+            source_kind="exp2_source_projection",
+            subject_sha=str(binding["subject_sha"]),
+            binding_digest=str(binding["record_digest"]),
+            source_record_digest=bundle.record_digest,
+            artifact_path=str(artifact),
+            artifact_sha256=artifact_sha,
+        )
+        metric_source = Path(metric_path)
+        if metric_source.is_symlink():
+            raise OperatorGovernanceError(
+                "Exp2 H0 metric cannot be redirected"
+            )
+        metric_source = metric_source.resolve()
+        if not metric_source.is_relative_to(trusted_root):
+            raise OperatorGovernanceError(
+                "Exp2 H0 metric must originate in trusted Eval state"
+            )
+        metric_raw = self._load_study_metric_receipt(
+            metric_source.read_bytes()
+        )
+        if (
+            metric_raw.get("study_id") != study.study_id
+            or metric_raw.get("subject_sha") != binding.get("subject_sha")
+            or metric_raw.get("evidence_digest") != bundle.record_digest
+            or metric_raw.get("guard_run_id") != bundle.study_id
+            or metric_raw.get("metrics")
+            != {
+                "apparatus_valid": True,
+                "h0_terminal_coverage": 1.0,
+                "adaptation_feasible": True,
+            }
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 H0 metric contains untrusted or audience-leaking fields"
+            )
+        self.store.write_study_evidence(evidence)
+        metric = self.register_guard_metric_receipt(
+            operator_study_id,
+            receipt_path=metric_source,
+            kind="BASELINE",
+        )
+        initialized = self.initialize_experiment_line(
+            operator_study_id,
+            metric_receipt_id=metric.metric_id,
+        )
+        return {
+            "evidence": evidence.to_dict(),
+            "evidence_reference": self.study_evidence_reference(evidence),
+            "metric": metric.to_dict(),
+            "line": initialized["line"],
+            "checkpoint": initialized["checkpoint"],
+        }
+
     @staticmethod
     def study_evidence_reference(evidence: StudyEvidenceRecord) -> str:
         return f"study-evidence:{evidence.evidence_id}"
@@ -1299,7 +1583,8 @@ class OperatorGovernanceService:
                 record.study_id != study.study_id
                 or record.cohort_id != study.cohort_id
                 or record.treatment != study.target_checkpoint_name
-                or record.source_kind != "optimization_case"
+                or record.source_kind
+                not in {"optimization_case", "exp2_source_projection"}
                 or record.subject_sha != expected_subject_sha
             ):
                 raise OperatorGovernanceError(
@@ -1309,7 +1594,17 @@ class OperatorGovernanceService:
                 Path(record.artifact_path),
                 label="registered Optimization evidence",
             )
-            if (
+            if record.source_kind == "exp2_source_projection":
+                from autobugfix.eval.benchmarks.exp2_resume import (
+                    Exp2SourceProjectionBundle,
+                )
+
+                bundle = Exp2SourceProjectionBundle.from_dict(report)
+                if bundle.record_digest != record.source_record_digest:
+                    raise OperatorGovernanceError(
+                        "registered Exp2 source evidence digest drift"
+                    )
+            elif (
                 report.get("record_digest") != record.source_record_digest
                 or report.get("study_binding_digest") != record.binding_digest
                 or report.get("executed_subject_sha") != record.subject_sha
@@ -1530,6 +1825,8 @@ class OperatorGovernanceService:
         primary_model: str = "gpt-5.4-mini",
         target_checkpoint_name: str = "H_bug",
         memory_root: Path | str | None = None,
+        empty_memory_fixture: bool = False,
+        guard_root: Path | str | None = None,
     ) -> StudyRecord:
         policy = self.policy()
         if not policy.trusted:
@@ -1574,18 +1871,63 @@ class OperatorGovernanceService:
                 "canonical approved active Memory root must not be a symlink"
             )
         canonical_memory = canonical_memory_path.resolve()
-        memory = Path(memory_root) if memory_root is not None else canonical_memory_path
-        if not memory.is_absolute():
-            memory = self.project_root / memory
-        if memory.is_symlink():
+        if empty_memory_fixture and memory_root is None:
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory fixture requires an explicit Memory root"
+            )
+        if empty_memory_fixture and guard_root is None:
+            raise OperatorGovernanceError(
+                "Exp2 empty Memory fixture requires an explicit Guard root"
+            )
+        memory_source = (
+            Path(memory_root) if memory_root is not None else canonical_memory_path
+        )
+        if not memory_source.is_absolute():
+            memory_source = self.project_root / memory_source
+        if memory_source.is_symlink():
             raise OperatorGovernanceError(
                 "study Memory root must not be a symlink"
             )
-        memory = memory.resolve()
-        if memory != canonical_memory:
+        memory = memory_source.resolve()
+        if empty_memory_fixture:
+            guard_source = Path(guard_root).expanduser()
+            try:
+                resolved_guard_root = guard_source.resolve(strict=True)
+            except OSError as exc:
+                raise OperatorGovernanceError(
+                    "Exp2 Guard root must be an absolute real directory"
+                ) from exc
+            if (
+                not guard_source.is_absolute()
+                or guard_source != resolved_guard_root
+                or not resolved_guard_root.is_dir()
+            ):
+                raise OperatorGovernanceError(
+                    "Exp2 Guard root must be an absolute real directory"
+                )
+            protected_memory_roots = exp2_protected_memory_roots(
+                self.project_root,
+                self.config,
+                guard_root=resolved_guard_root,
+            )
+            if any(
+                memory == protected
+                or memory.is_relative_to(protected)
+                or protected.is_relative_to(memory)
+                for protected in protected_memory_roots
+            ):
+                raise OperatorGovernanceError(
+                    "Exp2 empty Memory root overlaps protected or canonical state"
+                )
+            expected_memory_digest = self.validate_exp2_empty_memory_root(
+                memory_source
+            )
+        elif memory != canonical_memory:
             raise OperatorGovernanceError(
                 "study Memory must use the canonical approved active Memory root"
             )
+        else:
+            expected_memory_digest = None
         memory_snapshot: Path | None = None
         manifest_snapshot: Path | None = None
         try:
@@ -1598,6 +1940,13 @@ class OperatorGovernanceService:
                 source=manifest,
             )
             memory_digest = _path_digest(memory_snapshot)
+            if (
+                expected_memory_digest is not None
+                and memory_digest != expected_memory_digest
+            ):
+                raise OperatorGovernanceError(
+                    "Exp2 Study Memory snapshot differs from the empty fixture"
+                )
             cohort_fields = {
                 "base_subject_sha": base_sha,
                 "harness_sha": harness_sha,
@@ -1929,13 +2278,21 @@ class OperatorGovernanceService:
         approver: str,
         confirm_request_digest: str,
         approval_kind: str = "interactive",
+        delegation_note: str | None = None,
     ) -> BudgetGrantRecord:
         request = self.store.read_budget_request(budget_request_id)
         if confirm_request_digest != request.budget_request_digest:
             raise OperatorGovernanceError("budget approval does not confirm the request digest")
-        if approval_kind != "interactive":
+        if approval_kind not in {"interactive", "delegated_agent"}:
             raise OperatorGovernanceError(
-                "budget grants currently accept only digest-bound interactive human attestation"
+                "budget grants accept only digest-bound interactive or recorded delegated attestation"
+            )
+        if approval_kind == "delegated_agent" and (
+            not str(delegation_note or "").strip()
+            or len(str(delegation_note)) > 500
+        ):
+            raise OperatorGovernanceError(
+                "delegated budget approval requires a delegation note recording the standing user instruction"
             )
         study = self.store.read_study(request.study_id)
         if study.policy_digest != digest_payload(self.policy().data):
@@ -1973,6 +2330,11 @@ class OperatorGovernanceService:
             case_concurrency=request.case_concurrency,
             approved_by=approver,
             approval_kind=approval_kind,
+            delegation_note=(
+                str(delegation_note).strip()
+                if approval_kind == "delegated_agent"
+                else None
+            ),
             previous_grant_id=request.previous_grant_id,
             expires_at=expires_at,
         )
@@ -2365,23 +2727,38 @@ class OperatorGovernanceService:
                     raise OperatorGovernanceError(
                         "rollback commit tree does not match checkpoint tree"
                     )
-                profile = (policy.data.get("validation_profiles") or {}).get("full")
-                if not isinstance(profile, dict) or not profile.get("commands"):
-                    raise OperatorGovernanceError("trusted full validation profile is missing")
+                constitution_profiles = (
+                    policy.data.get("validation_profiles") or {}
+                )
+                profile_names = tuple(
+                    self.config.operator.verification.full_profiles or ("full",)
+                )
+                profile_commands = []
+                profile_timeout = 300
+                for profile_name in profile_names:
+                    profile = constitution_profiles.get(profile_name)
+                    if not isinstance(profile, dict) or not profile.get("commands"):
+                        raise OperatorGovernanceError(
+                            "trusted full validation profile is missing"
+                        )
+                    profile_commands.extend(profile["commands"])
+                    profile_timeout = max(
+                        profile_timeout, int(profile.get("timeout_seconds", 300))
+                    )
                 results = run_command_specs(
                     worktree,
                     self.store.artifact_root
                     / request_id
                     / "rollbacks"
                     / rollback_id,
-                    list(profile["commands"]),
+                    profile_commands,
                     values={
                         "base_sha": line.head_sha,
                         "head_sha": result_head,
                         "request_id": request_id,
                         "candidate_root": str(worktree),
                     },
-                    default_timeout_seconds=int(profile.get("timeout_seconds", 300)),
+                    default_timeout_seconds=profile_timeout,
                     name_prefix="rollback-full",
                     process_sandbox=self.config.operator.verification.process_sandbox,
                     require_process_sandbox=self.config.operator.verification.require_process_sandbox,
@@ -2669,6 +3046,7 @@ class OperatorGovernanceService:
                     trusted_policy_source=policy.source,
                     trusted_policy=policy.trusted,
                     phase="merge",
+            production_root=self.project_root if request.experiment_line_id else None,
                     allowed_signers=self.allowed_signers,
                     scope_version=scope_version,
                 )
@@ -2862,6 +3240,686 @@ class OperatorGovernanceService:
                         ["worktree", "remove", "--force", str(integration_root)],
                         check=False,
                     )
+
+    def export_exp2_candidate_transition(
+        self,
+        *,
+        operator_study_id: str,
+        request_id: str,
+        attribution_digest: str,
+    ) -> dict[str, Any]:
+        """Export one immutable Exp2 transition from trusted governance state."""
+
+        from autobugfix.eval.benchmarks.exp2_resume import (
+            Exp2AttributionHypothesis,
+            Exp2CandidateBinding,
+            Exp2CandidateTransitionReceipt,
+        )
+
+        attribution_path = (
+            self.config.operator.artifacts.root
+            / "exp2-attributions"
+            / f"{attribution_digest}.yaml"
+        )
+        if attribution_path.is_symlink() or not attribution_path.is_file():
+            raise OperatorGovernanceError(
+                "Exp2 transition attribution was not issued by Operator"
+            )
+        attribution_raw = yaml.safe_load(
+            attribution_path.read_text(encoding="utf-8")
+        ) or {}
+        if not isinstance(attribution_raw, Mapping):
+            raise OperatorGovernanceError(
+                "Exp2 transition attribution is invalid"
+            )
+        attribution = Exp2AttributionHypothesis.from_dict(
+            self.verify_exp2_attribution(attribution_raw)
+        )
+        if attribution.operator_study_id != operator_study_id:
+            raise OperatorGovernanceError(
+                "Exp2 transition attribution belongs to another Operator Study"
+            )
+
+        request, _ = self._effective_request(request_id)
+        if request.experiment_line_id is None:
+            raise OperatorGovernanceError(
+                "Exp2 transition requires a line-bound Operator request"
+            )
+        line = self.store.read_experiment_line(request.experiment_line_id)
+        study = self.store.read_study(operator_study_id)
+        if line.study_id != study.study_id or line.line_id != study.line_id:
+            raise OperatorGovernanceError(
+                "Exp2 transition request belongs to another Operator Study"
+            )
+        manifest = self._load_operator_yaml(
+            Path(str(study.manifest_snapshot_path or "")),
+            label="Exp2 Operator Study manifest",
+        )
+        subject_runtime = manifest.get("subject_runtime")
+        if not isinstance(subject_runtime, Mapping):
+            raise OperatorGovernanceError(
+                "Exp2 Operator Study manifest lacks subject runtime authority"
+            )
+        runtime_digest = str(subject_runtime.get("record_digest") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", runtime_digest):
+            raise OperatorGovernanceError(
+                "Exp2 Operator Study runtime digest is invalid"
+            )
+        integrations = [
+            item
+            for item in self.store.read_integrations(line.line_id)
+            if item.kind == "CANDIDATE" and item.request_id == request_id
+        ]
+        if len(integrations) != 1:
+            raise OperatorGovernanceError(
+                "Exp2 transition requires exactly one request-bound candidate integration"
+            )
+        integration = integrations[0]
+        if (
+            line.head_sha != integration.result_head_sha
+            or integration.expected_generation != 0
+            or line.generation != 1
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 transition permits exactly one integrated revision"
+            )
+        grant = self.store.read_budget_grant(
+            str(integration.budget_grant_id or "")
+        )
+        if (
+            grant.study_id != study.study_id
+            or grant.grant_digest != integration.budget_digest
+            or request.budget_grant_id != grant.grant_id
+            or request.budget_grant_digest != grant.grant_digest
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 transition budget provenance is invalid"
+            )
+        writer_runs = [
+            item
+            for item in self.store.read_writer_runs(request_id)
+            if item.status == "COMPLETED"
+        ]
+        checks = [
+            item
+            for item in self.store.read_check_runs(request_id)
+            if item.status == "PASSED"
+        ]
+        fast_checks = [item for item in checks if item.mode == "fast"]
+        full_checks = [item for item in checks if item.mode == "full"]
+        if not writer_runs or not fast_checks or not full_checks:
+            raise OperatorGovernanceError(
+                "Exp2 transition lacks Writer, fast-check, or full-check evidence"
+            )
+        writer = writer_runs[-1]
+        fast = fast_checks[-1]
+        full = full_checks[-1]
+        snapshot = self._snapshot(request_id, request)
+        if (
+            snapshot.patch_digest != integration.patch_digest
+            or full.patch_digest != integration.patch_digest
+            or full.head_sha != snapshot.head_sha
+            or writer.patch_digest != integration.patch_digest
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 transition Writer/check/integration evidence is stale"
+            )
+        usage = [
+            entry
+            for item in self.store.read_budget_grants(study.study_id)
+            for entry in self.store.read_usage_entries(item.grant_id)
+        ]
+        if not usage or any(item.status == "RESERVED" for item in usage):
+            raise OperatorGovernanceError(
+                "Exp2 transition lacks terminal host-observed usage"
+            )
+        allowed = tuple(attribution.execution_scope)
+        requested = tuple(request.planned_paths)
+        actual = tuple(snapshot.changed_files)
+        if (
+            not allowed
+            or not requested
+            or not actual
+            or not set(requested).issubset(allowed)
+            or not set(actual).issubset(allowed)
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 transition changed paths escape the frozen Execution allowlist"
+            )
+        eval_binding = self.guard_study_binding(
+            operator_study_id,
+            kind="CANDIDATE",
+            terminalize=True,
+        )
+        eval_binding_path = self._write_exp2_operator_record(
+            "exp2-study-bindings",
+            eval_binding,
+        )
+        candidate_digests = self._experiment_digests_at_subject(
+            study_id=study.study_id,
+            subject_sha=integration.result_head_sha,
+            primary_model=study.primary_model,
+        )
+        binding = Exp2CandidateBinding(
+            study_id=attribution.study_id,
+            parent_sha=integration.expected_head_sha,
+            parent_tree=rev_parse(
+                self.project_root,
+                f"{integration.expected_head_sha}^{{tree}}",
+            ),
+            candidate_sha=integration.result_head_sha,
+            candidate_tree=integration.result_tree_sha,
+            candidate_diff_digest=integration.patch_digest,
+            allowlist_digest=digest_payload(
+                {"allowed_paths": list(allowed)}
+            ),
+            scope_digest=digest_payload(
+                {
+                    "requested_paths": list(requested),
+                    "actual_paths": list(actual),
+                }
+            ),
+            operator_policy_digest=study.policy_digest,
+            memory_fixture_digest=study.memory_digest,
+            operator_role_skill_digest=candidate_digests[
+                "operator_role_skill_digest"
+            ],
+            execution_role_skill_digest=candidate_digests[
+                "execution_role_skill_digest"
+            ],
+            runtime_digest=runtime_digest,
+            request_digest=request.request_digest,
+            integration_digest=integration.to_dict()["record_digest"],
+        )
+        receipt = Exp2CandidateTransitionReceipt(
+            study_id=attribution.study_id,
+            issuer="operator-governance-service-v4",
+            attribution_digest=attribution_digest,
+            source_projection_bundle_digest=(
+                attribution.source_projection_bundle_digest
+            ),
+            operator_study_id=study.study_id,
+            line_id=line.line_id,
+            request_id=request.request_id,
+            request_digest=request.request_digest,
+            grant_id=grant.grant_id,
+            grant_digest=grant.grant_digest,
+            writer_run_id=writer.run_id,
+            writer_run_digest=writer.to_dict()["record_digest"],
+            fast_check_digest=fast.to_dict()["record_digest"],
+            full_check_digest=full.to_dict()["record_digest"],
+            integration_id=integration.integration_id,
+            integration_digest=integration.to_dict()["record_digest"],
+            usage_digest=digest_payload(
+                {"usage": [item.to_dict() for item in usage]}
+            ),
+            eval_study_binding_path=str(eval_binding_path),
+            eval_study_binding_digest=str(eval_binding["record_digest"]),
+            requested_paths=requested,
+            allowed_paths=allowed,
+            actual_paths=actual,
+            binding=binding,
+        )
+        record = receipt.to_dict()
+        path = self._write_exp2_operator_record(
+            "exp2-candidate-transitions",
+            record,
+        )
+        return {**record, "artifact_path": str(path)}
+
+    def export_exp2_h0_binding(self, operator_study_id: str) -> dict[str, Any]:
+        """Export the immutable pre-line H0 Study binding consumed by Exp2."""
+
+        binding = self.guard_study_binding(
+            operator_study_id,
+            kind="BASELINE",
+        )
+        path = self._write_exp2_operator_record(
+            "exp2-study-bindings",
+            binding,
+        )
+        return {**binding, "artifact_path": str(path)}
+
+    def export_exp2_attribution(
+        self,
+        *,
+        exp2_study_id: str,
+        operator_study_id: str,
+        evidence_id: str,
+        expected_mechanism: str,
+        execution_scope: Iterable[str],
+        validation_plan: Iterable[str],
+        hypothesis: str,
+    ) -> dict[str, Any]:
+        """Bind an Operator-supervisor hypothesis to source-only Exp2 evidence."""
+
+        from autobugfix.eval.benchmarks.exp2_resume import (
+            Exp2AttributionHypothesis,
+            Exp2SourceProjectionBundle,
+        )
+
+        evidence = self.store.read_study_evidence(evidence_id)
+        if (
+            evidence.study_id != operator_study_id
+            or evidence.source_kind != "exp2_source_projection"
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 attribution evidence belongs to another Study or audience"
+            )
+        raw = self._load_operator_yaml(
+            Path(evidence.artifact_path),
+            label="Exp2 source projection evidence",
+        )
+        bundle = Exp2SourceProjectionBundle.from_dict(raw)
+        if bundle.record_digest != evidence.source_record_digest:
+            raise OperatorGovernanceError(
+                "Exp2 source projection evidence digest drift"
+            )
+        item = Exp2AttributionHypothesis(
+            study_id=exp2_study_id,
+            issuer="operator-governance-service-v4",
+            operator_study_id=operator_study_id,
+            evidence_id=evidence.evidence_id,
+            evidence_digest=evidence.to_dict()["record_digest"],
+            author_role="operator_supervisor",
+            source_projection_bundle_digest=bundle.record_digest,
+            supporting_receipt_digests=tuple(
+                projection.receipt_digest
+                for projection in bundle.projections
+            ),
+            expected_mechanism=expected_mechanism,
+            execution_scope=tuple(execution_scope),
+            validation_plan=tuple(validation_plan),
+            hypothesis=hypothesis,
+        )
+        record = item.to_dict()
+        path = self._write_exp2_operator_record(
+            "exp2-attributions",
+            record,
+        )
+        return {**record, "artifact_path": str(path)}
+
+    def verify_exp2_attribution(
+        self,
+        attribution: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Verify a persisted source-only Exp2 attribution."""
+
+        from autobugfix.eval.benchmarks.exp2_resume import (
+            Exp2AttributionHypothesis,
+            Exp2SourceProjectionBundle,
+        )
+
+        item = Exp2AttributionHypothesis.from_dict(attribution)
+        path = (
+            self.config.operator.artifacts.root
+            / "exp2-attributions"
+            / f"{item.record_digest}.yaml"
+        )
+        if path.is_symlink() or not path.is_file():
+            raise OperatorGovernanceError(
+                "Exp2 attribution was not exported by Operator"
+            )
+        stored = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        evidence = self.store.read_study_evidence(item.evidence_id)
+        source = self._load_operator_yaml(
+            Path(evidence.artifact_path),
+            label="Exp2 source projection evidence",
+        )
+        bundle = Exp2SourceProjectionBundle.from_dict(source)
+        if (
+            stored != item.to_dict()
+            or evidence.study_id != item.operator_study_id
+            or evidence.to_dict()["record_digest"] != item.evidence_digest
+            or evidence.source_kind != "exp2_source_projection"
+            or bundle.record_digest
+            != item.source_projection_bundle_digest
+            or tuple(
+                projection.receipt_digest
+                for projection in bundle.projections
+            )
+            != item.supporting_receipt_digests
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 attribution provenance no longer verifies"
+            )
+        return item.to_dict()
+
+    def verify_exp2_candidate_transition(
+        self,
+        transition: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Revalidate an exported Exp2 transition against current trusted state."""
+
+        from autobugfix.eval.benchmarks.exp2_resume import (
+            Exp2AttributionHypothesis,
+            Exp2CandidateTransitionReceipt,
+        )
+
+        item = Exp2CandidateTransitionReceipt.from_dict(transition)
+        stored_path = (
+            self.config.operator.artifacts.root
+            / "exp2-candidate-transitions"
+            / f"{item.record_digest}.yaml"
+        )
+        if stored_path.is_symlink() or not stored_path.is_file():
+            raise OperatorGovernanceError(
+                "Exp2 candidate transition was not exported by Operator"
+            )
+        stored = yaml.safe_load(stored_path.read_text(encoding="utf-8")) or {}
+        if stored != item.to_dict():
+            raise OperatorGovernanceError(
+                "Exp2 candidate transition differs from the Operator artifact"
+            )
+        attribution_path = (
+            self.config.operator.artifacts.root
+            / "exp2-attributions"
+            / f"{item.attribution_digest}.yaml"
+        )
+        if attribution_path.is_symlink() or not attribution_path.is_file():
+            raise OperatorGovernanceError(
+                "Exp2 candidate transition attribution is missing"
+            )
+        attribution_raw = yaml.safe_load(
+            attribution_path.read_text(encoding="utf-8")
+        ) or {}
+        if not isinstance(attribution_raw, Mapping):
+            raise OperatorGovernanceError(
+                "Exp2 candidate transition attribution is invalid"
+            )
+        attribution = Exp2AttributionHypothesis.from_dict(
+            self.verify_exp2_attribution(attribution_raw)
+        )
+        if (
+            attribution.study_id != item.study_id
+            or attribution.operator_study_id != item.operator_study_id
+            or attribution.source_projection_bundle_digest
+            != item.source_projection_bundle_digest
+            or tuple(attribution.execution_scope) != item.requested_paths
+            or tuple(attribution.execution_scope) != item.allowed_paths
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 candidate transition attribution binding drift"
+            )
+        request = self.store.read_request(item.request_id)
+        integration = self.store.read_integration(item.integration_id)
+        grant = self.store.read_budget_grant(item.grant_id)
+        writer = self.store.read_writer_run(item.writer_run_id)
+        checks = self.store.read_check_runs(item.request_id)
+        usage = [
+            entry
+            for candidate_grant in self.store.read_budget_grants(
+                item.operator_study_id
+            )
+            for entry in self.store.read_usage_entries(candidate_grant.grant_id)
+        ]
+        study = self.store.read_study(item.operator_study_id)
+        manifest = self._load_operator_yaml(
+            Path(str(study.manifest_snapshot_path or "")),
+            label="Exp2 Operator Study manifest",
+        )
+        subject_runtime = manifest.get("subject_runtime")
+        if (
+            request.request_digest != item.request_digest
+            or integration.to_dict()["record_digest"]
+            != item.integration_digest
+            or integration.kind != "CANDIDATE"
+            or integration.result_head_sha != item.binding.candidate_sha
+            or integration.result_tree_sha != item.binding.candidate_tree
+            or integration.expected_head_sha != item.binding.parent_sha
+            or integration.patch_digest != item.binding.candidate_diff_digest
+            or grant.grant_digest != item.grant_digest
+            or writer.to_dict()["record_digest"] != item.writer_run_digest
+            or not any(
+                check.mode == "fast"
+                and check.status == "PASSED"
+                and check.to_dict()["record_digest"] == item.fast_check_digest
+                for check in checks
+            )
+            or not any(
+                check.mode == "full"
+                and check.status == "PASSED"
+                and check.to_dict()["record_digest"] == item.full_check_digest
+                for check in checks
+            )
+            or not any(
+                digest_payload(
+                    {"usage": [entry.to_dict() for entry in usage[:count]]}
+                )
+                == item.usage_digest
+                for count in range(len(usage) + 1)
+            )
+            or not isinstance(subject_runtime, Mapping)
+            or subject_runtime.get("record_digest")
+            != item.binding.runtime_digest
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 candidate transition provenance no longer verifies"
+            )
+        eval_binding_path = Path(item.eval_study_binding_path)
+        if eval_binding_path.is_symlink() or not eval_binding_path.is_file():
+            raise OperatorGovernanceError(
+                "Exp2 candidate Eval binding is missing"
+            )
+        eval_binding = yaml.safe_load(
+            eval_binding_path.read_text(encoding="utf-8")
+        ) or {}
+        if (
+            not isinstance(eval_binding, Mapping)
+            or eval_binding.get("record_digest")
+            != item.eval_study_binding_digest
+            or self.verify_guard_study_binding(eval_binding) != dict(eval_binding)
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 candidate Eval binding no longer verifies"
+            )
+        candidate_digests = self._experiment_digests_at_subject(
+            study_id=item.operator_study_id,
+            subject_sha=item.binding.candidate_sha,
+            primary_model=grant.model,
+        )
+        if (
+            candidate_digests["operator_role_skill_digest"]
+            != item.binding.operator_role_skill_digest
+            or candidate_digests["execution_role_skill_digest"]
+            != item.binding.execution_role_skill_digest
+            or item.binding.allowlist_digest
+            != digest_payload({"allowed_paths": list(item.allowed_paths)})
+            or item.binding.scope_digest
+            != digest_payload(
+                {
+                    "requested_paths": list(item.requested_paths),
+                    "actual_paths": list(item.actual_paths),
+                }
+            )
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 candidate transition scope or role-skill identity drift"
+            )
+        return item.to_dict()
+
+    def export_exp2_rollback_receipt(
+        self,
+        transition: Mapping[str, Any],
+        *,
+        rollback_authorization_path: Path | str,
+        reason: str,
+        push_remote: bool = False,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        """Roll back an Exp2 candidate and export the trusted rollback receipt."""
+
+        from autobugfix.eval.benchmarks.exp2_resume import (
+            Exp2CandidateTransitionReceipt,
+            Exp2RollbackAuthorization,
+            Exp2RollbackReceipt,
+        )
+
+        candidate = Exp2CandidateTransitionReceipt.from_dict(
+            self.verify_exp2_candidate_transition(transition)
+        )
+        authorization_source = Path(rollback_authorization_path)
+        if authorization_source.is_symlink():
+            raise OperatorGovernanceError(
+                "Exp2 rollback authorization cannot be redirected"
+            )
+        authorization_source = authorization_source.resolve()
+        trusted_exp2_root = (
+            self.config.eval.benchmarks.trusted_case_root / "exp2"
+        ).resolve()
+        if (
+            not authorization_source.is_file()
+            or not authorization_source.is_relative_to(trusted_exp2_root)
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 rollback authorization is outside trusted Eval state"
+            )
+        raw_authorization = self._load_operator_yaml(
+            authorization_source,
+            label="Exp2 rollback authorization",
+        )
+        authorization = Exp2RollbackAuthorization.from_dict(raw_authorization)
+        if (
+            authorization.study_id != candidate.study_id
+            or authorization.candidate_transition_digest
+            != candidate.record_digest
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 rollback authorization differs from the candidate"
+            )
+        study = self.store.read_study(candidate.operator_study_id)
+        result = self.rollback_experiment_line(
+            candidate.line_id,
+            study.base_checkpoint_id,
+            reason=reason,
+            push_remote=push_remote,
+            actor=actor,
+        )
+        integration = result.get("integration")
+        line = result.get("line")
+        if not isinstance(integration, Mapping) or not isinstance(line, Mapping):
+            raise OperatorGovernanceError(
+                "Exp2 rollback did not return trusted line evidence"
+            )
+        rollback_payload = {
+            "schema": "autobugfix-exp2-operator-rollback-artifact-v2",
+            "candidate_transition_digest": candidate.record_digest,
+            "rollback_authorization_digest": authorization.record_digest,
+            "rollback_authorization_path": str(authorization_source),
+            "integration": dict(integration),
+            "line": dict(line),
+            "checkpoint": dict(result.get("checkpoint") or {}),
+            "validation": list(result.get("validation") or []),
+            "remote": dict(result.get("remote") or {}),
+        }
+        rollback_artifact = {
+            **rollback_payload,
+            "record_digest": digest_payload(rollback_payload),
+        }
+        self._write_exp2_operator_record(
+            "exp2-rollback-artifacts",
+            rollback_artifact,
+        )
+        receipt = Exp2RollbackReceipt(
+            study_id=candidate.study_id,
+            issuer="operator-governance-service-v4",
+            candidate_transition_digest=candidate.record_digest,
+            rollback_authorization_digest=authorization.record_digest,
+            line_id=candidate.line_id,
+            rollback_integration_id=str(integration["integration_id"]),
+            rollback_integration_digest=str(integration["record_digest"]),
+            post_rollback_head_sha=str(line["head_sha"]),
+            post_rollback_tree_sha=str(integration["result_tree_sha"]),
+            rollback_artifact_digest=str(
+                rollback_artifact["record_digest"]
+            ),
+        )
+        record = receipt.to_dict()
+        path = self._write_exp2_operator_record(
+            "exp2-rollback-receipts",
+            record,
+        )
+        return {**record, "artifact_path": str(path)}
+
+    def verify_exp2_rollback_receipt(
+        self,
+        rollback: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Verify a persisted Exp2 rollback against Git and Operator state."""
+
+        from autobugfix.eval.benchmarks.exp2_resume import Exp2RollbackReceipt
+
+        item = Exp2RollbackReceipt.from_dict(rollback)
+        stored_path = (
+            self.config.operator.artifacts.root
+            / "exp2-rollback-receipts"
+            / f"{item.record_digest}.yaml"
+        )
+        if stored_path.is_symlink() or not stored_path.is_file():
+            raise OperatorGovernanceError(
+                "Exp2 rollback receipt was not exported by Operator"
+            )
+        stored = yaml.safe_load(stored_path.read_text(encoding="utf-8")) or {}
+        integration = self.store.read_integration(
+            item.rollback_integration_id
+        )
+        line = self.store.read_experiment_line(item.line_id)
+        artifact_path = (
+            self.config.operator.artifacts.root
+            / "exp2-rollback-artifacts"
+            / f"{item.rollback_artifact_digest}.yaml"
+        )
+        if (
+            stored != item.to_dict()
+            or integration.kind != "ROLLBACK"
+            or integration.to_dict()["record_digest"]
+            != item.rollback_integration_digest
+            or line.head_sha != item.post_rollback_head_sha
+            or rev_parse(self.project_root, f"{line.head_sha}^{{tree}}")
+            != item.post_rollback_tree_sha
+            or artifact_path.is_symlink()
+            or not artifact_path.is_file()
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 rollback receipt no longer verifies"
+            )
+        artifact = yaml.safe_load(
+            artifact_path.read_text(encoding="utf-8")
+        ) or {}
+        if (
+            not isinstance(artifact, Mapping)
+            or self._verified_operator_record(
+                artifact,
+                label="Exp2 rollback artifact",
+            )
+            != dict(artifact)
+            or artifact.get("record_digest")
+            != item.rollback_artifact_digest
+            or artifact.get("candidate_transition_digest")
+            != item.candidate_transition_digest
+            or artifact.get("rollback_authorization_digest")
+            != item.rollback_authorization_digest
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 rollback artifact differs from the receipt"
+            )
+        authorization_path = Path(
+            str(artifact.get("rollback_authorization_path") or "")
+        )
+        authorization = self._load_operator_yaml(
+            authorization_path,
+            label="Exp2 rollback authorization",
+        )
+        if (
+            authorization.get("record_digest")
+            != item.rollback_authorization_digest
+            or authorization.get("candidate_transition_digest")
+            != item.candidate_transition_digest
+        ):
+            raise OperatorGovernanceError(
+                "Exp2 rollback authorization no longer verifies"
+            )
+        return item.to_dict()
 
     def _actor(self, actor: str | None) -> str:
         return actor or getpass.getuser()
@@ -3306,6 +4364,7 @@ class OperatorGovernanceService:
                         self.project_root,
                         request.performance_baseline,
                         request.base_sha,
+                        allow_subject_baseline=bool(request.experiment_line_id),
                     )
                 except OperatorMetricsError as exc:
                     violations.append(str(exc))
@@ -3457,12 +4516,13 @@ class OperatorGovernanceService:
         profile: str | None = None,
         values: Mapping[str, str] | None = None,
         notes: str = "",
+        base_ref: str | None = None,
     ) -> dict[str, Any]:
         if not self.config.operator.experiments.enabled:
             raise OperatorGovernanceError("Operator experiments are disabled")
         profile_name, profile_data, supplied = self._experiment_profile(profile, values)
-        trusted_ref = self.config.operator.experiments.trusted_ref
-        base_sha = rev_parse(self.project_root, trusted_ref)
+        measurement_ref = base_ref or self.config.operator.experiments.trusted_ref
+        base_sha = rev_parse(self.project_root, measurement_ref)
         baseline_id = self.store.next_id("baseline")
         workspace = (
             self.config.operator.worktrees.root / ".baselines" / baseline_id / "candidate"
@@ -3548,7 +4608,12 @@ class OperatorGovernanceService:
     def compare_experiment_baseline(self, request_id: str, name: str) -> dict[str, Any]:
         request, _ = self._effective_request(request_id)
         snapshot = self._snapshot(request_id, request)
-        baseline = baseline_for_request(self.project_root, name, request.base_sha)
+        baseline = baseline_for_request(
+            self.project_root,
+            name,
+            request.base_sha,
+            allow_subject_baseline=bool(request.experiment_line_id),
+        )
         matching = [
             item.get("metric_receipt")
             for item in self.store.read_experiments(request_id)
@@ -3569,6 +4634,7 @@ class OperatorGovernanceService:
             matching[-1],
             self.policy().data.get("metrics") or {},
             request_base_sha=request.base_sha,
+            allow_subject_baseline=bool(request.experiment_line_id),
         )
 
     @_leased_request
@@ -4471,6 +5537,7 @@ class OperatorGovernanceService:
             phase="postflight",
             allowed_signers=self.allowed_signers,
             scope_version=scope_version,
+            production_root=self.project_root if request.experiment_line_id else None,
         )
         if not policy.trusted:
             decision.violations.append("bootstrap policy cannot produce VERIFIED authority")
@@ -4590,6 +5657,7 @@ class OperatorGovernanceService:
                     self.project_root,
                     request.performance_baseline,
                     request.base_sha,
+                    allow_subject_baseline=bool(request.experiment_line_id),
                 )
                 matching_receipts = [
                     item.get("metric_receipt")
@@ -4611,6 +5679,7 @@ class OperatorGovernanceService:
                     matching_receipts[-1],
                     policy.data.get("metrics") or {},
                     request_base_sha=request.base_sha,
+                    allow_subject_baseline=bool(request.experiment_line_id),
                 )
             except OperatorMetricsError as exc:
                 regression = {"ok": False, "failures": [str(exc)], "comparisons": {}}
@@ -4776,6 +5845,7 @@ class OperatorGovernanceService:
                     self.project_root,
                     request.performance_baseline,
                     request.base_sha,
+                    allow_subject_baseline=bool(request.experiment_line_id),
                 )
                 snapshot = self._snapshot(request_id, request)
                 matching = [
@@ -5084,6 +6154,7 @@ class OperatorGovernanceService:
             trusted_policy_source=policy.source,
             trusted_policy=policy.trusted,
             phase="merge",
+            production_root=self.project_root if request.experiment_line_id else None,
             allowed_signers=self.allowed_signers,
             expected_github_repository=repository,
             expected_pull_request=int(data["pull_request"]),

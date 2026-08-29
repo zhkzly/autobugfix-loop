@@ -1,0 +1,33 @@
+schema: autobugfix-exp2-source-projection-bundle-v3
+study_id: exp2-pilot-d007891-v3r4
+h0_receipt_digest: b9259cbf8c284694f694d576ef3a7e84102a8236885b875befe075e93cf5ae08
+feasibility: passed
+projections:
+- case_id: astropy__astropy-13398
+  receipt_digest: 18e5d03fb4d01e21550ea112b33b0912cf07325fb335516438e69cdee9290cea
+  terminal_label: unresolved
+  failure_stage: official_eval
+- case_id: matplotlib__matplotlib-24627
+  receipt_digest: 20901302fe334c7b21a512bca7e3516caab21e69ce9c5e25fd04bd4f2e46a19c
+  terminal_label: unresolved
+  failure_stage: visible_verifier
+- case_id: sympy__sympy-13091
+  receipt_digest: 3c785bb18afa0b849b094cbe91270ebd6489f9553f1a993b5020a0d2d9fda380
+  terminal_label: unresolved
+  failure_stage: official_eval
+- case_id: mwaskom__seaborn-3187
+  receipt_digest: 050494325879c9775a5dee5152a62e37c099044d07adf1164727761a585fad00
+  terminal_label: unresolved
+  failure_stage: official_eval
+- case_id: pytest-dev__pytest-10051
+  receipt_digest: f3a3cd1690b45bd4cabaec793aadada2c034fffccab23605f6dee2ddcefe67b1
+  terminal_label: unresolved
+  failure_stage: official_eval
+- case_id: sphinx-doc__sphinx-9229
+  receipt_digest: 4b16a39307a3398ae92573fe50d47237b88e367872c118d57a57dbcfe3973deb
+  terminal_label: unresolved
+  failure_stage: official_eval
+projection_scope: evolution_failures
+audience: operator
+created_at: '2026-08-28T02:01:15Z'
+record_digest: e2b7b0ada036359d32377fdf1cfb7c13d634887f4fb8144c044ba624e09f77e0

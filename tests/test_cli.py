@@ -53,6 +53,43 @@ def test_eval_cli_does_not_expose_a_production_fake_backend():
         )
 
 
+def test_exp2_cli_exposes_v2_build_init_and_operator_handoff_only() -> None:
+    parser = build_parser()
+    init = parser.parse_args(
+        [
+            "eval",
+            "exp2",
+            "init",
+            "--study-id",
+            "calibration-v2",
+            "--study-kind",
+            "calibration",
+            "--plan-v2",
+            "plan.yaml",
+            "--protocol-v2",
+            "protocol.yaml",
+        ]
+    )
+    export = parser.parse_args(
+        [
+            "eval",
+            "exp2",
+            "export-candidate",
+            "--study-id",
+            "pilot-v2",
+            "--operator-study-id",
+            "operator-study",
+            "--request-id",
+            "request-1",
+        ]
+    )
+
+    assert init.study_kind == "calibration"
+    assert init.plan_v2 == "plan.yaml"
+    assert export.exp2_action == "export-candidate"
+    assert not hasattr(export, "record")
+
+
 def test_memory_approve_skill_cli_requires_human_review_binding() -> None:
     args = build_parser().parse_args(
         [

@@ -1,0 +1,25 @@
+schema: autobugfix-exp2-source-projection-bundle-v3
+study_id: exp2-pilot-d007891-v3r3
+h0_receipt_digest: 45b7140fa84e9e52daa187e965235d1fca6fdd3171f569c9c125e4777f300a53
+feasibility: passed
+projections:
+- case_id: astropy__astropy-13398
+  receipt_digest: 365d5bc6381e16a6295817e743acc7083240aed7f3f271f495e566338a4120c9
+  terminal_label: unresolved
+  failure_stage: official_eval
+- case_id: sympy__sympy-13091
+  receipt_digest: 729fdcdf433f39587b68c849e79e3fe366550c1e8e2c20fbdc8d8c2460d76a76
+  terminal_label: unresolved
+  failure_stage: official_eval
+- case_id: pytest-dev__pytest-10051
+  receipt_digest: daab867589598625494f4befd4355dce86d16edf796d31d862908aa53f96f343
+  terminal_label: unresolved
+  failure_stage: official_eval
+- case_id: sphinx-doc__sphinx-9229
+  receipt_digest: c483c514bc7a53ecfb794a16aa8f9aeba5851e1e359042266eb604cd15e09253
+  terminal_label: unresolved
+  failure_stage: official_eval
+projection_scope: evolution_failures
+audience: operator
+created_at: '2026-08-27T21:06:46Z'
+record_digest: 67abdd746fc07e53863cbfadc859604851dda5eb008ed66d4ced09a3e8b5ada5
