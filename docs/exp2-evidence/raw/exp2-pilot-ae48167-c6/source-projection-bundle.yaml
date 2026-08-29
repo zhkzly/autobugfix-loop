@@ -1,0 +1,16 @@
+schema: autobugfix-exp2-source-projection-bundle-v2
+study_id: exp2-pilot-ae48167-c6
+h0_receipt_digest: 677ebd6b1df4637d27a94334182ab0454efaf96dc8ad92b26d15944ed911b7db
+feasibility: passed
+projections:
+- case_id: astropy__astropy-13398
+  receipt_digest: 528afd26595050710e1e238ef3b09285461ce7119c28d14f0d8a550b8a1cc99d
+  terminal_label: unresolved
+  failure_stage: visible_verifier
+- case_id: django__django-10097
+  receipt_digest: d57ed9fcb22d73cae484bedb9869c91d85296b3836407719655a47b6d49f94a3
+  terminal_label: resolved
+  failure_stage: unknown
+audience: operator
+created_at: '2026-08-24T19:33:58Z'
+record_digest: f7081b474d0773c4597af5fc39df25377638c8467aecef0a554b47d3e80684dc
